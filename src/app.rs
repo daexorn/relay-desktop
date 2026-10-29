@@ -115,6 +115,50 @@ fn key(server: &str, sid: &str) -> String {
 fn label(ui: &mut egui::Ui, s: impl Into<String>, size: f32, color: Color32) -> egui::Response {
     ui.label(RichText::new(s).size(size).color(color))
 }
+fn activity(
+    ui: &mut egui::Ui,
+    title: String,
+    id: impl std::hash::Hash,
+    color: Color32,
+    add: impl FnOnce(&mut egui::Ui),
+) {
+    let id = ui.make_persistent_id(id);
+    let mut state =
+        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
+    ui.scope(|ui| {
+        ui.spacing_mut().interact_size.y = 24.;
+        ui.horizontal(|ui| {
+            let width = (ui.available_width() - 70.).max(80.);
+            let response = ui.add_sized(
+                Vec2::new(width, 24.),
+                egui::Label::new(RichText::new(&title).size(12.).color(color))
+                    .halign(Align::Min)
+                    .truncate()
+                    .sense(egui::Sense::click()),
+            );
+            let details = ui.add_sized(
+                Vec2::new(62., 24.),
+                egui::Button::new(
+                    RichText::new(if state.is_open() {
+                        "Скрыть"
+                    } else {
+                        "Детали"
+                    })
+                    .size(11.),
+                )
+                .frame(false),
+            );
+            if response.on_hover_text(&title).clicked() || details.clicked() {
+                state.toggle(ui);
+            }
+        });
+    });
+    state.show_body_unindented(ui, |ui| {
+        ui.add_space(5.);
+        add(ui);
+        ui.add_space(5.);
+    });
+}
 impl RelayApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let (settings, error) = match storage::load() {
@@ -178,7 +222,7 @@ impl RelayApp {
             if args.iter().any(|a| a == "--demo-lists") {
                 if let Some(k) = app.current_key() {
                     let c = app.chats.get_mut(&k).unwrap();
-                    c.messages=vec![Message{role:"user".into(),text:"Как прикрепить файл к сессии?".into(),..Default::default()},Message{role:"assistant".into(),text:"Прикрепить файл можно прямо в приложении.\n\n1. Нажми **Прикрепить файлы** под полем задачи.\n2. Выбери документ или изображение на компьютере. Несколько файлов можно выбрать вместе.\n3. Отправь сообщение — вложения останутся в этой сессии.\n\nТакже доступны:\n\n- Перетаскивание файлов в окно.\n- Вставка изображения через **Ctrl+V**.\n\nСохранённую сессию можно продолжить в другой день. Контекст и прикреплённые файлы останутся доступны.".into(),..Default::default()}];
+                    c.messages=vec![Message{role:"user".into(),text:"Как прикрепить файл к сессии?".into(),..Default::default()},Message{role:"assistant".into(),text:"Прикрепить файл можно прямо в приложении.\n\n1. Нажми **Прикрепить файлы** под полем задачи.\n2. Выбери документ или изображение на компьютере. Несколько файлов можно выбрать вместе.\n3. Отправь сообщение — вложения останутся в этой сессии.\n\nТакже доступны:\n\n- Перетаскивание файлов в окно.\n- Вставка изображения через **Ctrl+V**.\n\nСохранённую сессию можно продолжить в другой день. Контекст и прикреплённые файлы останутся доступны.\n\n- Длинный путь: `C:\\Users\\Player\\AppData\\Roaming\\Launcher\\profiles\\248a2ae9\\mods\\project-client-0.7.252.jar`. После пути текст должен переноситься внутри сообщения.\n- Ссылка: https://example.com/releases/very-long-project-name-with-a-long-path/downloads/project-client-0.7.252.jar — и пояснение после неё.\n\nОбычный абзац с `settings.json` и длинным именем `professions.json.bak-1018-smithpath-release-original-configuration` тоже должен помещаться в ширину окна.".into(),..Default::default()}];
                 }
             }
             if args.iter().any(|a| a == "--light") {
@@ -1304,58 +1348,63 @@ impl RelayApp {
                             for (index, message) in chat.messages.iter().enumerate() {
                                 ui.push_id(index, |ui| match message.role.as_str() {
                                     "tool" => {
-                                        egui::CollapsingHeader::new(
-                                            RichText::new(format!(
+                                        activity(
+                                            ui,
+                                            format!(
                                                 "{}  ·  {}",
                                                 tool_name(&message.tool),
                                                 model::shorten(
                                                     &model::summary(&message.input)
                                                         .replace('\n', " "),
-                                                    60
+                                                    100
                                                 )
-                                            ))
-                                            .size(12.)
-                                            .color(p.muted),
-                                        )
-                                        .id_salt((index, "tool"))
-                                        .show(ui, |ui| {
-                                            ui.add(
-                                                egui::Label::new(
-                                                    RichText::new(model::summary(&message.input))
+                                            ),
+                                            (index, "tool"),
+                                            p.muted,
+                                            |ui| {
+                                                ui.add(
+                                                    egui::Label::new(
+                                                        RichText::new(model::summary(
+                                                            &message.input,
+                                                        ))
                                                         .monospace()
                                                         .size(12.),
-                                                )
-                                                .selectable(true),
-                                            );
-                                        });
+                                                    )
+                                                    .selectable(true)
+                                                    .wrap(),
+                                                );
+                                            },
+                                        );
                                         ui.add_space(5.);
                                     }
                                     "tool_result" => {
-                                        egui::CollapsingHeader::new(
-                                            RichText::new(if message.failed {
+                                        activity(
+                                            ui,
+                                            if message.failed {
                                                 "Действие не выполнено"
                                             } else {
                                                 "Результат действия"
-                                            })
-                                            .size(12.)
-                                            .color(if message.failed { ACCENT } else { p.muted }),
-                                        )
-                                        .id_salt((index, "result"))
-                                        .show(ui, |ui| {
-                                            egui::ScrollArea::vertical()
-                                                .max_height(240.)
-                                                .id_salt((index, "output"))
-                                                .show(ui, |ui| {
-                                                    ui.add(
-                                                        egui::Label::new(
-                                                            RichText::new(&message.text)
-                                                                .monospace()
-                                                                .size(12.),
-                                                        )
-                                                        .selectable(true),
-                                                    );
-                                                });
-                                        });
+                                            }
+                                            .into(),
+                                            (index, "result"),
+                                            if message.failed { ACCENT } else { p.muted },
+                                            |ui| {
+                                                egui::ScrollArea::vertical()
+                                                    .max_height(240.)
+                                                    .id_salt((index, "output"))
+                                                    .show(ui, |ui| {
+                                                        ui.add(
+                                                            egui::Label::new(
+                                                                RichText::new(&message.text)
+                                                                    .monospace()
+                                                                    .size(12.),
+                                                            )
+                                                            .selectable(true)
+                                                            .wrap(),
+                                                        );
+                                                    });
+                                            },
+                                        );
                                     }
                                     "user" => {
                                         ui.add_space(8.);
@@ -1368,7 +1417,8 @@ impl RelayApp {
                                                 ui.add_space(3.);
                                                 ui.add(
                                                     egui::Label::new(&message.text)
-                                                        .selectable(true),
+                                                        .selectable(true)
+                                                        .wrap(),
                                                 );
                                                 if let Some(files) = chat.sent_images.get(&index) {
                                                     ui.horizontal_wrapped(|ui| {
@@ -1404,6 +1454,8 @@ impl RelayApp {
                                         });
                                         ui.add_space(5.);
                                         ui.scope(|ui| {
+                                            ui.style_mut().wrap_mode =
+                                                Some(egui::TextWrapMode::Wrap);
                                             ui.spacing_mut().item_spacing.y = 4.;
                                             ui.spacing_mut().interact_size.y = 20.;
                                             CommonMarkViewer::new().show(
@@ -1680,7 +1732,8 @@ impl RelayApp {
                             };
                             ui.add(
                                 egui::Label::new(RichText::new(text).monospace().size(12.0))
-                                    .selectable(true),
+                                    .selectable(true)
+                                    .wrap(),
                             );
                         }
                     });

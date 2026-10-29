@@ -131,6 +131,9 @@ impl CommonMarkViewerInternal {
 
         let re = ui.allocate_ui_with_layout(egui::vec2(max_width, 0.0), layout, |ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
+            // Markdown is readable document content, even when the caller uses
+            // Extend for toolbar labels. Do not let paths/URLs grow the viewport.
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
             let height = ui.text_style_height(&TextStyle::Body);
             ui.set_row_height(height);
 
@@ -228,6 +231,9 @@ impl CommonMarkViewerInternal {
                 let max_width = options.max_width(ui);
                 ui.allocate_ui_with_layout(egui::vec2(max_width, 0.0), layout, |ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
+            // Markdown is readable document content, even when the caller uses
+            // Extend for toolbar labels. Do not let paths/URLs grow the viewport.
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                     let scroll_cache = scroll_cache(cache, &source_id);
 
                     // finding the first element that's not in the viewport anymore
@@ -584,7 +590,7 @@ impl CommonMarkViewerInternal {
         } else if let Some(link) = &mut self.link {
             link.text.push(rich_text);
         } else {
-            ui.label(rich_text);
+            ui.add(egui::Label::new(rich_text).wrap());
         }
     }
 

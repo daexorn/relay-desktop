@@ -373,13 +373,14 @@ impl List {
 mod relay_list_layout_tests {
     use super::*;
     use egui::{epaint::Shape,FontData,FontDefinitions,FontFamily,Rect,Vec2};
-    fn render(markdown:&str,width:f32)->Vec<Shape>{
+    fn render(markdown:&str,width:f32)->Vec<Shape>{render_with_wrap(markdown,width,None)}
+    fn render_with_wrap(markdown:&str,width:f32,wrap:Option<egui::TextWrapMode>)->Vec<Shape>{
         let ctx=egui::Context::default();
         let mut fonts=FontDefinitions::default();
         fonts.font_data.insert("relay-test".into(),std::sync::Arc::new(FontData::from_static(include_bytes!("../../../assets/InterVariable.ttf"))));
         fonts.families.get_mut(&FontFamily::Proportional).unwrap().insert(0,"relay-test".into());
         ctx.set_fonts(fonts);
-        let mut style=(*ctx.style()).clone();style.spacing.interact_size.y=42.;ctx.set_style(style);
+        let mut style=(*ctx.style()).clone();style.spacing.interact_size.y=42.;style.wrap_mode=wrap;ctx.set_style(style);
         let mut cache=CommonMarkCache::default();
         let output=ctx.run(egui::RawInput{screen_rect:Some(Rect::from_min_size(egui::Pos2::ZERO,Vec2::new(width,1800.))),..Default::default()},|ctx|{
             egui::CentralPanel::default().show(ctx,|ui|{CommonMarkViewer::new().show(ui,&mut cache,markdown);});
@@ -439,4 +440,20 @@ mod relay_list_layout_tests {
         assert!(heading.galley.size().y>body.galley.size().y*1.2);
         let gap=body.pos.y-heading.pos.y-heading.galley.size().y;assert!((0.0..=8.).contains(&gap),"heading lost spacing structure: {gap}");
     }
+    #[test]
+    fn long_inline_code_urls_and_words_stay_inside_the_viewport(){
+        let token="LongUnbrokenDirectorySegment".repeat(18);
+        let path=format!("/opt/projects/{token}/file.rs");
+        let url=format!("https://example.invalid/{token}?id=123");
+        for width in [240.,420.]{
+            for markdown in [format!("Before `{path}` after."),format!("1. Before `{path}` after.\n2. Second item."),format!("Before {url} after."),format!("1. {url}\n2. Second item."),format!("<{url}>"),format!("[{url}]({url})"),token.clone()]{
+                let shapes=render_with_wrap(&markdown,width,Some(egui::TextWrapMode::Extend));
+                for shape in &shapes{if let Shape::Text(t)=shape{
+                    assert!(!t.galley.elided,"text was truncated at width={width}");
+                    for row in &t.galley.rows{let bounds=row.rect.translate(t.pos.to_vec2());assert!(bounds.right()<=width-7.,"width={width}, text={:?}, row={bounds:?}",t.galley.text());}
+                }}
+            }
+        }
+    }
+
 }
