@@ -1,0 +1,17 @@
+# Phase 1: hidden window renders, menus can be driven, a world loads.
+wait_screen Title 120
+screenshot 01-title
+screen
+test_world
+wait_world 240
+wait 4
+screenshot 02-world
+key key.inventory
+wait 1
+screenshot 03-inventory
+key escape
+wait 1
+command time set noon
+wait 1
+screenshot 04-noon
+quit

@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "id": "relay-testbot",
+  "version": "${version}",
+  "name": "Relay test bot",
+  "description": "Runs a Relay test scenario inside a hidden client and writes screenshots and a report.",
+  "environment": "client",
+  "entrypoints": { "client": ["dev.relay.testbot.TestBot"] },
+  "mixins": ["relay-testbot.mixins.json"],
+  "depends": { "fabricloader": ">=0.16", "minecraft": "~1.21.8", "java": ">=21" }
+}
