@@ -13,6 +13,11 @@ use std::{
 };
 
 const COLUMN: f32 = 292.;
+const FRAME: f32 = 300.;
+const FRAME_HEAD: f32 = 64.;
+const FRAME_GAP: f32 = 40.;
+/// Inside a category frame, work in progress comes first and finished work last.
+const FRAME_STATUSES: [&str; 5] = ["doing", "review", "todo", "backlog", "done"];
 const CELL: f32 = 256.;
 const LABEL: f32 = 228.;
 const GAP: f32 = 18.;
@@ -29,8 +34,16 @@ const SWATCHES: [&str; 16] = [
 
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
+    /// Categories as frames you can put anywhere on the canvas.
+    Canvas,
     Columns,
     Lanes,
+}
+
+struct FrameDrag {
+    id: String,
+    grab: Vec2,
+    pos: Pos2,
 }
 
 struct Drag {
@@ -134,6 +147,11 @@ pub struct BoardView {
     lane_drag: Option<String>,
     /// Preview only: open the category editor on the first frame (focus, palette, delete).
     demo_editor: Option<(Option<String>, bool, bool)>,
+    /// Screen rects of draggable things from the last frame (chips, lane labels).
+    hits: HashMap<String, Rect>,
+    frame_drag: Option<FrameDrag>,
+    /// Frames just dropped, shown in place until the server confirms the move.
+    placed: HashMap<String, Pos2>,
 }
 
 impl Default for BoardView {
@@ -141,7 +159,7 @@ impl Default for BoardView {
         Self {
             selected: None,
             log: false,
-            mode: Mode::Columns,
+            mode: Mode::Canvas,
             filter: None,
             query: String::new(),
             links: false,
@@ -164,6 +182,9 @@ impl Default for BoardView {
             chip_drag: None,
             lane_drag: None,
             demo_editor: None,
+            hits: HashMap::new(),
+            frame_drag: None,
+            placed: HashMap::new(),
         }
     }
 }
@@ -248,6 +269,9 @@ impl BoardView {
     pub fn demo(&mut self, args: &[String]) {
         if args.iter().any(|a| a == "--demo-lanes") {
             self.mode = Mode::Lanes;
+        }
+        if args.iter().any(|a| a == "--demo-columns") {
+            self.mode = Mode::Columns;
         }
         self.links = args.iter().any(|a| a == "--demo-links");
         if let Some(i) = args.iter().position(|a| a == "--demo-categories") {
@@ -402,6 +426,7 @@ fn header(ui: &mut egui::Ui, board: &Board, view: &mut BoardView, p: Palette) {
 
 enum Chip {
     Mode(Mode, &'static str),
+    Arrange,
     Links,
     Search,
     Category(String),
@@ -410,7 +435,12 @@ enum Chip {
 
 /// Fixed-size chips laid out by hand, so they wrap instead of being squeezed or cut off.
 fn chips(ui: &mut egui::Ui, board: &Board, view: &mut BoardView, p: Palette) {
-    let mut items = vec![Chip::Mode(Mode::Columns, "Колонки"), Chip::Mode(Mode::Lanes, "Категории"), Chip::Links, Chip::Search];
+    let mut items = vec![Chip::Mode(Mode::Canvas, "Полотно"), Chip::Mode(Mode::Columns, "Колонки"), Chip::Mode(Mode::Lanes, "Категории")];
+    let arranged = board.categories.iter().any(|c| c["x"].is_number());
+    if view.mode == Mode::Canvas && arranged {
+        items.push(Chip::Arrange);
+    }
+    items.extend([Chip::Links, Chip::Search]);
     items.extend(board.categories.iter().map(|c| Chip::Category(text(&c["id"]))));
     items.push(Chip::AddCategory);
     let font = FontId::proportional(12.);
@@ -420,6 +450,7 @@ fn chips(ui: &mut egui::Ui, board: &Board, view: &mut BoardView, p: Palette) {
     let label = |chip: &Chip| -> String {
         match chip {
             Chip::Mode(_, name) => (*name).into(),
+            Chip::Arrange => "Разложить".into(),
             Chip::Links => "Все связи".into(),
             Chip::Search => String::new(),
             Chip::Category(id) => board.names.get(id).cloned().unwrap_or_default(),
@@ -431,16 +462,20 @@ fn chips(ui: &mut egui::Ui, board: &Board, view: &mut BoardView, p: Palette) {
     for (i, chip) in items.iter().enumerate() {
         let w = match chip {
             Chip::Mode(..) => measure(&label(chip)) + 24.,
+            Chip::Arrange => measure(&label(chip)) + 24.,
             Chip::Links => measure(&label(chip)) + 24.,
             Chip::Search => 190.,
             Chip::Category(_) => measure(&label(chip)) + 66.,
             Chip::AddCategory => measure(&label(chip)) + 40.,
         };
         // The mode switch is one segmented control; a wider gap separates the filters.
-        let gap = match i {
-            1 => 0.,
-            4 => 14.,
-            _ => 6.,
+        let first_category = matches!(chip, Chip::Category(_)) && !matches!(items[i - 1], Chip::Category(_));
+        let gap = if i > 0 && matches!(chip, Chip::Mode(..)) && matches!(items[i - 1], Chip::Mode(..)) {
+            0.
+        } else if first_category {
+            14.
+        } else {
+            6.
         };
         if x > 0. && x + gap + w > width {
             x = 0.;
@@ -460,6 +495,7 @@ fn chips(ui: &mut egui::Ui, board: &Board, view: &mut BoardView, p: Palette) {
             let rect = rect.translate(area.min.to_vec2());
             if let Chip::Category(cid) = chip {
                 category_rects.push((cid.clone(), rect));
+                view.hits.insert(format!("chip:{cid}"), rect);
             }
             if let Chip::Search = chip {
                 let painter = ui.painter();
@@ -484,15 +520,33 @@ fn chips(ui: &mut egui::Ui, board: &Board, view: &mut BoardView, p: Palette) {
             match chip {
                 Chip::Mode(mode, name) => {
                     let active = view.mode == *mode;
-                    let corners = if *mode == Mode::Columns {
-                        egui::CornerRadius { nw: 12, sw: 12, ne: 0, se: 0 }
-                    } else {
-                        egui::CornerRadius { nw: 0, sw: 0, ne: 12, se: 12 }
+                    let corners = match mode {
+                        Mode::Canvas => egui::CornerRadius { nw: 12, sw: 12, ne: 0, se: 0 },
+                        Mode::Columns => egui::CornerRadius::ZERO,
+                        Mode::Lanes => egui::CornerRadius { nw: 0, sw: 0, ne: 12, se: 12 },
                     };
                     painter.rect_filled(rect, corners, if active { p.text } else { idle });
                     painter.text(rect.center(), egui::Align2::CENTER_CENTER, *name, font.clone(), if active { p.base } else { p.text });
                     if response.clicked() {
                         view.mode = *mode;
+                        view.fitted = false;
+                    }
+                    response.on_hover_text(match mode {
+                        Mode::Canvas => "Категории — рамки, которые можно двигать по доске за заголовок",
+                        Mode::Columns => "Канбан по статусам",
+                        Mode::Lanes => "Строки по категориям, столбцы по статусам",
+                    });
+                }
+                Chip::Arrange => {
+                    painter.rect_filled(rect, 12., idle);
+                    painter.text(rect.center(), egui::Align2::CENTER_CENTER, "Разложить", font.clone(), p.muted);
+                    if response.on_hover_text("Вернуть все рамки в автоматическую сетку (для всей команды)").clicked() {
+                        for c in &board.categories {
+                            if c["x"].is_number() {
+                                view.queued.push(json!({"op":"category","id":c["id"],"x":null,"y":null}));
+                            }
+                        }
+                        view.placed.clear();
                         view.fitted = false;
                     }
                 }
@@ -618,6 +672,9 @@ struct Plan {
     cards: Vec<CardBox>,
     zones: Vec<Zone>,
     content: Rect,
+    /// Shapes painted just before the card at that index: the frame being dragged floats
+    /// above the others together with its cards.
+    overlays: Vec<(usize, Vec<Shape>)>,
 }
 
 fn canvas(ui: &mut egui::Ui, board: &Board, view: &mut BoardView, p: Palette, ops: &mut Vec<Value>) {
@@ -631,6 +688,7 @@ fn canvas(ui: &mut egui::Ui, board: &Board, view: &mut BoardView, p: Palette, op
         .show(ui, &mut scene, |ui| {
             grid(ui, p, view.scale);
             let plan = match view.mode {
+                Mode::Canvas => frames(ui, board, view, p),
                 Mode::Columns => columns(ui, board, view, p),
                 Mode::Lanes => lanes(ui, board, view, p),
             };
@@ -639,7 +697,7 @@ fn canvas(ui: &mut egui::Ui, board: &Board, view: &mut BoardView, p: Palette, op
                 // First look: the whole width if it fits at a readable size, from the top.
                 view.fitted = true;
                 let scale = (size.x / (plan.content.width() + 48.)).clamp(0.75, 1.);
-                view.pending = Some((Pos2::new(-24., -18.), scale));
+                view.pending = Some((plan.content.min - Vec2::new(24., 18.), scale));
             }
             cards(ui, board, view, p, &plan, ops);
         })
@@ -736,7 +794,7 @@ fn plus_button(ui: &egui::Ui, rect: Rect, id: egui::Id, p: Palette) -> bool {
 
 fn columns(ui: &egui::Ui, board: &Board, view: &mut BoardView, p: Palette) -> Plan {
     let painter = ui.painter().clone();
-    let mut plan = Plan { cards: vec![], zones: vec![], content: Rect::NOTHING };
+    let mut plan = Plan { cards: vec![], zones: vec![], content: Rect::NOTHING, overlays: vec![] };
     let mut backgrounds = vec![];
     let mut bottom: f32 = HEADER + 160.;
     for (i, (status, name)) in board.columns.iter().enumerate() {
@@ -812,7 +870,7 @@ fn columns(ui: &egui::Ui, board: &Board, view: &mut BoardView, p: Palette) -> Pl
 
 fn lanes(ui: &egui::Ui, board: &Board, view: &mut BoardView, p: Palette) -> Plan {
     let painter = ui.painter().clone();
-    let mut plan = Plan { cards: vec![], zones: vec![], content: Rect::NOTHING };
+    let mut plan = Plan { cards: vec![], zones: vec![], content: Rect::NOTHING, overlays: vec![] };
     let x0 = LABEL + GAP;
     let width = x0 + board.columns.len() as f32 * (CELL + GAP) - GAP;
     for (i, (status, name)) in board.columns.iter().enumerate() {
@@ -890,6 +948,9 @@ fn lanes(ui: &egui::Ui, board: &Board, view: &mut BoardView, p: Palette) -> Plan
         // The label is the lane's handle: drag to reorder, double click to edit the category.
         if !cid.is_empty() {
             let handle = Rect::from_min_size(lane.min, Vec2::new(LABEL, height));
+            if let Some(to_global) = ui.ctx().layer_transform_to_global(ui.layer_id()) {
+                view.hits.insert(format!("lane:{cid}"), to_global * handle);
+            }
             let response = ui.interact(handle, ui.id().with(("lane-label", cid)), Sense::click_and_drag());
             if response.drag_started() {
                 view.lane_drag = Some(cid.clone());
@@ -966,6 +1027,261 @@ fn lanes(ui: &egui::Ui, board: &Board, view: &mut BoardView, p: Palette) -> Plan
     plan
 }
 
+/// Where the button went down, in this layer's coordinates. A drag only starts after the
+/// pointer has moved a little; grabbing there instead would make the dragged thing jump.
+fn press_origin(ui: &egui::Ui) -> Option<Pos2> {
+    let pos = ui.input(|i| i.pointer.press_origin())?;
+    Some(match ui.ctx().layer_transform_from_global(ui.layer_id()) {
+        Some(from_global) => from_global * pos,
+        None => pos,
+    })
+}
+
+struct Laid {
+    cards: Vec<CardBox>,
+    sections: Vec<(String, f32, usize)>,
+    more: Vec<(Rect, String, usize, bool)>,
+    height: f32,
+    empty: bool,
+}
+
+/// One frame per category, placed where the team put it (or in an automatic grid), with its
+/// tasks grouped by status. Frames are dragged by their header.
+fn frames(ui: &egui::Ui, board: &Board, view: &mut BoardView, p: Palette) -> Plan {
+    let painter = ui.painter().clone();
+    let mut plan = Plan { cards: vec![], zones: vec![], content: Rect::NOTHING, overlays: vec![] };
+    let mut groups: Vec<(String, String, Color32, Option<Pos2>)> = board
+        .categories
+        .iter()
+        .map(|c| {
+            let id = text(&c["id"]);
+            let saved = c["x"].as_f64().zip(c["y"].as_f64()).map(|(x, y)| Pos2::new(x as f32, y as f32));
+            (id.clone(), text(&c["name"]), board.tint(&id, p), saved)
+        })
+        .collect();
+    if board.tasks.iter().any(|t| !board.colors.contains_key(&text(&t["category"]))) {
+        groups.push((String::new(), "Без категории".into(), p.muted, None));
+    }
+    if let Some(filter) = &view.filter {
+        groups.retain(|g| &g.0 == filter);
+    }
+    // A dropped frame stays where it was put until the server's state says the same.
+    view.placed.retain(|id, pos| !groups.iter().any(|g| &g.0 == id && g.3.is_some_and(|s| s.distance(*pos) < 1.)));
+
+    let mut laid = vec![];
+    for (cid, _, _, _) in &groups {
+        let tasks: Vec<&Value> = board
+            .tasks
+            .iter()
+            .copied()
+            .filter(|t| {
+                let c = text(&t["category"]);
+                (if cid.is_empty() { !board.colors.contains_key(&c) } else { &c == cid }) && visible(board, view, t)
+            })
+            .collect();
+        let mut l = Laid { cards: vec![], sections: vec![], more: vec![], height: 0., empty: tasks.is_empty() };
+        let mut y = FRAME_HEAD + 6.;
+        for status in FRAME_STATUSES {
+            let list = ordered(tasks.iter().copied().filter(|t| t["status"] == status).collect(), status);
+            if list.is_empty() {
+                continue;
+            }
+            l.sections.push((status.to_owned(), y, list.len()));
+            y += 22.;
+            let compact = status == "done";
+            let key = format!("frame:{cid}:{status}");
+            let open = view.expanded.contains(&key);
+            let shown = if compact && !open { list.len().min(LANE_COLLAPSED) } else { list.len() };
+            for task in &list[..shown] {
+                let (title, h) = measure(ui, task, FRAME - 2. * INNER, compact, p);
+                l.cards.push(CardBox {
+                    id: text(&task["id"]),
+                    rect: Rect::from_min_size(Pos2::new(INNER, y), Vec2::new(FRAME - 2. * INNER, h)),
+                    status: status.to_owned(),
+                    category: text(&task["category"]),
+                    compact,
+                    title,
+                });
+                y += h + CARD_GAP;
+            }
+            if compact && list.len() > LANE_COLLAPSED {
+                l.more.push((Rect::from_min_size(Pos2::new(INNER, y), Vec2::new(FRAME - 2. * INNER, 28.)), key, list.len() - shown, open));
+                y += 28. + CARD_GAP;
+            }
+            y += 6.;
+        }
+        if l.empty {
+            y += 50.;
+        }
+        l.height = y + INNER - 6.;
+        laid.push(l);
+    }
+
+    // Saved places first; the rest fill a grid from the left, stepping around placed frames.
+    let saved_of = |g: &(String, String, Color32, Option<Pos2>)| view.placed.get(&g.0).copied().or(g.3);
+    let mut taken: Vec<Rect> = groups
+        .iter()
+        .zip(&laid)
+        .filter_map(|(g, l)| saved_of(g).map(|pos| Rect::from_min_size(pos, Vec2::new(FRAME, l.height))))
+        .collect();
+    let mut column_y = [0f32; 4];
+    let mut origins: Vec<Pos2> = vec![];
+    for (g, l) in groups.iter().zip(&laid) {
+        if let Some(pos) = saved_of(g) {
+            origins.push(pos);
+            continue;
+        }
+        loop {
+            let i = (0..column_y.len()).min_by(|a, b| column_y[*a].total_cmp(&column_y[*b])).unwrap_or(0);
+            let slot = Rect::from_min_size(Pos2::new(i as f32 * (FRAME + FRAME_GAP), column_y[i]), Vec2::new(FRAME, l.height));
+            if let Some(block) = taken.iter().find(|r| r.expand(FRAME_GAP / 2. - 1.).intersects(slot)) {
+                column_y[i] = block.bottom() + FRAME_GAP;
+                continue;
+            }
+            taken.push(slot);
+            column_y[i] = slot.bottom() + FRAME_GAP;
+            origins.push(slot.min);
+            break;
+        }
+    }
+
+    // The frame being dragged is handled last, so it floats above the others.
+    let dragged = view.frame_drag.as_ref().and_then(|d| groups.iter().position(|g| g.0 == d.id));
+    let mut order: Vec<usize> = (0..groups.len()).filter(|i| Some(*i) != dragged).collect();
+    order.extend(dragged);
+    let mut released = None;
+    for i in order {
+        let (cid, name, tint, _) = &groups[i];
+        let l = &laid[i];
+        let mut origin = origins[i];
+        let floating = Some(i) == dragged;
+        if !cid.is_empty() {
+            let header = Rect::from_min_size(origin, Vec2::new(FRAME, FRAME_HEAD));
+            let response = ui
+                .interact(header, ui.id().with(("frame", cid)), Sense::click_and_drag())
+                .on_hover_cursor(if floating { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
+            if response.drag_started() {
+                if let Some(pos) = press_origin(ui).or(response.interact_pointer_pos()) {
+                    view.frame_drag = Some(FrameDrag { id: cid.clone(), grab: pos - origin, pos: origin });
+                }
+            }
+            if let Some(drag) = view.frame_drag.as_mut().filter(|d| &d.id == cid) {
+                if let Some(pos) = response.interact_pointer_pos() {
+                    drag.pos = pos - drag.grab;
+                }
+                origin = drag.pos;
+                if response.drag_stopped() || !ui.input(|i| i.pointer.any_down()) {
+                    released = Some((cid.clone(), origin));
+                }
+            }
+            if response.double_clicked() {
+                view.manager = Some(Manager::open(board, Some(cid.clone())));
+            }
+            if let Some(to_global) = ui.ctx().layer_transform_to_global(ui.layer_id()) {
+                view.hits.insert(format!("frame:{cid}"), to_global * header);
+            }
+        }
+        let rect = Rect::from_min_size(origin, Vec2::new(FRAME, l.height));
+        let stats = &board.state["progress"]["categories"][cid];
+        let percent = stats["percent"].as_f64().unwrap_or(0.) as f32;
+        let mut shapes = vec![];
+        if floating {
+            shapes.push(Shape::from(Shadow { offset: [0, 12], blur: 32, spread: 0, color: Color32::from_black_alpha(80) }.as_shape(rect, 16.)));
+        }
+        shapes.push(Shape::rect_filled(rect, 16., design::mix(p.base, p.side, 0.9)));
+        shapes.push(Shape::rect_stroke(rect, 16., Stroke::new(1.0_f32, if floating { *tint } else { design::mix(p.side, p.line, 0.8) }), egui::StrokeKind::Inside));
+        shapes.push(Shape::rect_filled(
+            Rect::from_min_size(rect.min, Vec2::new(FRAME, 5.)),
+            egui::CornerRadius { nw: 16, ne: 16, sw: 0, se: 0 },
+            *tint,
+        ));
+        if !cid.is_empty() {
+            for (dx, dy) in [(-2.5, -4.), (-2.5, 0.), (-2.5, 4.), (2.5, -4.), (2.5, 0.), (2.5, 4.)] {
+                shapes.push(Shape::circle_filled(origin + Vec2::new(16. + dx, 24. + dy), 1.3, p.muted));
+            }
+        }
+        let mut job = LayoutJob::simple(name.clone(), FontId::proportional(15.), p.text, FRAME - 100.);
+        job.wrap.max_rows = 1;
+        job.wrap.break_anywhere = true;
+        job.wrap.overflow_character = Some('…');
+        shapes.push(Shape::galley(origin + Vec2::new(28., 14.), painter.layout_job(job), p.text));
+        if !cid.is_empty() {
+            shapes.push(Shape::rect_filled(Rect::from_min_size(origin + Vec2::new(28., 44.), Vec2::new(FRAME - 120., 5.)), 2.5, p.line));
+            let done = Rect::from_min_size(origin + Vec2::new(28., 44.), Vec2::new((FRAME - 120.) * (percent / 100.).clamp(0., 1.), 5.));
+            if done.width() > 0.5 {
+                shapes.push(Shape::rect_filled(done, 2.5, *tint));
+            }
+            let label = format!("{percent:.0}% · {} из {}", stats["done"].as_u64().unwrap_or(0), stats["tasks"].as_u64().unwrap_or(0));
+            shapes.push(Shape::galley(
+                origin + Vec2::new(FRAME - 84., 39.),
+                painter.layout_no_wrap(label, FontId::proportional(11.), p.muted),
+                p.muted,
+            ));
+        }
+        for (status, y, count) in &l.sections {
+            let label = format!("{} · {count}", status_name(board.state, status).to_uppercase());
+            shapes.push(Shape::circle_filled(origin + Vec2::new(INNER + 4., y + 9.), 3., status_color(status, p)));
+            shapes.push(Shape::galley(
+                origin + Vec2::new(INNER + 12., y + 2.),
+                painter.layout_no_wrap(label, FontId::proportional(10.5), p.muted),
+                p.muted,
+            ));
+        }
+        if l.empty {
+            shapes.push(Shape::galley(
+                origin + Vec2::new(FRAME / 2. - 80., FRAME_HEAD + 22.),
+                painter.layout_no_wrap("Перетащи сюда задачи".into(), FontId::proportional(12.), p.muted),
+                p.muted,
+            ));
+        }
+        if floating {
+            plan.overlays.push((plan.cards.len(), shapes));
+        } else {
+            painter.extend(shapes);
+            if !cid.is_empty() && plus_button(ui, Rect::from_center_size(origin + Vec2::new(FRAME - 24., 24.), Vec2::splat(26.)), ui.id().with(("frame-add", cid)), p) {
+                view.create = Some(Create { title: String::new(), status: "todo".into(), category: cid.clone(), focus: true });
+            }
+            for (r, key, hidden, open) in &l.more {
+                if more_button(ui, r.translate(origin.to_vec2()), *hidden, *open, p) {
+                    if *open {
+                        view.expanded.remove(key);
+                    } else {
+                        view.expanded.insert(key.clone());
+                    }
+                }
+            }
+        }
+        for card in &l.cards {
+            plan.cards.push(CardBox {
+                id: card.id.clone(),
+                rect: card.rect.translate(origin.to_vec2()),
+                status: card.status.clone(),
+                category: card.category.clone(),
+                compact: card.compact,
+                title: card.title.clone(),
+            });
+        }
+        plan.zones.push(Zone { status: String::new(), category: Some(cid.clone()), rect, top: origin.y + FRAME_HEAD + 6. });
+        plan.content = plan.content.union(rect);
+    }
+    if let Some((id, pos)) = released {
+        let snapped = Pos2::new((pos.x / 10.).round() * 10., (pos.y / 10.).round() * 10.);
+        let saved = groups.iter().find(|g| g.0 == id).and_then(|g| g.3);
+        if saved.is_none_or(|s| s.distance(snapped) >= 1.) {
+            view.queued.push(json!({"op":"category","id":id,"x":snapped.x,"y":snapped.y}));
+            view.placed.insert(id, snapped);
+        }
+        view.frame_drag = None;
+    }
+    if view.frame_drag.is_some() {
+        ui.ctx().request_repaint();
+    }
+    if !plan.content.is_finite() {
+        plan.content = Rect::from_min_size(Pos2::ZERO, Vec2::splat(FRAME));
+    }
+    plan
+}
+
 /// Cards, links under them, and dragging on top.
 fn cards(ui: &egui::Ui, board: &Board, view: &mut BoardView, p: Palette, plan: &Plan, ops: &mut Vec<Value>) {
     let links_layer = ui.painter().add(Shape::Noop);
@@ -980,7 +1296,7 @@ fn cards(ui: &egui::Ui, board: &Board, view: &mut BoardView, p: Palette, plan: &
             hovered = Some(card.id.clone());
         }
         if response.drag_started() {
-            let grab = response.interact_pointer_pos().map_or(Vec2::ZERO, |pos| pos - card.rect.min);
+            let grab = press_origin(ui).or(response.interact_pointer_pos()).map_or(Vec2::ZERO, |pos| pos - card.rect.min);
             let link = shift.then_some(if command { "blocks" } else { "relates" });
             view.drag = Some(Drag { id: card.id.clone(), grab, link });
         }
@@ -1033,7 +1349,16 @@ fn cards(ui: &egui::Ui, board: &Board, view: &mut BoardView, p: Palette, plan: &
     }
     ui.painter().set(links_layer, Shape::Vec(shapes));
 
-    for card in &plan.cards {
+    let to_global = ui.ctx().layer_transform_to_global(ui.layer_id());
+    for (index, card) in plan.cards.iter().enumerate() {
+        for (at, shapes) in &plan.overlays {
+            if *at == index {
+                ui.painter().extend(shapes.clone());
+            }
+        }
+        if let Some(t) = to_global {
+            view.hits.insert(format!("card:{}", card.id), t * card.rect);
+        }
         let Some(task) = board.task(&card.id) else { continue };
         let dragged = view.drag.as_ref().is_some_and(|d| d.id == card.id && d.link.is_none());
         let look = Look {
@@ -1043,6 +1368,11 @@ fn cards(ui: &egui::Ui, board: &Board, view: &mut BoardView, p: Palette, plan: &
             faded: dragged,
         };
         paint_card(ui.painter(), card, task, board, look, p);
+    }
+    for (at, shapes) in &plan.overlays {
+        if *at >= plan.cards.len() {
+            ui.painter().extend(shapes.clone());
+        }
     }
 
     let Some(drag) = &view.drag else { return };
@@ -1079,23 +1409,32 @@ fn cards(ui: &egui::Ui, board: &Board, view: &mut BoardView, p: Palette, plan: &
         return;
     }
     // Move: ghost under the pointer, insertion mark in the target column or cell.
-    let zone = plan.zones.iter().find(|z| z.rect.contains(pos));
+    // The topmost frame under the pointer wins when frames overlap.
+    let zone = plan.zones.iter().rev().find(|z| z.rect.contains(pos));
     let mut target = None;
     if let Some(zone) = zone {
+        // A frame keeps the card's status and only changes its category.
+        let keep = zone.status.is_empty();
+        let status = if keep { source.status.as_str() } else { zone.status.as_str() };
         let peers: Vec<&CardBox> = plan
             .cards
             .iter()
-            .filter(|c| c.id != drag.id && c.status == zone.status && zone.category.as_ref().is_none_or(|cat| &c.category == cat || (cat.is_empty() && !board.colors.contains_key(&c.category))))
-            .filter(|c| zone.rect.x_range().contains(c.rect.center().x))
+            .filter(|c| c.id != drag.id && c.status == status && zone.category.as_ref().is_none_or(|cat| &c.category == cat || (cat.is_empty() && !board.colors.contains_key(&c.category))))
+            .filter(|c| if keep { zone.rect.contains(c.rect.center()) } else { zone.rect.x_range().contains(c.rect.center().x) })
             .collect();
         let before = peers.iter().filter(|c| c.rect.center().y > pos.y).min_by(|a, b| a.rect.top().total_cmp(&b.rect.top()));
         let y = match before {
             Some(c) => c.rect.top() - CARD_GAP / 2.,
             None => peers.iter().map(|c| c.rect.bottom() + CARD_GAP / 2.).fold(zone.top, f32::max),
         };
-        let x = zone.rect.left() + GAP / 2.;
-        let w = zone.rect.width() - GAP;
-        let (left, right) = if zone.category.is_some() { (x, x + w) } else { (x + INNER, x + w - INNER) };
+        let (left, right) = if keep {
+            painter.rect_stroke(zone.rect, 16., Stroke::new(2.0_f32, ACCENT.gamma_multiply(0.6)), egui::StrokeKind::Outside);
+            (zone.rect.left() + INNER, zone.rect.right() - INNER)
+        } else {
+            let x = zone.rect.left() + GAP / 2.;
+            let w = zone.rect.width() - GAP;
+            if zone.category.is_some() { (x, x + w) } else { (x + INNER, x + w - INNER) }
+        };
         painter.line_segment([Pos2::new(left, y), Pos2::new(right, y)], Stroke::new(3.0_f32, ACCENT));
         painter.circle_filled(Pos2::new(left, y), 4., ACCENT);
         target = Some((zone, before.map(|c| c.id.clone())));
@@ -1124,11 +1463,17 @@ fn cards(ui: &egui::Ui, board: &Board, view: &mut BoardView, p: Palette, plan: &
                     ops.push(json!({"op":"update","id":drag.id,"category":category}));
                 }
             }
-            let mut op = json!({"op":"move","id":drag.id,"status":zone.status});
-            if let Some(before) = before {
-                op["before"] = json!(before);
+            if zone.status.is_empty() {
+                if let Some(before) = before {
+                    ops.push(json!({"op":"move","id":drag.id,"status":source.status,"before":before}));
+                }
+            } else {
+                let mut op = json!({"op":"move","id":drag.id,"status":zone.status});
+                if let Some(before) = before {
+                    op["before"] = json!(before);
+                }
+                ops.push(op);
             }
-            ops.push(op);
         }
         view.drag = None;
     }
@@ -1327,7 +1672,12 @@ fn controls(ui: &egui::Ui, view: &mut BoardView, p: Palette, outer: Rect) {
                     .corner_radius(8.)
                     .inner_margin(egui::Margin::symmetric(10, 6))
                     .show(ui, |ui| {
-                        small(ui, "Тяни фон — двигаться · Ctrl+колесо — масштаб · Shift+тяни карточку на другую — связать", 11., p.muted);
+                        let hint = match view.mode {
+                            Mode::Canvas => "Заголовок категории — тяни, чтобы двигать · фон — двигаться · Ctrl+колесо — масштаб",
+                            Mode::Lanes => "Название слева — тяни, чтобы переставить · фон — двигаться · Ctrl+колесо — масштаб",
+                            Mode::Columns => "Фон — двигаться · Ctrl+колесо — масштаб · Shift+карточка на другую — связать",
+                        };
+                        small(ui, hint, 11., p.muted);
                     });
             });
     }
@@ -1966,6 +2316,153 @@ mod tests {
         let board = Board::new(&state);
         assert!(reorder(&board, "b", Some("c")).is_none());
         assert!(reorder(&board, "c", None).is_none());
+    }
+
+    fn sample() -> Value {
+        json!({
+            "title": "Test",
+            "categories": [{"id":"a","name":"Alpha","order":0},{"id":"b","name":"Beta","order":1},{"id":"c","name":"Gamma","order":2}],
+            "columns": [{"id":"backlog","name":"Бэклог"},{"id":"todo","name":"К работе"},{"id":"done","name":"Готово"}],
+            "tasks": [
+                {"id":"T-1","title":"one","status":"todo","category":"a","order":1,"links":[],"comments":[]},
+                {"id":"T-2","title":"two","status":"backlog","category":"b","order":1,"links":[],"comments":[]},
+                {"id":"T-3","title":"three","status":"done","category":"c","order":1,"links":[],"comments":[]}
+            ],
+            "progress": {"all": {}, "categories": {}},
+            "activity": []
+        })
+    }
+
+    /// Drives the real board UI without a window: one egui pass per input step.
+    struct Harness {
+        ctx: egui::Context,
+        view: BoardView,
+        state: Value,
+        time: f64,
+    }
+
+    impl Harness {
+        fn new(lanes: bool) -> Self {
+            let mut view = BoardView::default();
+            if lanes {
+                view.mode = Mode::Lanes;
+            }
+            let mut h = Self { ctx: egui::Context::default(), view, state: sample(), time: 0. };
+            for _ in 0..4 {
+                h.frame(vec![]);
+            }
+            h
+        }
+        fn frame(&mut self, events: Vec<egui::Event>) -> Vec<Value> {
+            self.time += 1. / 60.;
+            let raw = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1500., 900.))),
+                time: Some(self.time),
+                events,
+                ..Default::default()
+            };
+            let mut ops = vec![];
+            let (view, state) = (&mut self.view, &self.state);
+            let _ = self.ctx.run(raw, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ops.extend(show(ui, state, view, design::palette(false), "me"));
+                    ops.extend(take_queued(view));
+                });
+            });
+            ops
+        }
+        fn drag(&mut self, from: Pos2, to: Pos2) -> Vec<Value> {
+            let button = |pos, pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            let mut ops = self.frame(vec![egui::Event::PointerMoved(from)]);
+            ops.extend(self.frame(vec![button(from, true)]));
+            for i in 1..=12 {
+                ops.extend(self.frame(vec![egui::Event::PointerMoved(from + (to - from) * (i as f32 / 12.))]));
+            }
+            ops.extend(self.frame(vec![button(to, false)]));
+            ops.extend(self.frame(vec![]));
+            ops
+        }
+    }
+
+    fn reorders(ops: &[Value]) -> Vec<Value> {
+        ops.iter().filter(|o| o["op"] == "reorder_categories").map(|o| o["ids"].clone()).collect()
+    }
+
+    #[test]
+    fn dragging_a_chip_reorders_categories() {
+        let mut h = Harness::new(false);
+        let alpha = h.view.hits["chip:a"];
+        let gamma = h.view.hits["chip:c"];
+        let ops = h.drag(alpha.center(), gamma.right_center() + Vec2::new(6., 0.));
+        assert_eq!(reorders(&ops), vec![json!(["b", "c", "a"])], "ops: {ops:?}");
+        assert!(h.view.chip_drag.is_none());
+    }
+
+    #[test]
+    fn dragging_a_lane_label_reorders_categories() {
+        let mut h = Harness::new(true);
+        let alpha = h.view.hits["lane:a"];
+        let gamma = h.view.hits["lane:c"];
+        let ops = h.drag(alpha.center(), Pos2::new(alpha.center().x, gamma.bottom() + 4.));
+        assert_eq!(reorders(&ops), vec![json!(["b", "c", "a"])], "ops: {ops:?}");
+        assert!(h.view.lane_drag.is_none());
+    }
+
+    #[test]
+    fn dragging_a_frame_moves_the_category_on_the_canvas() {
+        let mut h = Harness::new(false);
+        assert!(h.view.mode == Mode::Canvas);
+        let header = h.view.hits["frame:b"];
+        let ops = h.drag(header.center(), header.center() + Vec2::new(260., 180.));
+        let moved: Vec<&Value> = ops.iter().filter(|o| o["op"] == "category" && o["id"] == "b").collect();
+        assert_eq!(moved.len(), 1, "ops: {ops:?}");
+        let (x, y) = (moved[0]["x"].as_f64().unwrap(), moved[0]["y"].as_f64().unwrap());
+        assert_eq!((x % 10., y % 10.), (0., 0.), "snapped to the grid");
+        assert!(x > 300. && y > 100., "moved right and down: {x}, {y}");
+        // Until the server confirms, the frame stays where it was dropped.
+        h.frame(vec![]);
+        assert!(h.view.placed.contains_key("b"));
+        let now = h.view.hits["frame:b"];
+        assert!(now.center().distance(header.center() + Vec2::new(260., 180.)) < 12., "before {header:?} after {now:?} placed {:?} origin {:?} scale {}", h.view.placed, h.view.origin, h.view.scale);
+    }
+
+    #[test]
+    fn dropping_a_card_into_another_frame_changes_its_category() {
+        let mut h = Harness::new(false);
+        let card = h.view.hits["card:T-1"];
+        let frame = h.view.hits["frame:b"];
+        let ops = h.drag(card.center(), frame.center_bottom() + Vec2::new(0., 40.));
+        assert!(ops.iter().any(|o| o["op"] == "update" && o["id"] == "T-1" && o["category"] == "b"), "ops: {ops:?}");
+        assert!(!ops.iter().any(|o| o["op"] == "move" && o["status"] != "todo"), "status kept: {ops:?}");
+    }
+
+    #[test]
+    fn dragging_empty_space_pans_the_view() {
+        let mut h = Harness::new(false);
+        let before = h.view.origin;
+        // Below every frame: empty canvas.
+        let empty = Pos2::new(700., 860.);
+        let ops = h.drag(empty, empty + Vec2::new(-200., -150.));
+        assert!(ops.is_empty(), "ops: {ops:?}");
+        assert!(h.view.origin.x > before.x + 150. && h.view.origin.y > before.y + 100., "origin {:?} -> {:?}", before, h.view.origin);
+    }
+
+    #[test]
+    fn clicking_a_chip_filters_instead_of_moving() {
+        let mut h = Harness::new(false);
+        let beta = h.view.hits["chip:b"].center();
+        let button = |pressed| egui::Event::PointerButton { pos: beta, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        h.frame(vec![egui::Event::PointerMoved(beta)]);
+        h.frame(vec![button(true)]);
+        let ops = h.frame(vec![button(false)]);
+        h.frame(vec![]);
+        assert!(reorders(&ops).is_empty());
+        assert_eq!(h.view.filter.as_deref(), Some("b"));
     }
 
     #[test]

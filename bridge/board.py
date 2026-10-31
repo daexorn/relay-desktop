@@ -19,7 +19,7 @@ import time
 
 # Bumped with every change; the bridge only replaces an older board.py next to the data,
 # so teammates on different Relay versions do not overwrite each other's copy.
-BOARD_VERSION = 2
+BOARD_VERSION = 3
 
 COLUMNS = [
     ("backlog", "Бэклог"),
@@ -320,6 +320,15 @@ def _category(data, op):
             category["description"] = description
     if "order" in op:
         category["order"] = float(op["order"])
+    # Place of the category's frame on the board canvas; None returns it to the automatic layout.
+    if "x" in op or "y" in op:
+        if op.get("x") is None or op.get("y") is None:
+            category.pop("x", None)
+            category.pop("y", None)
+            changes.append("место на доске — автоматически")
+        else:
+            category["x"], category["y"] = round(float(op["x"]), 1), round(float(op["y"]), 1)
+            changes.append("перемещена на доске")
     return ident, f"категория «{category['name']}»" + (": " + ", ".join(changes) if changes else "")
 
 

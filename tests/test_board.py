@@ -95,6 +95,15 @@ class BoardTests(unittest.TestCase):
         self.assertIn("задачи (1) → Кузня", state["activity"][0]["text"])
         self.assertEqual(task, "T-1")
 
+    def test_category_place_on_canvas(self):
+        ident = self.board.apply({"op": "category", "new": True, "name": "Кузня"}, "champ", "pc", "relay")["ids"][0]
+        self.board.apply({"op": "category", "id": ident, "x": 412.04, "y": -30}, "champ", "pc", "relay")
+        category = self.board.state()["categories"][0]
+        self.assertEqual((category["x"], category["y"]), (412.0, -30.0))
+        self.assertIn("перемещена", self.board.activity()[0]["text"])
+        self.board.apply({"op": "category", "id": ident, "x": None, "y": None}, "champ", "pc", "relay")
+        self.assertNotIn("x", self.board.state()["categories"][0])
+
     def test_category_validation(self):
         self.board.apply({"op": "category", "new": True, "name": "Кузня"}, "x", "h", "cli")
         for bad in ({"op": "category", "new": True, "name": "кузня"},
