@@ -13,8 +13,8 @@ import threading
 import uuid
 
 TOOLS = [
-    {"name":"download_file", "description":"Save a file from this server onto the user's computer. Relay asks the user for approval and a destination. Use for generated documents, archives, Minecraft mods etc. Never claim delivery before this tool succeeds.", "inputSchema":{"type":"object","properties":{"server_path":{"type":"string"}},"required":["server_path"],"additionalProperties":False}},
-    {"name":"run_local_command", "description":"Run a command on the user's computer, NOT this server, inside the workspace selected in Relay. Every invocation requires explicit approval even in Auto mode. Use for local installation or tests requested by the user. Output and exit code are returned. Windows uses PowerShell; Linux uses /bin/sh. No automatic elevation.", "inputSchema":{"type":"object","properties":{"command":{"type":"string"},"timeout_seconds":{"type":"integer","minimum":1,"maximum":120}},"required":["command"],"additionalProperties":False}}
+    {"name":"download_file", "description":"Save a file from this server onto the user's computer. In Relay Auto mode this saves directly; otherwise Relay asks the user for approval and a destination. Use for generated documents, archives, Minecraft mods etc. Never claim delivery before this tool succeeds.", "inputSchema":{"type":"object","properties":{"server_path":{"type":"string"},"destination":{"type":"string","description":"Destination on the user computer: absolute path or relative to its working directory. In Auto mode, omitted destination uses the Downloads folder."}},"required":["server_path"],"additionalProperties":False}},
+    {"name":"run_local_command", "description":"Run a command on the user's computer, NOT this server, with the user's local permissions. The initial working directory is the user's home directory; commands can access other locations. In Relay Auto mode commands execute automatically; otherwise the user approves each invocation. The working directory is a starting location, not a filesystem sandbox. Use for local installation or tests requested by the user. Output and exit code are returned. Windows uses PowerShell; Linux uses /bin/sh. No automatic elevation.", "inputSchema":{"type":"object","properties":{"command":{"type":"string"},"timeout_seconds":{"type":"integer","minimum":1,"maximum":120}},"required":["command"],"additionalProperties":False}}
 ]
 MAX_FILE = 512*1024*1024
 
@@ -67,7 +67,10 @@ class RelayDesktop:
                 path=Path(text).expanduser().resolve()
                 info=path.stat()
                 if not stat.S_ISREG(info.st_mode) or info.st_size>MAX_FILE:raise ValueError("Only regular files up to 512 MiB can be downloaded")
+                destination=args.get("destination")
+                if destination is not None and (not isinstance(destination,str) or not destination.strip() or len(destination)>4096 or "\x00" in destination):raise ValueError("Invalid destination")
                 args={"server_path":str(path),"name":path.name,"size":info.st_size}
+                if destination is not None:args["destination"]=destination
             ident=str(uuid.uuid4());item={"sid":sid,"tool":tool,"input":args,"event":threading.Event(),"result":None,"streaming":False}
             with self.lock:
                 if self.closed or len(self.pending)>=8:raise ValueError("Desktop is unavailable or busy")
@@ -134,7 +137,7 @@ def mcp_main():
             req=json.loads(line);ident=req.get("id");method=req.get("method")
             if ident is None:continue
             if method=="initialize":
-                result={"protocolVersion":req.get("params",{}).get("protocolVersion","2024-11-05"),"capabilities":{"tools":{}},"serverInfo":{"name":"Relay desktop","version":"0.3.0"}}
+                result={"protocolVersion":req.get("params",{}).get("protocolVersion","2024-11-05"),"capabilities":{"tools":{}},"serverInfo":{"name":"Relay desktop","version":"0.4.0"}}
             elif method=="ping":result={}
             elif method=="tools/list":result={"tools":TOOLS}
             elif method=="tools/call":

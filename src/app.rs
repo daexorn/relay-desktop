@@ -120,50 +120,6 @@ fn key(server: &str, sid: &str) -> String {
 fn label(ui: &mut egui::Ui, s: impl Into<String>, size: f32, color: Color32) -> egui::Response {
     ui.label(RichText::new(s).size(size).color(color))
 }
-fn activity(
-    ui: &mut egui::Ui,
-    title: String,
-    id: impl std::hash::Hash,
-    color: Color32,
-    add: impl FnOnce(&mut egui::Ui),
-) {
-    let id = ui.make_persistent_id(id);
-    let mut state =
-        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
-    ui.scope(|ui| {
-        ui.spacing_mut().interact_size.y = 24.;
-        ui.horizontal(|ui| {
-            let width = (ui.available_width() - 70.).max(80.);
-            let response = ui.add_sized(
-                Vec2::new(width, 24.),
-                egui::Label::new(RichText::new(&title).size(12.).color(color))
-                    .halign(Align::Min)
-                    .truncate()
-                    .sense(egui::Sense::click()),
-            );
-            let details = ui.add_sized(
-                Vec2::new(62., 24.),
-                egui::Button::new(
-                    RichText::new(if state.is_open() {
-                        "Скрыть"
-                    } else {
-                        "Детали"
-                    })
-                    .size(11.),
-                )
-                .frame(false),
-            );
-            if response.on_hover_text(&title).clicked() || details.clicked() {
-                state.toggle(ui);
-            }
-        });
-    });
-    state.show_body_unindented(ui, |ui| {
-        ui.add_space(5.);
-        add(ui);
-        ui.add_space(5.);
-    });
-}
 impl RelayApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let (settings, error) = match storage::load() {
@@ -225,8 +181,45 @@ impl RelayApp {
             if args.iter().any(|a| a == "--demo-empty") {
                 app.new_chat();
             }
+            if args
+                .iter()
+                .any(|a| a == "--demo-activity" || a == "--demo-activity-open")
+            {
+                app.settings.servers[0].local_control = true;
+                app.settings.servers[0].local_workspace = Some("/home/player".into());
+                if let Some(k) = app.current_key() {
+                    let chat = app.chats.get_mut(&k).unwrap();
+                    chat.messages = vec![Message {
+                        role: "assistant".into(),
+                        text: "Проверяю каждый слайд визуально.".into(),
+                        ..Default::default()
+                    }];
+                    for slide in 1..=12 {
+                        chat.messages.push(Message{role:"tool".into(),tool:"Read".into(),tool_id:format!("slide-{slide}"),input:json!({"file_path":format!("/tmp/presentation/slides/s-{slide:02}.jpg")}),..Default::default()});
+                        chat.messages.push(Message {
+                            role: "tool_result".into(),
+                            tool_id: format!("slide-{slide}"),
+                            text: "Изображение открыто.".into(),
+                            ..Default::default()
+                        });
+                    }
+                    chat.messages.push(Message{role:"assistant".into(),text:"Проверил 12 слайдов. Текст читается, таблицы помещаются, номера на месте.".into(),..Default::default()});
+                    if args.iter().any(|a| a == "--demo-activity-open") {
+                        egui::collapsing_header::CollapsingState::load_with_default_open(
+                            &cc.egui_ctx,
+                            egui::Id::new(("activity-group", k.as_str(), 1usize)),
+                            true,
+                        )
+                        .store(&cc.egui_ctx);
+                    }
+                }
+            }
             if args.iter().any(|a| a == "--demo-desktop") {
                 app.settings.servers[0].local_workspace = Some("/home/player/Minecraft".into());
+                app.settings.servers[0].local_control = true;
+                if let Some(k) = app.current_key() {
+                    app.chats.get_mut(&k).unwrap().mode = "manual".into();
+                }
                 app.desktop_requests.push(("demo".into(),json!({"id":"demo-action","tool":"run_local_command","input":{"command":"ls -lh mods/ && tail -n 20 logs/latest.log","timeout_seconds":30}})));
             }
             if args.iter().any(|a| a == "--demo-tables") {
@@ -529,18 +522,6 @@ impl RelayApp {
                         answer,
                     })
                 }
-                Event::Workspace { server, path } => {
-                    if let Some(path) = path {
-                        if let Some(profile) =
-                            self.settings.servers.iter_mut().find(|s| s.id == server)
-                        {
-                            profile.local_workspace = Some(path.clone());
-                        }
-                        self.controller
-                            .send(&server, json!({"op":"_desktop_workspace","path":path}));
-                        self.save();
-                    }
-                }
                 Event::Password { server, password } => {
                     if let Some(password) = password {
                         self.establish(server, password);
@@ -649,6 +630,7 @@ impl RelayApp {
                     .servers
                     .iter()
                     .find(|s| s.id == server)
+                    .filter(|s| s.local_control)
                     .and_then(|s| s.local_workspace.clone());
                 self.controller
                     .send(&server, json!({"op":"_desktop_workspace","path":workspace}));
@@ -818,9 +800,10 @@ impl RelayApp {
             .collect();
         self.controller.send(
             &server.id,
-            json!({"op":"_desktop_workspace","path":server.local_workspace}),
+            json!({"op":"_desktop_workspace","path":if server.local_control {server.local_workspace.clone()}else{None}}),
         );
-        let request = json!({"op":"prompt","sid":c.sid,"cwd":c.cwd,"text":text,"images":images,"files":files,"model":c.model,"mode":c.mode,"effort":c.effort,"desktop_enabled":server.local_workspace.is_some(),"desktop_context":{"os":std::env::consts::OS,"workspace":server.local_workspace}});
+        self.controller.send(&server.id,json!({"op":"_desktop_policy","sid":c.sid,"auto":server.local_control && c.mode=="auto"}));
+        let request = json!({"op":"prompt","sid":c.sid,"cwd":c.cwd,"text":text,"images":images,"files":files,"model":c.model,"mode":c.mode,"effort":c.effort,"desktop_enabled":server.local_control && server.local_workspace.is_some(),"desktop_context":{"os":std::env::consts::OS,"workspace":server.local_workspace,"downloads":dirs::download_dir(),"auto":c.mode=="auto"}});
         if self.demo {
             c.error = "Это предпросмотр интерфейса. Добавь свой сервер для работы.".into();
             return;
@@ -1460,67 +1443,30 @@ impl RelayApp {
                                     label(ui, "Открываем разговор", 13., p.muted);
                                 });
                             }
-                            for (index, message) in chat.messages.iter().enumerate() {
+                            let timeline = crate::timeline::items(&chat.messages);
+                            let grouped_busy = chat.busy
+                                && matches!(
+                                    timeline.last(),
+                                    Some(crate::timeline::Item::Actions(_))
+                                );
+                            for item in timeline {
+                                let index = match item {
+                                    crate::timeline::Item::Actions(range) => {
+                                        let busy = chat.busy && range.end == chat.messages.len();
+                                        crate::timeline::show(
+                                            ui,
+                                            &k,
+                                            &chat.messages,
+                                            range,
+                                            busy,
+                                            p,
+                                        );
+                                        continue;
+                                    }
+                                    crate::timeline::Item::Message(index) => index,
+                                };
+                                let message = &chat.messages[index];
                                 ui.push_id(index, |ui| match message.role.as_str() {
-                                    "tool" => {
-                                        activity(
-                                            ui,
-                                            format!(
-                                                "{}  ·  {}",
-                                                tool_name(&message.tool),
-                                                model::shorten(
-                                                    &model::summary(&message.input)
-                                                        .replace('\n', " "),
-                                                    100
-                                                )
-                                            ),
-                                            (index, "tool"),
-                                            p.muted,
-                                            |ui| {
-                                                ui.add(
-                                                    egui::Label::new(
-                                                        RichText::new(model::summary(
-                                                            &message.input,
-                                                        ))
-                                                        .monospace()
-                                                        .size(12.),
-                                                    )
-                                                    .selectable(true)
-                                                    .wrap(),
-                                                );
-                                            },
-                                        );
-                                        ui.add_space(5.);
-                                    }
-                                    "tool_result" => {
-                                        activity(
-                                            ui,
-                                            if message.failed {
-                                                "Действие не выполнено"
-                                            } else {
-                                                "Результат действия"
-                                            }
-                                            .into(),
-                                            (index, "result"),
-                                            if message.failed { ACCENT } else { p.muted },
-                                            |ui| {
-                                                egui::ScrollArea::vertical()
-                                                    .max_height(240.)
-                                                    .id_salt((index, "output"))
-                                                    .show(ui, |ui| {
-                                                        ui.add(
-                                                            egui::Label::new(
-                                                                RichText::new(&message.text)
-                                                                    .monospace()
-                                                                    .size(12.),
-                                                            )
-                                                            .selectable(true)
-                                                            .wrap(),
-                                                        );
-                                                    });
-                                            },
-                                        );
-                                    }
                                     "user" => {
                                         ui.add_space(8.);
                                         egui::Frame::new()
@@ -1583,7 +1529,7 @@ impl RelayApp {
                                     }
                                 });
                             }
-                            if chat.busy {
+                            if chat.busy && !grouped_busy {
                                 ui.horizontal(|ui| {
                                     design::dots(ui, ACCENT);
                                     label(ui, &chat.status, 13., p.muted);
@@ -1600,16 +1546,17 @@ impl RelayApp {
         let mut send = false;
         let mut attach = false;
         ui.horizontal(|ui| {
-            ui.spacing_mut().interact_size.y=22.;
-            let active=server.local_workspace.is_some();
-            let text=server.local_workspace.as_ref().map(|p|format!("Этот ПК · {}",std::path::Path::new(p).file_name().unwrap_or_default().to_string_lossy())).unwrap_or_else(||"Подключить этот ПК".into());
-            if ui.small_button(text).on_hover_text("Выбрать папку на компьютере. Claude сможет запрашивать скачивание файлов и локальные команды; каждое действие подтверждается отдельно.").clicked(){
-                let bus=self.controller.bus.clone();let id=server.id.clone();
-                self.controller.runtime.spawn(async move{let folder=rfd::AsyncFileDialog::new().set_title("Рабочая папка на этом компьютере").pick_folder().await;bus.send(Event::Workspace{server:id,path:folder.map(|f|f.path().to_string_lossy().into_owned())});});
-            }
-            if active && ui.small_button("Отключить").clicked(){
-                if let Some(profile)=self.settings.servers.iter_mut().find(|s|s.id==server.id){profile.local_workspace=None;}
-                self.controller.send(&server.id,json!({"op":"_desktop_workspace","path":null}));self.save();
+            let active=server.local_control && server.local_workspace.is_some();
+            let auto=self.chats.get(k).is_some_and(|chat|chat.mode=="auto");
+            let text=if active{if auto{"Этот ПК · Авто"}else{"Этот ПК · Вручную"}}else{"Подключить ПК"};
+            let toggle=design::chip(ui,text,Icon::Computer,p,active).on_hover_text(if active{"ПК подключён. В «Авто» команды выполняются без подтверждения с правами пользователя Relay. Нажми, чтобы отключить."}else{"Подключить управление этим компьютером. Режим «Авто» выполняет команды и скачивает файлы без подтверждения."}).clicked();
+            let disconnect=active && design::chip(ui,"",Icon::Close,p,false).on_hover_text("Отключить этот ПК").clicked();
+            if toggle || disconnect {
+                let path=if active{None}else{dirs::home_dir().or_else(||std::env::current_dir().ok()).map(|p|p.to_string_lossy().into_owned())};
+                if let Some(profile)=self.settings.servers.iter_mut().find(|s|s.id==server.id){profile.local_control=path.is_some();profile.local_workspace=path.clone();}
+                self.controller.send(&server.id,json!({"op":"_desktop_workspace","path":path}));
+                for (key,chat) in &self.chats {if key.starts_with(&format!("{}/",server.id)){self.controller.send(&server.id,json!({"op":"_desktop_policy","sid":chat.sid,"auto":!active && chat.mode=="auto"}));}}
+                self.save();
             }
         });
         ui.add_space(4.);
@@ -1766,6 +1713,9 @@ impl RelayApp {
             });
         });
         let current = (chat.model.clone(), chat.mode.clone(), chat.effort.clone());
+        if previous.1 != current.1 {
+            self.controller.send(&server.id,json!({"op":"_desktop_policy","sid":chat.sid,"auto":server.local_control && current.1=="auto"}));
+        }
         if previous != current {
             if let Some(s) = self.settings.servers.iter_mut().find(|s| s.id == server.id) {
                 s.model = current.0;
@@ -2698,6 +2648,8 @@ fn tool_name(name: &str) -> &str {
         "Edit" | "MultiEdit" => "Изменение файла",
         "Write" => "Создание файла",
         "Bash" => "Команда на сервере",
+        "mcp__relay_desktop__run_local_command" => "Команда на этом ПК",
+        "mcp__relay_desktop__download_file" => "Скачивание на этот ПК",
         "Glob" | "Grep" => "Поиск по проекту",
         "WebSearch" | "WebFetch" => "Поиск в интернете",
         "ExitPlanMode" => "План готов",

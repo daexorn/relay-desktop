@@ -45,10 +45,6 @@ pub enum Event {
         images: Vec<crate::images::Attachment>,
         errors: Vec<String>,
     },
-    Workspace {
-        server: String,
-        path: Option<String>,
-    },
     Password {
         server: Server,
         password: Option<String>,
@@ -320,6 +316,7 @@ pub fn probe() -> Result<()> {
     let exercise = value["exercise"].as_bool().unwrap_or(false);
     let desktop_probe = value["desktop_probe"].as_bool().unwrap_or(false);
     let mut desktop_exercised = false;
+    let desktop_probe_auto = value["desktop_probe_auto"].as_bool().unwrap_or(false);
     let sid = value["sid"]
         .as_str()
         .map(str::to_owned)
@@ -355,11 +352,26 @@ pub fn probe() -> Result<()> {
                         json!({"op":"_desktop_workspace","path":std::env::temp_dir()}),
                     );
                 }
+                if desktop_probe && desktop_probe_auto {
+                    controller.send(
+                        &profile.id,
+                        json!({"op":"_desktop_policy","sid":sid,"auto":true}),
+                    );
+                }
                 controller.send(&profile.id,json!({"op":"prompt","sid":sid,"cwd":"/tmp","mode":mode,"model":"default","text":prompt,"images":images,"files":files,"desktop_enabled":desktop_probe,"desktop_context":{"os":std::env::consts::OS,"workspace":std::env::temp_dir()}}));
+            }
+            Ok(Event::Data { value: frame, .. }) if frame["type"] == "desktop_completed" => {
+                if desktop_probe
+                    && frame["result"]["stdout"] == "RELAY_DESKTOP_PROBE"
+                    && frame["result"]["exit_code"] == 0
+                {
+                    desktop_exercised = true;
+                }
             }
             Ok(Event::Data { value: frame, .. }) if frame["type"] == "desktop_request" => {
                 // Only this fixed harmless probe command can bypass the test UI.
                 if desktop_probe
+                    && !desktop_probe_auto
                     && frame["tool"] == "run_local_command"
                     && frame["input"]["command"] == "printf RELAY_DESKTOP_PROBE"
                 {

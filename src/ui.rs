@@ -82,6 +82,7 @@ pub enum Icon {
     Check,
     Arrow,
     Server,
+    Computer,
 }
 pub fn icon(p: &egui::Painter, r: Rect, which: Icon, color: Color32) {
     let c = r.center();
@@ -179,6 +180,16 @@ pub fn icon(p: &egui::Painter, r: Rect, which: Icon, color: Color32) {
                 p.circle_filled(v(-4., y), 0.8 * z, color);
             }
         }
+        Icon::Computer => {
+            p.rect_stroke(
+                Rect::from_min_max(v(-8., -7.), v(8., 4.)),
+                2.,
+                s,
+                egui::StrokeKind::Inside,
+            );
+            line((0., 4.), (0., 8.));
+            line((-5., 8.), (5., 8.));
+        }
         Icon::Settings => {
             for x in [-5., 0., 5.] {
                 p.circle_filled(v(x, 0.), 1.3 * z, color);
@@ -219,6 +230,73 @@ pub enum Kind {
     Primary,
     Secondary,
     Ghost,
+}
+pub fn chip(ui: &mut egui::Ui, text: &str, which: Icon, p: Palette, active: bool) -> Response {
+    let font = FontId::proportional(13.);
+    let galley = ui.painter().layout_no_wrap(text.into(), font, p.text);
+    let width = if text.is_empty() {
+        32.
+    } else {
+        galley.size().x + 44.
+    };
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(width.min(ui.available_width()), 32.),
+        Sense::click(),
+    );
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), text));
+    let hover = ui.ctx().animate_bool_with_time_and_easing(
+        response.id.with("hover"),
+        response.hovered(),
+        0.20,
+        egui::emath::easing::cubic_in_out,
+    );
+    let press = ui.ctx().animate_bool_with_time(
+        response.id.with("press"),
+        response.is_pointer_button_down_on(),
+        0.10,
+    );
+    let painted = rect.shrink(press * 0.7);
+    ui.painter()
+        .rect_filled(painted, 10., mix(p.surface, p.line, hover * 0.45));
+    ui.painter().rect_stroke(
+        painted,
+        10.,
+        Stroke::new(1.0_f32, mix(p.line, ACCENT, hover * 0.5)),
+        egui::StrokeKind::Inside,
+    );
+    let icon_color = if active {
+        GREEN
+    } else {
+        mix(p.muted, p.text, hover * 0.5)
+    };
+    let center = if text.is_empty() {
+        rect.center()
+    } else {
+        egui::pos2(rect.left() + 18., rect.center().y)
+    };
+    icon(
+        ui.painter(),
+        Rect::from_center_size(center, Vec2::splat(18.)),
+        which,
+        icon_color,
+    );
+    if !text.is_empty() {
+        ui.painter().galley(
+            egui::pos2(rect.left() + 34., rect.center().y - galley.size().y / 2.),
+            galley,
+            if active { p.text } else { p.muted },
+        );
+    }
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            painted.expand(2.),
+            12.,
+            Stroke::new(1.0_f32, ACCENT),
+            egui::StrokeKind::Outside,
+        );
+    }
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 pub fn button(
     ui: &mut egui::Ui,

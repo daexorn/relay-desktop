@@ -10,6 +10,7 @@ mod images;
 mod limits;
 mod model;
 mod storage;
+mod timeline;
 mod ui;
 
 fn main() -> eframe::Result {

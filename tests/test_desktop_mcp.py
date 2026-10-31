@@ -51,6 +51,13 @@ class DesktopTests(unittest.TestCase):
                 self.assertEqual(event['sequence'],sequence);sequence+=1;chunks.append(base64.b64decode(event['data']))
             self.assertEqual(b''.join(chunks),body);self.assertEqual(event['sha256'],hashlib.sha256(body).hexdigest())
             self.service.result(request['id'],{'ok':True});self.assertTrue(result.get(timeout=2)['ok'])
+    def test_download_destination_is_forwarded_to_desktop(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'example.jar';path.write_bytes(b'jar')
+            destination='C:/Users/Player/Minecraft/mods/example.jar'
+            result=self.call('download_file',{'server_path':str(path),'destination':destination})
+            event=self.events.get(timeout=2);self.assertEqual(event['input']['destination'],destination)
+            self.service.result(event['id'],{'ok':False,'message':'test finished'});self.assertFalse(result.get(timeout=2)['ok'])
     def test_cancel_resolves_waiting_tool(self):
         result=self.call('run_local_command',{'command':'echo example'});self.events.get(timeout=2);self.service.cancel('test-session');self.assertFalse(result.get(timeout=2)['ok'])
 

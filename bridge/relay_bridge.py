@@ -380,7 +380,7 @@ class Run:
         args = command(owner.binary, sid, resume, model, mode, effort)
         if getattr(owner,"desktop_requested",False):
             self.desktop_enabled=True
-            args += ["--mcp-config", owner.desktop.config(sid), "--append-system-prompt", "Relay desktop tools operate on the user's computer, not this server. Use relay_desktop.download_file for delivery to the computer, and relay_desktop.run_local_command for local commands. The user approves every local action in Relay. Never claim local execution or delivery before the tool succeeds. Local computer context: " + self.desktop_context]
+            args += ["--mcp-config", owner.desktop.config(sid), "--append-system-prompt", "Relay desktop tools operate on the user's computer, not this server. Use relay_desktop.download_file for delivery to the computer, and relay_desktop.run_local_command for local commands. Relay applies the local permission mode: Auto runs commands and downloads without per-action confirmation; other modes ask the user. This is full access with the local user permissions; the working directory is not a sandbox. Invoke the tools directly rather than asking for approval in chat. Never claim local execution or delivery before the tool succeeds. Local computer context: " + self.desktop_context]
             env["MCP_TOOL_TIMEOUT"]="650000"
         self.process = subprocess.Popen(args, cwd=cwd, env=env,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -423,6 +423,11 @@ class Run:
                     req = data.get("request", {})
                     request_id = data.get("request_id", "")
                     if req.get("subtype") == "can_use_tool":
+                        if self.desktop_enabled and req.get("tool_name") in ("mcp__relay_desktop__download_file","mcp__relay_desktop__run_local_command"):
+                            # Actual authorization is enforced by the desktop UI
+                            # or its locally enabled automatic policy, not here.
+                            self.write({"type":"control_response","response":{"subtype":"success","request_id":request_id,"response":{"behavior":"allow","updatedInput":req.get("input",{})}}})
+                            continue
                         self.pending[request_id] = req
                         self.owner.send({"type": "permission", "sid": self.sid, "id": request_id,
                                          "tool": req.get("tool_name", "Действие"), "input": req.get("input", {})})

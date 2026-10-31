@@ -23,7 +23,7 @@ for line in sys.stdin:
  if r.get('type')=='control_request':
   send({'type':'control_response','response':{'subtype':'success','request_id':r['request_id'],'response':{}}})
  elif r.get('type')=='user':
-  send({'type':'control_request','request_id':'test-permission','request':{'subtype':'can_use_tool','tool_name':'Edit','input':{'file_path':'/tmp/a'}}})
+  send({'type':'control_request','request_id':'test-permission','request':{'subtype':'can_use_tool','tool_name':('mcp__relay_desktop__run_local_command' if r.get('message',{}).get('content',[{}])[0].get('text')=='relay-pc-tool' else 'Edit'),'input':{'file_path':'/tmp/a'}}})
  elif r.get('type')=='control_response':
   send({'type':'assistant','message':{'content':[{'type':'text','text':r['response']['response']['behavior']}]}})
   send({'type':'result','is_error':False,'result':'done'})
@@ -130,6 +130,14 @@ class ProtocolTests(unittest.TestCase):
         # Same process accepts another turn, rather than accidentally forking the conversation.
         pid=self.host.runs[self.sid].process.pid
         self.prompt();self.wait('permission');self.assertEqual(pid,self.host.runs[self.sid].process.pid)
+
+    def test_desktop_tool_permission_is_delegated_to_native_client(self):
+        source=(Path(__file__).parents[1]/'bridge/desktop_mcp.py').read_text()
+        with mock.patch.object(bridge,'DESKTOP_SOURCE',source,create=True):
+            self.host.dispatch({'op':'prompt','sid':self.sid,'cwd':str(self.root),'text':'relay-pc-tool','mode':'manual','desktop_enabled':True})
+        event=self.events.get(timeout=3)
+        self.assertEqual(event['type'],'claude')
+        self.assertEqual(event['data']['message']['content'][0]['text'],'allow')
 
     def test_duplicate_prompt_does_not_clear_running_flag(self):
         self.prompt();self.wait('permission')

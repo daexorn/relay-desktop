@@ -25,6 +25,8 @@ pub struct Server {
     pub effort: String,
     #[serde(default)]
     pub local_workspace: Option<String>,
+    #[serde(default)]
+    pub local_control: bool,
 }
 fn default_mode() -> String {
     "auto".into()
@@ -49,6 +51,7 @@ impl Default for Server {
             model: default_model(),
             effort: default_model(),
             local_workspace: None,
+            local_control: false,
         }
     }
 }
