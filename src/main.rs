@@ -5,6 +5,7 @@
 
 mod app;
 mod artifacts;
+mod board;
 mod connection;
 mod desktop;
 mod gametest;

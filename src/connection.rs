@@ -251,8 +251,9 @@ async fn run(
             format!(
                 "python3 -u -c {}",
                 shell_quote(&format!(
-                    "DESKTOP_SOURCE = {}\n{}",
+                    "DESKTOP_SOURCE = {}\nBOARD_SOURCE = {}\n{}",
                     serde_json::to_string(include_str!("../bridge/desktop_mcp.py"))?,
+                    serde_json::to_string(include_str!("../bridge/board.py"))?,
                     include_str!("../bridge/relay_bridge.py")
                 ))
             ),

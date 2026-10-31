@@ -101,6 +101,23 @@ pub struct Settings {
     pub selected: Option<String>,
     #[serde(default)]
     pub light: bool,
+    /// Shown on the team board and in agents' names; defaults to the OS user.
+    #[serde(default)]
+    pub name: String,
+}
+impl Settings {
+    pub fn actor(&self) -> String {
+        if !self.name.trim().is_empty() {
+            return self.name.trim().to_owned();
+        }
+        std::env::var("USERNAME").or_else(|_| std::env::var("USER")).unwrap_or_else(|_| "Relay".into())
+    }
+}
+pub fn hostname() -> String {
+    std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .or_else(|_| std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_owned()))
+        .unwrap_or_else(|_| "pc".into())
 }
 
 #[derive(Clone, Default, Deserialize, Debug)]

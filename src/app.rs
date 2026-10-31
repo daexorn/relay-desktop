@@ -114,6 +114,10 @@ pub struct RelayApp {
     desktop_requests: Vec<(String, Value)>,
     /// Latest status of each in-game test, by request id.
     game_tests: Vec<(String, Value)>,
+    board_open: bool,
+    board_view: crate::board::BoardView,
+    boards: HashMap<String, Value>,
+    board_polled: Option<Instant>,
     downloads: crate::artifacts::Downloads,
 }
 fn key(server: &str, sid: &str) -> String {
@@ -164,6 +168,10 @@ impl RelayApp {
             close_confirm: false,
             desktop_requests: vec![],
             game_tests: vec![],
+            board_open: false,
+            board_view: Default::default(),
+            boards: HashMap::new(),
+            board_polled: None,
             downloads: Default::default(),
         };
         if demo {
@@ -229,6 +237,15 @@ impl RelayApp {
                     app.chats.get_mut(&k).unwrap().mode = "manual".into();
                 }
                 app.desktop_requests.push(("demo".into(),json!({"id":"demo-action","tool":"run_local_command","input":{"command":"ls -lh mods/ && tail -n 20 logs/latest.log","timeout_seconds":30}})));
+            }
+            if let Some(path) = args.iter().position(|a| a == "--demo-board").and_then(|i| args.get(i + 1)) {
+                if let Ok(state) = std::fs::read_to_string(path).map(|t| serde_json::from_str::<Value>(&t)) {
+                    if let Ok(state) = state {
+                        app.boards.insert("demo".into(), state);
+                        app.board_open = true;
+                        app.board_view.selected = args.iter().position(|a| a == "--demo-select").and_then(|i| args.get(i + 1)).cloned();
+                    }
+                }
             }
             if args.iter().any(|a| a == "--demo-gametest") {
                 app.game_tests.push(("demo".into(),json!({"id":"t1","stage":"done","purpose":"Наковальня: мини-игра ковки открывается и принимает удары","result":{"ok":true,"seconds":38,"local_folder":"/tmp"}})));
@@ -668,6 +685,14 @@ impl RelayApp {
                 self.desktop_requests
                     .retain(|(s, v)| s != &server || v["id"] != value["id"]);
             }
+            "board" => {
+                if value["state"]["unchanged"] != true && value["state"].is_object() {
+                    self.boards.insert(server, value["state"].clone());
+                }
+            }
+            "board_error" => {
+                self.notice = format!("Доска: {}", value["message"].as_str().unwrap_or(""));
+            }
             "game_test_status" => {
                 let id = value["id"].clone();
                 self.game_tests.retain(|(_, v)| v["id"] != id);
@@ -882,7 +907,7 @@ impl RelayApp {
             json!({"op":"_desktop_workspace","path":if server.local_control {server.local_workspace.clone()}else{None}}),
         );
         self.controller.send(&server.id,json!({"op":"_desktop_policy","sid":c.sid,"auto":server.local_control && c.mode=="auto"}));
-        let request = json!({"op":"prompt","sid":c.sid,"cwd":c.cwd,"text":text,"images":images,"files":files,"model":c.model,"mode":c.mode,"effort":c.effort,"desktop_enabled":(server.local_control && server.local_workspace.is_some()) || server.tests!="off","desktop_context":{"os":std::env::consts::OS,"workspace":server.local_workspace,"downloads":dirs::download_dir(),"auto":c.mode=="auto","local":server.local_control && server.local_workspace.is_some(),"tests":server.tests}});
+        let request = json!({"op":"prompt","sid":c.sid,"cwd":c.cwd,"text":text,"images":images,"files":files,"model":c.model,"mode":c.mode,"effort":c.effort,"actor":self.settings.actor(),"desktop_enabled":(server.local_control && server.local_workspace.is_some()) || server.tests!="off","desktop_context":{"os":std::env::consts::OS,"workspace":server.local_workspace,"downloads":dirs::download_dir(),"auto":c.mode=="auto","local":server.local_control && server.local_workspace.is_some(),"tests":server.tests}});
         if self.demo {
             c.error = "Это предпросмотр интерфейса. Добавь свой сервер для работы.".into();
             return;
@@ -1008,6 +1033,12 @@ impl RelayApp {
                     });
                 }
                 ui.with_layout(Layout::bottom_up(Align::Center), |ui| {
+                    let board = design::button(ui, "", Some(Icon::Board), if self.board_open { Kind::Secondary } else { Kind::Ghost }, p, Vec2::splat(36.))
+                        .on_hover_text(if self.board_open { "Вернуться к разговорам" } else { "Доска задач команды" });
+                    if board.clicked() {
+                        self.board_open = !self.board_open;
+                        self.board_polled = None;
+                    }
                     if design::button(
                         ui,
                         "",
@@ -1872,6 +1903,48 @@ impl RelayApp {
         if attach {
             self.pick_images();
         }
+    }
+    fn board_panel(&mut self, ctx: &egui::Context) {
+        let p = design::animated_palette(ctx, self.settings.light);
+        let server = self.server();
+        if let Some(s) = &server {
+            if self.connected(&s.id)
+                && self.board_polled.is_none_or(|at| at.elapsed() >= Duration::from_secs(3))
+            {
+                self.board_polled = Some(Instant::now());
+                let since = self.boards.get(&s.id).map(|b| b["rev"].clone());
+                self.controller.send(&s.id, json!({"op":"board","since":since}));
+            }
+            ctx.request_repaint_after(Duration::from_secs(3));
+        }
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(p.base))
+            .show(ctx, |ui| {
+                let Some(server) = server else {
+                    ui.centered_and_justified(|ui| label(ui, "Подключи сервер, чтобы открыть доску", 14., p.muted));
+                    return;
+                };
+                let Some(state) = self.boards.get(&server.id).cloned() else {
+                    ui.centered_and_justified(|ui| {
+                        label(
+                            ui,
+                            if self.connected(&server.id) { "Загружаем доску…" } else { "Подключись к серверу, чтобы открыть доску" },
+                            14.,
+                            p.muted,
+                        )
+                    });
+                    return;
+                };
+                let me = self.settings.actor();
+                let mut ops = crate::board::show(ui, &state, &mut self.board_view, p, &me);
+                ops.extend(crate::board::take_queued(&mut self.board_view));
+                if !ops.is_empty() {
+                    self.controller.send(
+                        &server.id,
+                        json!({"op":"board_apply","ops":ops,"actor":me,"host":model::hostname()}),
+                    );
+                }
+            });
     }
     fn game_test_cards(&mut self, ui: &mut egui::Ui, server: &str, p: Palette) {
         let mut stop = None;
@@ -3215,8 +3288,12 @@ impl eframe::App for RelayApp {
             self.new_chat();
         }
         self.rail(ctx);
-        self.sidebar(ctx);
-        self.main_panel(ctx);
+        if self.board_open {
+            self.board_panel(ctx);
+        } else {
+            self.sidebar(ctx);
+            self.main_panel(ctx);
+        }
         self.dialogs(ctx);
         if self.chats.values().any(|c| c.busy) || self.remote.values().any(|r| r.connecting) {
             ctx.request_repaint_after(Duration::from_millis(16));

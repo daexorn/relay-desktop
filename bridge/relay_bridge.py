@@ -332,6 +332,26 @@ class Transcripts:
         return result[-600:]
 
 
+def load_board():
+    """The board module arrives with the bridge; agents get it as a file to run as MCP or CLI."""
+    source = globals().get("BOARD_SOURCE")
+    if not source:
+        return None, None
+    namespace = {"__name__": "relay_board"}
+    exec(source, namespace)
+    # Next to the data, so terminal agents (`relay-board`) run the same version as Relay.
+    for path in (namespace["root"]() / "board.py", Path.home() / ".cache/relay-desktop/board.py"):
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if not path.exists() or path.read_text(encoding="utf-8") != source:
+                path.write_text(source, encoding="utf-8")
+                path.chmod(0o664)
+            return namespace, path
+        except OSError:
+            continue
+    return namespace, None
+
+
 def claude_binary():
     candidates = [shutil.which("claude"), str(Path.home() / ".local/bin/claude"), "/usr/local/bin/claude", "/usr/bin/claude"]
     for path in candidates:
@@ -380,6 +400,12 @@ class Run:
         env["CLAUDE_CODE_ENTRYPOINT"] = "relay-desktop"
         args = command(owner.binary, sid, resume, model, mode, effort)
         system_prompt="Relay supports downloadable server files in chat. When the user requests a built mod or other generated artifact, include a Markdown download link [filename](absolute_server_file_path) for the real existing file. Verify it exists before offering it. A bare filename or a statement that the build succeeded is not file delivery. Never claim the file was delivered to the PC unless the transfer tool actually succeeded."
+        servers = {}
+        if getattr(owner, "board_file", None):
+            actor = getattr(owner, "actor", "") or "Relay"
+            servers["relay_board"] = {"type": "stdio", "command": sys.executable, "args": [str(owner.board_file), "mcp"],
+                                      "env": {"RELAY_BOARD_ACTOR": f"Claude · {actor}", "RELAY_BOARD_NAME": "sbrp"}}
+            system_prompt += " The team keeps a shared task board (relay_board tools; the same board is shown in Relay and available in a terminal as `relay-board` or `python3 /opt/relay-board/board.py`). Before substantial work, check board_overview and the relevant tasks; claim a task when you start it, record progress with comments, finish with board_done (or board_move to review when a person must check) and a summary of versions, files and how it was verified. Create tasks for follow-ups and bugs you find instead of leaving them only in chat. Do not invent progress."
         if getattr(owner,"desktop_requested",False):
             self.desktop_enabled=True
             try:context=json.loads(self.desktop_context or "{}")
@@ -387,13 +413,15 @@ class Run:
             local=bool(context.get("local",True))
             tests=context.get("tests","off") if context.get("tests") in ("auto","ask") else "off"
             tools=(("download_file","run_local_command") if local else ())+(("minecraft_test",) if tests!="off" else ())
-            args += ["--mcp-config", owner.desktop.config(sid,tools)]
+            servers.update(json.loads(owner.desktop.config(sid,tools))["mcpServers"])
             if local:
                 system_prompt += " Relay desktop tools operate on the user's computer, not this server. Use relay_desktop.download_file for delivery to the computer, and relay_desktop.run_local_command for local commands. Relay applies the local permission mode: Auto runs commands and downloads without per-action confirmation; other modes ask the user. This is full access with the local user permissions; the working directory is not a sandbox. Invoke the tools directly rather than asking for approval in chat. Never claim local execution or delivery before the tool succeeds."
             if tests!="off":
                 system_prompt += " In-game tests: relay_desktop.minecraft_test runs a hidden Minecraft with given mod jars on the user's computer and returns screenshots and logs saved on this server. Call it when a change can only be confirmed by playing (GUI, rendering, input, client behaviour). The user's Relay setting is '" + ("run automatically" if tests=="auto" else "ask before each run") + "'; Relay enforces it, so call the tool directly rather than asking in chat. Look at the returned screenshots yourself before reporting. If the test was skipped or failed, say what remains unverified."
             system_prompt += " Local computer context: " + self.desktop_context
             env["MCP_TOOL_TIMEOUT"]="2000000"
+        if servers:
+            args += ["--mcp-config", json.dumps({"mcpServers": servers})]
         args += ["--append-system-prompt",system_prompt]
         self.process = subprocess.Popen(args, cwd=cwd, env=env,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -436,7 +464,7 @@ class Run:
                     req = data.get("request", {})
                     request_id = data.get("request_id", "")
                     if req.get("subtype") == "can_use_tool":
-                        if self.desktop_enabled and req.get("tool_name") in ("mcp__relay_desktop__download_file","mcp__relay_desktop__run_local_command","mcp__relay_desktop__minecraft_test"):
+                        if (self.desktop_enabled and req.get("tool_name") in ("mcp__relay_desktop__download_file","mcp__relay_desktop__run_local_command","mcp__relay_desktop__minecraft_test")) or str(req.get("tool_name","")).startswith("mcp__relay_board__"):
                             # Actual authorization is enforced by the desktop UI
                             # or its locally enabled automatic policy, not here.
                             self.write({"type":"control_response","response":{"subtype":"success","request_id":request_id,"response":{"behavior":"allow","updatedInput":req.get("input",{})}}})
@@ -593,6 +621,8 @@ class Bridge:
         self.desktop = None
         self.desktop_requested = False
         self.desktop_context = ""
+        self.actor = ""
+        self.board, self.board_file = load_board()
 
     def hello(self):
         try:
@@ -663,6 +693,7 @@ class Bridge:
                         exec(source,namespace)
                         self.desktop=namespace["RelayDesktop"](self.send)
                     self.desktop_requested=desktop_enabled
+                    self.actor=str(req.get("actor") or "")[:80]
                     self.desktop_context=json.dumps(req.get("desktop_context",{}),ensure_ascii=False)[:5000] if desktop_enabled else ""
                     run = self.runs.get(sid)
                     if run and run.busy:
@@ -697,6 +728,23 @@ class Bridge:
                 run = self.runs.get(valid_id(req.get("sid")))
                 if run:
                     run.stop()
+            elif op == "board":
+                if not self.board:
+                    raise ValueError("Обнови Relay: доска приходит вместе с ним.")
+                board = self.board["Board"](str(req.get("board") or "sbrp"))
+                self.send({"type": "board", "state": board.state(since=req.get("since"))})
+            elif op == "board_apply":
+                if not self.board:
+                    raise ValueError("Обнови Relay: доска приходит вместе с ним.")
+                board = self.board["Board"](str(req.get("board") or "sbrp"))
+                actor = str(req.get("actor") or "Relay")[:80]
+                host = str(req.get("host") or "relay")[:80]
+                try:
+                    result = board.apply(req.get("ops") or [], actor, host, "relay")
+                except (ValueError, KeyError, TypeError) as error:
+                    self.send({"type": "board_error", "message": str(error)[:500]})
+                    result = None
+                self.send({"type": "board", "state": board.state(), "applied": result})
             elif op == "ping":
                 self.send({"type": "pong"})
             else:

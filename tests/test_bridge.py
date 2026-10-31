@@ -139,6 +139,20 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(event['type'],'claude')
         self.assertEqual(event['data']['message']['content'][0]['text'],'allow')
 
+    def test_board_ops_and_session_mcp_config(self):
+        source=(Path(__file__).parents[1]/'bridge/board.py').read_text()
+        with mock.patch.dict('os.environ',{'RELAY_BOARD_DIR':str(self.root/'board'),'HOME':str(self.root)}),mock.patch.object(bridge,'BOARD_SOURCE',source,create=True):
+            host=bridge.Bridge(send=self.events.put,transcripts=bridge.Transcripts(self.root/'transcripts'),binary=str(self.cli))
+            self.assertTrue(host.board_file.exists())
+            host.dispatch({'op':'board_apply','actor':'champ','host':'pc','ops':[{'op':'create','title':'Плавильня','status':'todo'}]})
+            state=self.wait('board')['state'];self.assertEqual(state['tasks'][0]['title'],'Плавильня');self.assertEqual(state['activity'][0]['actor'],'champ')
+            host.dispatch({'op':'board','since':state['rev']});self.assertTrue(self.wait('board')['state']['unchanged'])
+            host.dispatch({'op':'board_apply','ops':[{'op':'move','id':'T-404','status':'done'}]})
+            self.assertIn('T-404',self.wait('board_error')['message'])
+            with mock.patch.object(bridge.subprocess,'Popen',side_effect=OSError('stop')) as popen:
+                with self.assertRaises(OSError):bridge.Run(host,self.sid,str(self.root),'default','manual',False)
+            args=popen.call_args[0][0];config=json.loads(args[args.index('--mcp-config')+1])
+            self.assertEqual(config['mcpServers']['relay_board']['args'],[str(host.board_file),'mcp'])
     def test_duplicate_prompt_does_not_clear_running_flag(self):
         self.prompt();self.wait('permission')
         self.prompt();error=self.wait('error')

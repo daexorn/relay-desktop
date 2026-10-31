@@ -83,6 +83,7 @@ pub enum Icon {
     Arrow,
     Server,
     Computer,
+    Board,
 }
 pub fn icon(p: &egui::Painter, r: Rect, which: Icon, color: Color32) {
     let c = r.center();
@@ -189,6 +190,16 @@ pub fn icon(p: &egui::Painter, r: Rect, which: Icon, color: Color32) {
             );
             line((0., 4.), (0., 8.));
             line((-5., 8.), (5., 8.));
+        }
+        Icon::Board => {
+            for (x, h) in [(-6., 12.), (0., 8.), (6., 10.)] {
+                p.rect_stroke(
+                    Rect::from_min_size(v(x - 2., -7.), Vec2::new(4., h) * z),
+                    1.,
+                    s,
+                    egui::StrokeKind::Inside,
+                );
+            }
         }
         Icon::Settings => {
             for x in [-5., 0., 5.] {
