@@ -93,7 +93,6 @@ pub struct RelayApp {
     chats: HashMap<String, Chat>,
     selected_chat: HashMap<String, String>,
     search: String,
-    all_folders: bool,
     editor: Option<Editor>,
     trust: Option<Trust>,
     folder_open: bool,
@@ -143,7 +142,6 @@ impl RelayApp {
             chats: HashMap::new(),
             selected_chat: HashMap::new(),
             search: String::new(),
-            all_folders: false,
             editor: None,
             trust: None,
             folder_open: false,
@@ -284,8 +282,8 @@ impl RelayApp {
             egui::Visuals::dark()
         };
         v.panel_fill = p.base;
-        v.window_corner_radius = egui::CornerRadius::same(22);
-        v.menu_corner_radius = egui::CornerRadius::same(14);
+        v.window_corner_radius = egui::CornerRadius::same(14);
+        v.menu_corner_radius = egui::CornerRadius::same(10);
         v.window_shadow = egui::epaint::Shadow {
             offset: [0, 12],
             blur: 48,
@@ -298,30 +296,32 @@ impl RelayApp {
             &mut v.widgets.active,
             &mut v.widgets.noninteractive,
         ] {
-            w.corner_radius = egui::CornerRadius::same(11);
+            w.corner_radius = egui::CornerRadius::same(8);
         }
         v.window_stroke = Stroke::new(1.0_f32, p.line);
         v.window_fill = p.surface;
         v.faint_bg_color = p.side;
         v.extreme_bg_color = p.side;
         v.override_text_color = Some(p.text);
-        v.selection.bg_fill = ACCENT.gamma_multiply(0.35);
+        v.selection.bg_fill = ACCENT.gamma_multiply(0.3);
+        v.hyperlink_color = ACCENT;
         v.selection.stroke = Stroke::new(1.0_f32, p.text);
         v.widgets.inactive.bg_fill = p.surface;
         v.widgets.inactive.weak_bg_fill = p.surface;
         v.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, p.line);
         v.widgets.hovered.bg_fill = p.line;
         v.widgets.hovered.weak_bg_fill = p.line;
-        v.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, ACCENT);
+        v.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, design::mix(p.line, ACCENT, 0.5));
         v.widgets.active.bg_fill = ACCENT.gamma_multiply(0.35);
         v.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, p.line);
         ctx.set_visuals(v);
         let mut style = (*ctx.style()).clone();
         style.spacing.item_spacing = Vec2::new(6.0, 5.0);
-        style.spacing.button_padding = Vec2::new(12.0, 9.0);
-        style.spacing.interact_size.y = 30.;
-        style.spacing.window_margin = egui::Margin::same(24);
-        style.animation_time = 0.28;
+        style.spacing.button_padding = Vec2::new(10.0, 6.0);
+        style.spacing.interact_size.y = 28.;
+        style.spacing.window_margin = egui::Margin::same(18);
+        style.spacing.menu_margin = egui::Margin::same(6);
+        style.animation_time = 0.18;
         style
             .text_styles
             .insert(egui::TextStyle::Body, FontId::proportional(14.0));
@@ -380,16 +380,13 @@ impl RelayApp {
             );
         }
         if let Some(s) = self.server() {
-            let k = key(&s.id, &session.id);
-            let chat = self.chats.entry(k).or_insert_with(|| {
-                let mut chat = Chat::new(session.id.clone(), session.cwd.clone(), session.title);
-                chat.mode = s.mode.clone();
-                chat.model = s.model.clone();
-                chat.effort = s.effort.clone();
-                chat
-            });
+            let chat = self.chat_entry(&s, &session);
             if !chat.loaded && !chat.loading {
                 chat.loading = true;
+                self.controller
+                    .send(&s.id, json!({"op":"history","sid":session.id}));
+            } else if chat.loaded && !chat.busy {
+                // Quietly pick up anything written from a terminal since the last load.
                 self.controller
                     .send(&s.id, json!({"op":"history","sid":session.id}));
             }
@@ -399,6 +396,53 @@ impl RelayApp {
                 p.last_session = Some(session.id);
             }
             self.save();
+        }
+    }
+    fn open_folders(&mut self) {
+        let Some(server) = self.server() else {
+            return;
+        };
+        if self.connected(&server.id) || self.demo {
+            self.folder_path = server.cwd.clone();
+            self.folder_open = true;
+            self.request_folders();
+        } else {
+            self.connect(server);
+        }
+    }
+    fn chat_entry(&mut self, s: &Server, session: &Session) -> &mut Chat {
+        self.chats.entry(key(&s.id, &session.id)).or_insert_with(|| {
+            let mut chat = Chat::new(session.id.clone(), session.cwd.clone(), session.title.clone());
+            chat.mode = s.mode.clone();
+            chat.model = s.model.clone();
+            chat.effort = s.effort.clone();
+            chat
+        })
+    }
+    fn prefetch(&mut self, server: &str, session: &Session) {
+        if self.demo || !self.connected(server) || self.chats.contains_key(&key(server, &session.id)) {
+            return;
+        }
+        let Some(s) = self.server().filter(|s| s.id == server) else {
+            return;
+        };
+        self.chat_entry(&s, session).loading = true;
+        self.controller
+            .send(server, json!({"op":"history","sid":session.id}));
+    }
+    fn refresh(&mut self, server: &str) {
+        if let Some(remote) = self.remote.get_mut(server) {
+            remote.sessions_requested = Some(Instant::now());
+            remote.sessions_loaded = false;
+            remote.sessions_retries = 0;
+            remote.sessions_error.clear();
+        }
+        self.controller.send(server, json!({"op":"sessions"}));
+        if let Some(sid) = self.selected_chat.get(server) {
+            if let Some(c) = self.chats.get(&key(server, sid)).filter(|c| c.loaded && !c.busy) {
+                self.controller
+                    .send(server, json!({"op":"history","sid":c.sid}));
+            }
         }
     }
     fn connect(&mut self, server: Server) {
@@ -858,30 +902,30 @@ impl RelayApp {
     fn rail(&mut self, ctx: &egui::Context) {
         let p = design::animated_palette(ctx, self.settings.light);
         egui::SidePanel::left("rail")
-            .exact_width(76.)
+            .exact_width(56.)
             .resizable(false)
-            .frame(egui::Frame::new().fill(p.rail).inner_margin(14.))
+            .show_separator_line(false)
+            .frame(egui::Frame::new().fill(p.rail).inner_margin(egui::Margin::symmetric(10, 14)))
             .show(ctx, |ui| {
-                ui.add_space(12.);
-                ui.add_space(16.);
+                ui.spacing_mut().item_spacing.y = 8.;
                 let mut marker = None;
                 for server in self.settings.servers.clone() {
                     let selected = self.settings.selected.as_deref() == Some(&server.id);
                     let (rect, response) =
-                        ui.allocate_exact_size(Vec2::splat(48.), egui::Sense::click());
+                        ui.allocate_exact_size(Vec2::splat(36.), egui::Sense::click());
                     let t = ctx.animate_bool_with_time(response.id.with("active"), selected, 0.2);
                     let hover = ctx.animate_bool_with_time(
                         response.id.with("hover"),
                         response.hovered(),
-                        0.23,
+                        0.16,
                     );
                     ui.painter().rect_filled(
                         rect,
-                        16.,
+                        10.,
                         design::mix(
-                            p.rail,
-                            design::mix(p.surface, ACCENT, 0.16),
-                            t.max(hover * 0.6),
+                            design::mix(p.rail, p.surface, hover),
+                            ACCENT.gamma_multiply(0.22),
+                            t,
                         ),
                     );
                     ui.painter().text(
@@ -893,23 +937,16 @@ impl RelayApp {
                             .take(2)
                             .collect::<String>()
                             .to_uppercase(),
-                        FontId::proportional(13.),
-                        design::mix(p.muted, ACCENT, t),
+                        FontId::proportional(12.),
+                        design::mix(p.muted, p.text, t.max(hover)),
                     );
                     if selected {
-                        marker = Some((rect.left() - 11., rect.center().y));
+                        marker = Some((rect.left() - 10., rect.center().y));
                     }
                     if self.connected(&server.id) {
-                        ui.painter().circle_filled(
-                            rect.right_bottom() - Vec2::splat(5.),
-                            5.,
-                            p.rail,
-                        );
-                        ui.painter().circle_filled(
-                            rect.right_bottom() - Vec2::splat(5.),
-                            3.,
-                            GREEN,
-                        );
+                        let dot = rect.right_bottom() - Vec2::splat(3.);
+                        ui.painter().circle_filled(dot, 4.5, p.rail);
+                        ui.painter().circle_filled(dot, 3., GREEN);
                     }
                     if response
                         .on_hover_text(format!("{} · {}", server.name, server.host))
@@ -924,18 +961,16 @@ impl RelayApp {
                             self.connect(server);
                         }
                     }
-                    ui.add_space(9.);
                 }
                 if let Some((x, y)) = marker {
                     let y = design::glide(ctx, egui::Id::new("server-selection-y"), y);
                     ui.painter().rect_filled(
-                        egui::Rect::from_center_size(egui::pos2(x, y), Vec2::new(3., 20.)),
+                        egui::Rect::from_center_size(egui::pos2(x, y), Vec2::new(3., 18.)),
                         2.,
                         ACCENT,
                     );
                 }
-                ui.add_space(5.);
-                if design::button(ui, "", Some(Icon::Plus), Kind::Ghost, p, Vec2::splat(48.))
+                if design::button(ui, "", Some(Icon::Plus), Kind::Ghost, p, Vec2::splat(36.))
                     .on_hover_text("Добавить сервер")
                     .clicked()
                 {
@@ -947,7 +982,6 @@ impl RelayApp {
                     });
                 }
                 ui.with_layout(Layout::bottom_up(Align::Center), |ui| {
-                    ui.add_space(4.);
                     if design::button(
                         ui,
                         "",
@@ -958,7 +992,7 @@ impl RelayApp {
                         }),
                         Kind::Ghost,
                         p,
-                        Vec2::splat(44.),
+                        Vec2::splat(36.),
                     )
                     .on_hover_text("Сменить тему")
                     .clicked()
@@ -973,13 +1007,15 @@ impl RelayApp {
     fn sidebar(&mut self, ctx: &egui::Context) {
         let p = design::animated_palette(ctx, self.settings.light);
         egui::SidePanel::left("sessions")
-            .default_width(258.)
-            .width_range(224.0..=320.0)
-            .frame(egui::Frame::new().fill(p.side).inner_margin(16.))
+            .default_width(264.)
+            .width_range(220.0..=360.0)
+            .show_separator_line(false)
+            .frame(egui::Frame::new().fill(p.side).inner_margin(egui::Margin::symmetric(10, 12)))
             .show(ctx, |ui| {
-                ui.add_space(8.);
+                ui.spacing_mut().item_spacing.y = 6.;
                 ui.horizontal(|ui| {
-                    label(ui, "Relay", 25., p.text);
+                    ui.add_space(6.);
+                    label(ui, "Relay", 17., p.text);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if design::button(
                             ui,
@@ -987,7 +1023,7 @@ impl RelayApp {
                             Some(Icon::Settings),
                             Kind::Ghost,
                             p,
-                            Vec2::splat(34.),
+                            Vec2::splat(28.),
                         )
                         .on_hover_text("Настройки подключения")
                         .clicked()
@@ -1003,145 +1039,105 @@ impl RelayApp {
                         }
                     });
                 });
-                ui.add_space(14.);
+                ui.add_space(6.);
                 if design::button(
                     ui,
                     "Новая сессия",
                     Some(Icon::Plus),
-                    Kind::Primary,
+                    Kind::Secondary,
                     p,
-                    Vec2::new(ui.available_width(), 42.),
+                    Vec2::new(ui.available_width(), 34.),
                 )
+                .on_hover_text("Ctrl+N")
                 .clicked()
                 {
                     self.new_chat();
                 }
-                ui.add_space(14.);
                 egui::Frame::new()
-                    .fill(p.base)
-                    .corner_radius(12.)
-                    .inner_margin(egui::Margin::symmetric(12, 10))
+                    .fill(design::mix(p.side, p.line, 0.45))
+                    .corner_radius(8.)
+                    .inner_margin(egui::Margin::symmetric(10, 6))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             let (r, _) =
-                                ui.allocate_exact_size(Vec2::splat(17.), egui::Sense::hover());
+                                ui.allocate_exact_size(Vec2::splat(15.), egui::Sense::hover());
                             design::icon(ui.painter(), r, Icon::Search, p.muted);
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.search)
                                     .frame(false)
-                                    .hint_text("Поиск сессий")
+                                    .hint_text(RichText::new("Поиск").color(p.muted))
+                                    .font(FontId::proportional(13.5))
                                     .desired_width(ui.available_width()),
                             );
                         });
                     });
-                ui.add_space(14.);
                 let Some(server) = self.server() else {
+                    ui.add_space(10.);
                     label(ui, "Подключи свой первый сервер", 13., p.muted);
                     return;
                 };
-                label(ui, "Рабочая папка", 12., p.muted);
-                ui.add_space(3.);
-                if design::button(
-                    ui,
-                    &model::shorten(&server.cwd, 27),
-                    Some(Icon::Folder),
-                    Kind::Secondary,
-                    p,
-                    Vec2::new(ui.available_width(), 40.),
-                )
-                .on_hover_text(&server.cwd)
-                .clicked()
-                {
-                    if self.connected(&server.id) {
-                        self.folder_path = server.cwd.clone();
-                        self.folder_open = true;
-                        self.request_folders();
-                    } else {
-                        self.connect(server.clone());
-                    }
-                }
-                ui.add_space(12.);
-                ui.horizontal(|ui| {
-                    design::toggle(ui, &mut self.all_folders, "Все папки", p);
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if design::button(
-                            ui,
-                            "",
-                            Some(Icon::Refresh),
-                            Kind::Ghost,
-                            p,
-                            Vec2::splat(30.),
-                        )
-                        .on_hover_text("Обновить список")
-                        .clicked()
-                        {
-                            if let Some(remote) = self.remote.get_mut(&server.id) {
-                                remote.sessions_requested = Some(Instant::now());
-                                remote.sessions_loaded = false;
-                                remote.sessions_retries = 0;
-                                remote.sessions_error.clear();
-                            }
-                            self.controller.send(&server.id, json!({"op":"sessions"}));
-                        }
-                    });
-                });
-                ui.add_space(16.);
-                label(ui, "Сессии", 16., p.text);
-                ui.add_space(5.);
                 let connected = self.connected(&server.id);
                 let connecting = self.remote.get(&server.id).is_some_and(|r| r.connecting);
                 egui::TopBottomPanel::bottom("connection-footer")
                     .frame(egui::Frame::NONE)
+                    .show_separator_line(false)
                     .show_inside(ui, |ui| {
-                        ui.add_space(18.);
+                        ui.add_space(8.);
                         egui::Frame::new()
-                            .fill(p.surface)
-                            .corner_radius(16.)
-                            .inner_margin(14.)
+                            .fill(design::mix(p.side, p.line, 0.3))
+                            .corner_radius(10.)
+                            .inner_margin(egui::Margin::symmetric(12, 10))
                             .show(ui, |ui| {
                                 ui.set_width(ui.available_width());
-                                ui.spacing_mut().interact_size.y = 18.;
-                                ui.spacing_mut().item_spacing.y = 4.;
+                                ui.spacing_mut().interact_size.y = 16.;
+                                ui.spacing_mut().item_spacing.y = 3.;
                                 ui.horizontal(|ui| {
                                     let (r, _) = ui
                                         .allocate_exact_size(Vec2::splat(8.), egui::Sense::hover());
                                     ui.painter().circle_filled(
                                         r.center(),
-                                        3.,
-                                        if connected { GREEN } else { p.muted },
-                                    );
-                                    label(
-                                        ui,
+                                        3.5,
                                         if connected {
-                                            "На связи"
+                                            GREEN
                                         } else if connecting {
-                                            "Подключаемся…"
+                                            ACCENT
                                         } else {
-                                            "Нет подключения"
+                                            p.muted
                                         },
-                                        12.,
-                                        p.muted,
                                     );
-                                });
-                                label(ui, &server.name, 14., p.text);
-                                label(ui, format!("{}@{}", server.user, server.host), 11., p.muted);
+                                    label(ui, &server.name, 13., p.text);
+                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        label(
+                                            ui,
+                                            if connected {
+                                                "на связи"
+                                            } else if connecting {
+                                                "подключаемся…"
+                                            } else {
+                                                "нет связи"
+                                            },
+                                            11.5,
+                                            p.muted,
+                                        );
+                                    });
+                                })
+                                .response
+                                .on_hover_text(format!("{}@{}", server.user, server.host));
                                 if connected {
-                                    ui.add_space(8.);
-                                    ui.separator();
-                                    ui.add_space(5.);
                                     if let Some(remote) = self.remote.get(&server.id) {
+                                        ui.add_space(6.);
                                         limits::show(ui, &remote.usage, p, connected);
                                     }
                                 }
                                 if !connected && !connecting {
-                                    ui.add_space(5.);
+                                    ui.add_space(6.);
                                     if design::button(
                                         ui,
                                         "Подключиться",
                                         Some(Icon::Arrow),
-                                        Kind::Secondary,
+                                        Kind::Primary,
                                         p,
-                                        Vec2::new(ui.available_width(), 36.),
+                                        Vec2::new(ui.available_width(), 30.),
                                     )
                                     .clicked()
                                     {
@@ -1149,7 +1145,6 @@ impl RelayApp {
                                     }
                                 }
                             });
-                        ui.add_space(4.);
                     });
                 let sessions = self
                     .remote
@@ -1157,34 +1152,85 @@ impl RelayApp {
                     .map(|r| r.sessions.clone())
                     .unwrap_or_default();
                 let query = self.search.to_lowercase();
+                let refreshing = self
+                    .remote
+                    .get(&server.id)
+                    .is_some_and(|r| connected && !r.sessions_loaded);
+                ui.add_space(4.);
                 egui::ScrollArea::vertical()
                     .id_salt("session-list")
+                    .auto_shrink([false, false])
                     .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 1.;
                         let mut count = 0;
+                        let mut group = "";
                         for session in sessions {
-                            if (!self.all_folders && session.cwd != server.cwd)
-                                || !session.title.to_lowercase().contains(&query)
+                            if !query.is_empty()
+                                && !session.title.to_lowercase().contains(&query)
+                                && !session.cwd.to_lowercase().contains(&query)
                             {
                                 continue;
                             }
+                            let heading = day_group(session.modified);
+                            if heading != group {
+                                ui.add_space(if count == 0 { 6. } else { 12. });
+                                ui.horizontal(|ui| {
+                                    ui.add_space(8.);
+                                    label(ui, heading, 11.5, p.muted);
+                                    if count == 0 {
+                                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                            if refreshing {
+                                                design::dots(ui, p.muted);
+                                            } else if design::button(
+                                                ui,
+                                                "",
+                                                Some(Icon::Refresh),
+                                                Kind::Ghost,
+                                                p,
+                                                Vec2::splat(24.),
+                                            )
+                                            .on_hover_text("Обновить список и открытый разговор")
+                                            .clicked()
+                                            {
+                                                self.refresh(&server.id);
+                                            }
+                                        });
+                                    }
+                                });
+                                ui.add_space(3.);
+                                group = heading;
+                            }
                             count += 1;
+                            let k = key(&server.id, &session.id);
                             let selected = self.selected_chat.get(&server.id) == Some(&session.id);
+                            let busy = self.chats.get(&k).is_some_and(|c| c.busy);
                             let background = ui.painter().add(egui::Shape::Noop);
                             let row = egui::Frame::new()
-                                .inner_margin(egui::Margin::symmetric(12, 9))
+                                .inner_margin(egui::Margin::symmetric(10, 7))
                                 .show(ui, |ui| {
                                     ui.set_width(ui.available_width().max(120.));
-                                    ui.spacing_mut().item_spacing.y = 3.;
-                                    ui.spacing_mut().interact_size.y = 18.;
-                                    design::session_title(ui, &session.title, p);
-                                    ui.add_space(1.);
+                                    ui.spacing_mut().item_spacing.y = 2.;
+                                    design::session_title(
+                                        ui,
+                                        &session.title,
+                                        if selected { p.text } else { design::mix(p.text, p.muted, 0.25) },
+                                    );
                                     ui.horizontal(|ui| {
-                                        label(ui, relative(session.modified), 12., p.muted);
-                                        if self
-                                            .chats
-                                            .get(&key(&server.id, &session.id))
-                                            .is_some_and(|c| c.busy)
-                                        {
+                                        ui.spacing_mut().interact_size.y = 14.;
+                                        let folder = folder_name(&session.cwd);
+                                        let meta = format!("{folder} · {}", relative(session.modified));
+                                        let width = ui.available_width() - if busy { 32. } else { 0. };
+                                        let mut job = egui::text::LayoutJob::simple(
+                                            meta,
+                                            FontId::proportional(11.5),
+                                            p.muted,
+                                            width,
+                                        );
+                                        job.wrap.max_rows = 1;
+                                        job.wrap.break_anywhere = true;
+                                        job.wrap.overflow_character = Some('…');
+                                        ui.label(job);
+                                        if busy {
                                             design::dots(ui, ACCENT);
                                         }
                                     });
@@ -1198,75 +1244,62 @@ impl RelayApp {
                             let t = ctx.animate_bool_with_time(
                                 response.id.with("active"),
                                 selected,
-                                0.28,
+                                0.18,
                             );
                             let hover = ctx.animate_bool_with_time(
                                 response.id.with("hover"),
                                 response.hovered(),
-                                0.23,
+                                0.12,
                             );
                             ui.painter().set(
                                 background,
                                 egui::Shape::rect_filled(
                                     row.rect,
-                                    14.,
+                                    8.,
                                     design::mix(
                                         p.side,
-                                        design::mix(p.surface, ACCENT, 0.08),
-                                        t.max(hover * 0.65),
+                                        p.line,
+                                        t.max(hover * 0.55),
                                     ),
                                 ),
                             );
-                            if selected {
-                                ui.painter().rect_filled(
-                                    egui::Rect::from_center_size(
-                                        egui::pos2(row.rect.left() + 3., row.rect.center().y),
-                                        Vec2::new(2., 18.),
-                                    ),
-                                    2.,
-                                    ACCENT,
-                                );
+                            if response.hovered() {
+                                self.prefetch(&server.id, &session);
                             }
-                            if response.on_hover_text(&session.title).clicked() {
+                            if response
+                                .on_hover_text(format!("{}\n{}", session.title, session.cwd))
+                                .clicked()
+                            {
                                 self.select_chat(session);
                             }
-                            ui.add_space(4.);
                         }
                         if count == 0 {
-                            if let Some(remote) = self.remote.get(&server.id) {
-                                if !remote.sessions_loaded && connected {
-                                    label(
-                                        ui,
-                                        if remote.sessions_error.is_empty() {
-                                            "Загружаем сессии…"
-                                        } else {
-                                            &remote.sessions_error
-                                        },
-                                        12.,
-                                        p.muted,
-                                    );
+                            ui.add_space(14.);
+                            ui.horizontal_wrapped(|ui| {
+                                ui.add_space(8.);
+                                if refreshing {
+                                    design::dots(ui, p.muted);
                                 }
-                                if !remote.sessions.is_empty()
-                                    && !self.all_folders
-                                    && query.is_empty()
-                                    && ui.button("Показать сессии из всех папок").clicked()
-                                {
-                                    self.all_folders = true;
-                                }
-                            }
-                            ui.add_space(15.);
-                            label(
-                                ui,
-                                if !connected {
-                                    "Подключись, чтобы увидеть сессии"
-                                } else if query.is_empty() {
-                                    "Создай первую сессию в этой папке"
-                                } else {
-                                    "Нет подходящих разговоров"
-                                },
-                                13.,
-                                p.muted,
-                            );
+                                let error = self
+                                    .remote
+                                    .get(&server.id)
+                                    .map(|r| r.sessions_error.clone())
+                                    .unwrap_or_default();
+                                label(
+                                    ui,
+                                    if !connected && !connecting {
+                                        "Подключись, чтобы увидеть сессии"
+                                    } else if refreshing || connecting {
+                                        if error.is_empty() { "Загружаем сессии…" } else { &error }
+                                    } else if query.is_empty() {
+                                        "Пока нет ни одной сессии"
+                                    } else {
+                                        "Ничего не найдено"
+                                    },
+                                    12.5,
+                                    p.muted,
+                                );
+                            });
                         }
                     });
             });
@@ -1277,27 +1310,38 @@ impl RelayApp {
             .frame(egui::Frame::new().fill(p.base))
             .show(ctx, |ui| {
                 egui::TopBottomPanel::top("chat-header")
+                    .show_separator_line(false)
                     .frame(
                         egui::Frame::new()
                             .fill(p.base)
-                            .inner_margin(egui::Margin::symmetric(24, 12)),
+                            .inner_margin(egui::Margin::symmetric(18, 9)),
                     )
                     .show_inside(ui, |ui| {
                         ui.horizontal(|ui| {
-                            if let Some(server) = self.server() {
-                                let (r, _) =
-                                    ui.allocate_exact_size(Vec2::splat(18.), egui::Sense::hover());
-                                design::icon(ui.painter(), r, Icon::Server, p.muted);
-                                label(ui, &server.name, 14., p.text);
-                                label(ui, "/", 14., p.muted);
-                                let title = self
-                                    .current_key()
-                                    .and_then(|k| self.chats.get(&k))
-                                    .map(|c| model::shorten(&c.title, 50))
-                                    .unwrap_or_else(|| "Новая сессия".into());
-                                label(ui, title, 14., p.muted);
-                            } else {
-                                label(ui, "Ваше пространство", 14., p.muted);
+                            ui.set_min_height(28.);
+                            let chat = self.current_key().and_then(|k| self.chats.get(&k));
+                            if let Some(chat) = chat {
+                                let title = model::shorten(&chat.title, 70);
+                                label(ui, title, 14., p.text);
+                                ui.add_space(4.);
+                                let fresh = chat.messages.is_empty() && !chat.loading && !chat.busy;
+                                let cwd = chat.cwd.clone();
+                                let text = folder_name(&cwd).to_owned();
+                                if fresh {
+                                    if design::chip(ui, &text, Icon::Folder, p, false)
+                                        .on_hover_text(format!("{cwd}\nВыбрать папку для новой сессии"))
+                                        .clicked()
+                                    {
+                                        self.open_folders();
+                                    }
+                                } else {
+                                    let (r, _) =
+                                        ui.allocate_exact_size(Vec2::splat(14.), egui::Sense::hover());
+                                    design::icon(ui.painter(), r, Icon::Folder, p.muted);
+                                    label(ui, folder_name(&cwd), 12.5, p.muted).on_hover_text(cwd);
+                                }
+                            } else if self.server().is_none() {
+                                label(ui, "Relay", 14., p.muted);
                             }
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 if self.demo {
@@ -1308,7 +1352,8 @@ impl RelayApp {
                     });
                 if !self.notice.is_empty() {
                     egui::TopBottomPanel::top("notice")
-                        .frame(egui::Frame::new().fill(p.surface).inner_margin(16.))
+                        .show_separator_line(false)
+                        .frame(egui::Frame::new().fill(ACCENT.gamma_multiply(0.12)).inner_margin(egui::Margin::symmetric(18, 6)))
                         .show_inside(ui, |ui| {
                             ui.horizontal_wrapped(|ui| {
                                 label(ui, self.notice.clone(), 13., ACCENT);
@@ -1371,15 +1416,17 @@ impl RelayApp {
                     .frame(
                         egui::Frame::new()
                             .fill(p.base)
-                            .inner_margin(egui::Margin::symmetric(20, 10)),
+                            .inner_margin(egui::Margin { left: 20, right: 20, top: 4, bottom: 14 }),
                     )
+                    .show_separator_line(false)
                     .show_inside(ui, |ui| {
-                        design::content(ui, 860., |ui| {
+                        design::content(ui, 780., |ui| {
                             self.permission_card(ui, &k, p);
                             self.composer(ui, &k, p);
                         });
                     });
                 let chat = self.chats.get(&k).unwrap();
+                let place = format!("Папка {} — сменить можно в шапке", folder_name(&chat.cwd));
                 if chat.messages.is_empty() && !chat.loading {
                     let narrow = ui.available_width() < 560.;
                     egui::ScrollArea::vertical()
@@ -1387,13 +1434,13 @@ impl RelayApp {
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
                             ui.vertical_centered(|ui| {
-                                ui.add_space((ui.available_height() * 0.23).clamp(16., 120.));
-                                label(ui, "С чего начнём?", if narrow { 28. } else { 34. }, p.text);
+                                ui.add_space((ui.available_height() * 0.25).clamp(16., 160.));
+                                label(ui, "С чего начнём?", if narrow { 22. } else { 26. }, p.text);
                                 ui.add_space(12.);
                                 label(
                                     ui,
-                                    "Твои проекты, файлы и разговоры — под рукой.",
-                                    15.,
+                                    &place,
+                                    13.5,
                                     p.muted,
                                 );
                                 ui.add_space(24.);
@@ -1477,52 +1524,42 @@ impl RelayApp {
                                 let message = &chat.messages[index];
                                 ui.push_id(index, |ui| match message.role.as_str() {
                                     "user" => {
-                                        ui.add_space(8.);
-                                        egui::Frame::new()
-                                            .fill(p.surface)
-                                            .corner_radius(20.)
-                                            .inner_margin(20.)
-                                            .show(ui, |ui| {
-                                                label(ui, "Вы", 11., p.muted);
-                                                ui.add_space(3.);
-                                                ui.add(
-                                                    egui::Label::new(&message.text)
-                                                        .selectable(true)
-                                                        .wrap(),
-                                                );
-                                                if let Some(files) = chat.sent_images.get(&index) {
-                                                    ui.horizontal_wrapped(|ui| {
-                                                        for file in files {
-                                                            attachment_view(ui, file, p, false);
-                                                        }
-                                                    });
-                                                }
-                                            });
-                                        ui.add_space(28.);
+                                        ui.add_space(6.);
+                                        let files = chat.sent_images.get(&index);
+                                        let max = (ui.available_width() * 0.82).max(220.) - 28.;
+                                        let text_width = ui
+                                            .painter()
+                                            .layout(message.text.clone(), FontId::proportional(14.), p.text, max)
+                                            .size()
+                                            .x;
+                                        let width = if files.is_some() { max } else { text_width.ceil() + 2. };
+                                        ui.horizontal(|ui| {
+                                            ui.add_space((ui.available_width() - width - 28.).max(0.));
+                                            egui::Frame::new()
+                                                .fill(design::mix(p.surface, ACCENT, 0.07))
+                                                .stroke(Stroke::new(1.0_f32, design::mix(p.line, ACCENT, 0.12)))
+                                                .corner_radius(14.)
+                                                .inner_margin(egui::Margin::symmetric(14, 9))
+                                                .show(ui, |ui| {
+                                                    ui.set_max_width(width);
+                                                    ui.add(
+                                                        egui::Label::new(&message.text)
+                                                            .selectable(true)
+                                                            .wrap(),
+                                                    );
+                                                    if let Some(files) = files {
+                                                        ui.horizontal_wrapped(|ui| {
+                                                            for file in files {
+                                                                attachment_view(ui, file, p, false);
+                                                            }
+                                                        });
+                                                    }
+                                                });
+                                        });
+                                        ui.add_space(14.);
                                     }
                                     _ => {
-                                        ui.horizontal(|ui| {
-                                            label(ui, "Ассистент", 12., p.muted);
-                                            ui.with_layout(
-                                                Layout::right_to_left(Align::Center),
-                                                |ui| {
-                                                    if design::button(
-                                                        ui,
-                                                        "",
-                                                        Some(Icon::Copy),
-                                                        Kind::Ghost,
-                                                        p,
-                                                        Vec2::splat(28.),
-                                                    )
-                                                    .on_hover_text("Скопировать ответ")
-                                                    .clicked()
-                                                    {
-                                                        ui.ctx().copy_text(message.text.clone());
-                                                    }
-                                                },
-                                            );
-                                        });
-                                        ui.add_space(5.);
+                                        let top = ui.cursor().top();
                                         let file_links = crate::artifacts::links(&message.text);
                                         for (destination, _) in &file_links {
                                             self.markdown.add_link_hook(destination.clone());
@@ -1571,7 +1608,35 @@ impl RelayApp {
                                                 p,
                                             );
                                         }
-                                        ui.add_space(30.);
+                                        // Copy appears on hover; the row is always reserved so nothing jumps.
+                                        let (row, _) = ui.allocate_exact_size(
+                                            Vec2::new(ui.available_width(), 22.),
+                                            egui::Sense::hover(),
+                                        );
+                                        let area = egui::Rect::from_min_max(
+                                            egui::pos2(row.left(), top),
+                                            row.max,
+                                        );
+                                        let last = index + 1 == chat.messages.len() && !chat.busy;
+                                        if last || ui.rect_contains_pointer(area) {
+                                            let mut child = ui.new_child(
+                                                egui::UiBuilder::new().max_rect(row).layout(Layout::left_to_right(Align::Center)),
+                                            );
+                                            if design::button(
+                                                &mut child,
+                                                "",
+                                                Some(Icon::Copy),
+                                                Kind::Ghost,
+                                                p,
+                                                Vec2::splat(22.),
+                                            )
+                                            .on_hover_text("Скопировать ответ")
+                                            .clicked()
+                                            {
+                                                child.ctx().copy_text(message.text.clone());
+                                            }
+                                        }
+                                        ui.add_space(8.);
                                     }
                                 });
                             }
@@ -1610,9 +1675,9 @@ impl RelayApp {
         let previous = (chat.model.clone(), chat.mode.clone(), chat.effort.clone());
         if !chat.error.is_empty() {
             egui::Frame::new()
-                .fill(p.surface)
-                .corner_radius(12.)
-                .inner_margin(12.)
+                .fill(ACCENT.gamma_multiply(0.1))
+                .corner_radius(10.)
+                .inner_margin(egui::Margin::symmetric(12, 6))
                 .show(ui, |ui| {
                     ui.horizontal_wrapped(|ui| {
                         label(ui, chat.error.clone(), 12., ACCENT);
@@ -1630,7 +1695,7 @@ impl RelayApp {
                         }
                     });
                 });
-            ui.add_space(10.);
+            ui.add_space(6.);
         }
         let focused = ui.memory(|m| m.has_focus(egui::Id::new("prompt-field")));
         let focus = ui
@@ -1642,13 +1707,13 @@ impl RelayApp {
                 1.0_f32,
                 design::mix(p.line, ACCENT, focus * 0.65),
             ))
-            .corner_radius(16.)
-            .inner_margin(12.)
+            .corner_radius(14.)
+            .inner_margin(egui::Margin { left: 14, right: 8, top: 11, bottom: 7 })
             .shadow(egui::epaint::Shadow {
-                offset: [0, 5],
-                blur: 24,
+                offset: [0, 4],
+                blur: 18,
                 spread: 0,
-                color: Color32::from_black_alpha(14),
+                color: Color32::from_black_alpha(18),
             })
             .show(ui, |ui| {
                 if !chat.images.is_empty() {
@@ -1673,7 +1738,7 @@ impl RelayApp {
                             egui::TextEdit::multiline(&mut chat.draft)
                                 .id(egui::Id::new("prompt-field"))
                                 .frame(false)
-                                .hint_text("Напиши задачу…")
+                                .hint_text(RichText::new("Напиши задачу…  Enter — отправить, Shift+Enter — новая строка").color(p.muted))
                                 .font(FontId::proportional(14.))
                                 .desired_width(ui.available_width())
                                 .desired_rows(1),
@@ -1686,16 +1751,17 @@ impl RelayApp {
                     send = true;
                 }
                 let compact =
-                    ui.available_width() < if chat.mode == "manual" { 610. } else { 580. };
-                ui.add_space(6.);
+                    ui.available_width() < if chat.mode == "manual" { 470. } else { 430. };
+                ui.add_space(4.);
                 ui.horizontal(|ui| {
+                    ui.add_space(-6.);
                     if design::button(
                         ui,
-                        "Файлы",
+                        "",
                         Some(Icon::Attach),
                         Kind::Ghost,
                         p,
-                        Vec2::new(100., 32.),
+                        Vec2::splat(28.),
                     )
                     .on_hover_text("Выбор файлов, перетаскивание или Ctrl+V")
                     .clicked()
@@ -1713,7 +1779,7 @@ impl RelayApp {
                                 Some(Icon::Stop),
                                 Kind::Secondary,
                                 p,
-                                Vec2::splat(32.),
+                                Vec2::splat(30.),
                             )
                             .on_hover_text("Остановить ответ")
                             .clicked()
@@ -1732,7 +1798,7 @@ impl RelayApp {
                                     Some(if connected { Icon::Send } else { Icon::Arrow }),
                                     Kind::Primary,
                                     p,
-                                    Vec2::splat(32.),
+                                    Vec2::splat(30.),
                                 )
                                 .on_hover_text(if connected {
                                     "Отправить · Enter"
@@ -1752,12 +1818,6 @@ impl RelayApp {
                     ui.horizontal_wrapped(|ui| composer_selectors(ui, chat, p));
                 }
             });
-        ui.add_space(9.);
-        ui.horizontal(|ui| {
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                label(ui, "Enter — отправить · Shift+Enter — строка", 10., p.muted);
-            });
-        });
         let current = (chat.model.clone(), chat.mode.clone(), chat.effort.clone());
         if previous.1 != current.1 {
             self.controller.send(&server.id,json!({"op":"_desktop_policy","sid":chat.sid,"auto":server.local_control && current.1=="auto"}));
@@ -2019,8 +2079,8 @@ impl RelayApp {
                 .frame(
                     egui::Frame::new()
                         .fill(p.surface)
-                        .corner_radius(24.)
-                        .inner_margin(28.)
+                        .corner_radius(14.)
+                        .inner_margin(22.)
                         .stroke(Stroke::new(1.0_f32, p.line)),
                 )
                 .backdrop_color(Color32::from_black_alpha((120. * modal_t) as u8))
@@ -2082,7 +2142,7 @@ impl RelayApp {
                             |ui| {
                                 label(ui, "Порт", 12., p.muted);
                                 ui.add_sized(
-                                    [ui.available_width(), 43.],
+                                    [ui.available_width(), 36.],
                                     egui::DragValue::new(&mut editor.server.port).range(1..=65535),
                                 );
                             },
@@ -2118,7 +2178,7 @@ impl RelayApp {
                                 None,
                                 Kind::Ghost,
                                 p,
-                                Vec2::new(82., 42.),
+                                Vec2::new(82., 34.),
                             )
                             .clicked()
                         {
@@ -2131,7 +2191,7 @@ impl RelayApp {
                                 Some(Icon::Arrow),
                                 Kind::Primary,
                                 p,
-                                Vec2::new(166., 42.),
+                                Vec2::new(166., 34.),
                             )
                             .clicked()
                             {
@@ -2143,7 +2203,7 @@ impl RelayApp {
                                 None,
                                 Kind::Ghost,
                                 p,
-                                Vec2::new(94., 42.),
+                                Vec2::new(94., 34.),
                             )
                             .clicked()
                             {
@@ -2229,13 +2289,13 @@ impl RelayApp {
                 .frame(
                     egui::Frame::new()
                         .fill(p.surface)
-                        .corner_radius(24.)
-                        .inner_margin(28.),
+                        .corner_radius(14.)
+                        .inner_margin(22.),
                 )
                 .show(ctx, |ui| {
                     ui.set_width(460.);
                     ui.set_opacity(modal_t);
-                    label(ui, "Первое подключение", 23., p.text);
+                    label(ui, "Первое подключение", 18., p.text);
                     ui.add_space(10.);
                     label(ui, "Запомнить ключ этого сервера?", 15., p.text);
                     if let Some(server) =
@@ -2263,7 +2323,7 @@ impl RelayApp {
                         });
                     ui.add_space(18.);
                     ui.horizontal(|ui| {
-                        if design::button(ui, "Отмена", None, Kind::Ghost, p, Vec2::new(100., 42.))
+                        if design::button(ui, "Отмена", None, Kind::Ghost, p, Vec2::new(100., 34.))
                             .clicked()
                         {
                             deny = true;
@@ -2274,7 +2334,7 @@ impl RelayApp {
                             Some(Icon::Check),
                             Kind::Primary,
                             p,
-                            Vec2::new(260., 42.),
+                            Vec2::new(260., 34.),
                         )
                         .clicked()
                         {
@@ -2316,14 +2376,14 @@ impl RelayApp {
                 .frame(
                     egui::Frame::new()
                         .fill(p.surface)
-                        .corner_radius(24.)
-                        .inner_margin(26.),
+                        .corner_radius(14.)
+                        .inner_margin(22.),
                 )
                 .show(ctx, |ui| {
                     ui.set_width(540.);
                     ui.set_opacity(modal_t);
                     ui.horizontal(|ui| {
-                        label(ui, "Рабочая папка", 23., p.text);
+                        label(ui, "Рабочая папка", 18., p.text);
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             if design::button(
                                 ui,
@@ -2356,7 +2416,7 @@ impl RelayApp {
                         }
                         let width = ui.available_width() - 94.;
                         ui.allocate_ui_with_layout(
-                            Vec2::new(width, 44.),
+                            Vec2::new(width, 34.),
                             Layout::top_down(Align::Min),
                             |ui| {
                                 let response = design::field(
@@ -2378,7 +2438,7 @@ impl RelayApp {
                             None,
                             Kind::Secondary,
                             p,
-                            Vec2::new(85., 43.),
+                            Vec2::new(85., 34.),
                         )
                         .clicked()
                         {
@@ -2420,7 +2480,7 @@ impl RelayApp {
                                     Some(Icon::Folder),
                                     Kind::Ghost,
                                     p,
-                                    Vec2::new(ui.available_width(), 38.),
+                                    Vec2::new(ui.available_width(), 32.),
                                 )
                                 .clicked()
                                 {
@@ -2436,7 +2496,7 @@ impl RelayApp {
                             Some(Icon::Check),
                             Kind::Primary,
                             p,
-                            Vec2::new(ui.available_width(), 44.),
+                            Vec2::new(ui.available_width(), 34.),
                         )
                         .clicked()
                         {
@@ -2471,8 +2531,8 @@ impl RelayApp {
             }
         }
         if self.close_confirm {
-            let modal=egui::Modal::new(egui::Id::new("close-confirm")).area(egui::Modal::default_area(egui::Id::new("close-confirm" )).anchor(egui::Align2::CENTER_CENTER,Vec2::new(0.,(1.-modal_t)*9.))).frame(egui::Frame::new().fill(p.surface).corner_radius(24.).inner_margin(28.)).show(ctx,|ui|{
-            ui.set_width(440.);label(ui,"Задача ещё выполняется",22.,p.text);ui.add_space(12.);label(ui,"Можно оставить приложение открытым или остановить работу. Разговор сохранится.",14.,p.muted);ui.add_space(20.);ui.horizontal(|ui|{if design::button(ui,"Остаться",None,Kind::Secondary,p,Vec2::new(130.,42.)).clicked(){self.close_confirm=false;}if design::button(ui,"Остановить и закрыть",None,Kind::Primary,p,Vec2::new(240.,42.)).clicked(){ctx.send_viewport_cmd(egui::ViewportCommand::Close);self.close_confirm=false;for chat in self.chats.values_mut(){chat.busy=false;}}});
+            let modal=egui::Modal::new(egui::Id::new("close-confirm")).area(egui::Modal::default_area(egui::Id::new("close-confirm" )).anchor(egui::Align2::CENTER_CENTER,Vec2::new(0.,(1.-modal_t)*9.))).frame(egui::Frame::new().fill(p.surface).corner_radius(14.).inner_margin(22.)).show(ctx,|ui|{
+            ui.set_width(440.);label(ui,"Задача ещё выполняется",18.,p.text);ui.add_space(12.);label(ui,"Можно оставить приложение открытым или остановить работу. Разговор сохранится.",14.,p.muted);ui.add_space(20.);ui.horizontal(|ui|{if design::button(ui,"Остаться",None,Kind::Secondary,p,Vec2::new(130.,34.)).clicked(){self.close_confirm=false;}if design::button(ui,"Остановить и закрыть",None,Kind::Primary,p,Vec2::new(240.,34.)).clicked(){ctx.send_viewport_cmd(egui::ViewportCommand::Close);self.close_confirm=false;for chat in self.chats.values_mut(){chat.busy=false;}}});
         });
             if modal.should_close() {
                 self.close_confirm = false;
@@ -2552,19 +2612,30 @@ impl RelayApp {
 }
 fn composer_selectors(ui: &mut egui::Ui, chat: &mut Chat, p: Palette) {
     ui.scope(|ui| {
-        ui.spacing_mut().button_padding = Vec2::new(8., 6.);
-        ui.spacing_mut().interact_size.y = 30.;
+        ui.spacing_mut().button_padding = Vec2::new(8., 5.);
+        ui.spacing_mut().interact_size.y = 28.;
+        ui.spacing_mut().icon_width = 10.;
+        let v = ui.visuals_mut();
+        for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
+            w.bg_stroke = Stroke::NONE;
+            w.corner_radius = egui::CornerRadius::same(8);
+            w.expansion = 0.;
+        }
+        v.widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
+        v.widgets.hovered.weak_bg_fill = p.line;
+        v.widgets.active.weak_bg_fill = p.line;
+        v.widgets.open.weak_bg_fill = p.line;
         egui::ComboBox::from_id_salt("model-selector")
             .selected_text(
                 RichText::new(match chat.model.as_str() {
                     "opus" => "Opus",
                     "sonnet" => "Sonnet",
-                    _ => "Модель сервера",
+                    _ => "Модель: авто",
                 })
-                .size(13.)
+                .size(12.5)
                 .color(p.muted),
             )
-            .width(116.)
+            .width(0.)
             .show_ui(ui, |ui| {
                 for (id, name) in [
                     ("default", "Модель сервера"),
@@ -2582,10 +2653,10 @@ fn composer_selectors(ui: &mut egui::Ui, chat: &mut Chat, p: Palette) {
                     "plan" => "План",
                     _ => "С подтверждением",
                 })
-                .size(13.)
+                .size(12.5)
                 .color(if chat.mode == "auto" { ACCENT } else { p.muted }),
             )
-            .width(if chat.mode == "manual" { 154. } else { 102. })
+            .width(0.)
             .show_ui(ui, |ui| {
                 for (id, name) in [
                     ("auto", "Авто"),
@@ -2599,17 +2670,17 @@ fn composer_selectors(ui: &mut egui::Ui, chat: &mut Chat, p: Palette) {
         egui::ComboBox::from_id_salt("effort-selector")
             .selected_text(
                 RichText::new(format!(
-                    "Effort: {}",
+                    "Глубина: {}",
                     if chat.effort == "default" {
                         "авто"
                     } else {
                         chat.effort.as_str()
                     }
                 ))
-                .size(13.)
+                .size(12.5)
                 .color(p.muted),
             )
-            .width(135.)
+            .width(0.)
             .show_ui(ui, |ui| {
                 label(ui, "Глубина размышлений", 12., p.muted);
                 for (id, name) in [
@@ -2677,15 +2748,42 @@ fn attachment_view(ui: &mut egui::Ui, file: &Attachment, p: Palette, removable: 
     remove
 }
 
+fn day_group(time: f64) -> &'static str {
+    let now = chrono::Local::now();
+    let midnight = now
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .and_then(|t| t.and_local_timezone(chrono::Local).earliest())
+        .map_or(now.timestamp(), |t| t.timestamp()) as f64;
+    if time >= midnight {
+        "Сегодня"
+    } else if time >= midnight - 86400. {
+        "Вчера"
+    } else if time >= midnight - 6. * 86400. {
+        "Эта неделя"
+    } else if time >= midnight - 29. * 86400. {
+        "Этот месяц"
+    } else {
+        "Ранее"
+    }
+}
+fn folder_name(path: &str) -> &str {
+    path.trim_end_matches('/')
+        .rsplit(['/', '\\'])
+        .find(|s| !s.is_empty())
+        .unwrap_or("/")
+}
 fn relative(time: f64) -> String {
     let now = chrono::Local::now().timestamp();
     let seconds = (now - time as i64).max(0);
-    if seconds < 3600 {
-        format!("{} мин. назад", (seconds / 60).max(1))
+    if seconds < 60 {
+        "сейчас".into()
+    } else if seconds < 3600 {
+        format!("{} мин", seconds / 60)
     } else if seconds < 86400 {
-        format!("{} ч. назад", seconds / 3600)
+        format!("{} ч", seconds / 3600)
     } else {
-        format!("{} дн. назад", seconds / 86400)
+        format!("{} дн", seconds / 86400)
     }
 }
 fn tool_name(name: &str) -> &str {
@@ -2738,11 +2836,20 @@ fn reduce(c: &mut Chat, data: &Value) {
         }
         "assistant" => {
             if let Some(blocks) = data["message"]["content"].as_array() {
-                for (index, b) in blocks.iter().enumerate() {
+                for b in blocks {
                     if b["type"] == "text" {
                         let text = b["text"].as_str().unwrap_or("");
-                        if let Some(at) = c.blocks.get(&index) {
-                            c.messages[*at].text = text.into();
+                        // Content indices don't match stream indices (one block per event,
+                        // thinking/tool blocks in between), so match the streamed text instead.
+                        let streamed = c
+                            .blocks
+                            .iter()
+                            .filter(|(_, at)| text.starts_with(c.messages[**at].text.as_str()))
+                            .map(|(index, at)| (*index, *at))
+                            .min();
+                        if let Some((index, at)) = streamed {
+                            c.blocks.remove(&index);
+                            c.messages[at].text = text.into();
                         } else if !text.is_empty() {
                             c.messages.push(Message {
                                 role: "assistant".into(),
@@ -2974,5 +3081,35 @@ mod tests {
         );
         assert_eq!(c.messages.len(), 1);
         assert_eq!(c.messages[0].text, "Привет");
+    }
+    #[test]
+    fn text_after_thinking_is_not_duplicated() {
+        // Claude Code sends each finished block as its own assistant event, so the
+        // content array index differs from the stream index once thinking precedes text.
+        let mut c = Chat::new("x".into(), "/tmp".into(), "t".into());
+        c.messages.push(Message {
+            role: "user".into(),
+            text: "Сделай".into(),
+            ..Default::default()
+        });
+        for event in [
+            json!({"type":"message_start"}),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}),
+            json!({"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}),
+            json!({"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Готово"}}),
+        ] {
+            reduce(&mut c, &json!({"type":"stream_event","event":event}));
+        }
+        reduce(
+            &mut c,
+            &json!({"type":"assistant","message":{"content":[{"type":"thinking","thinking":"..."}]}}),
+        );
+        reduce(
+            &mut c,
+            &json!({"type":"assistant","message":{"content":[{"type":"text","text":"Готово"}]}}),
+        );
+        reduce(&mut c, &json!({"type":"result","result":"Готово"}));
+        assert_eq!(c.messages.len(), 2);
+        assert_eq!(c.messages[1].text, "Готово");
     }
 }

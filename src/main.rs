@@ -21,8 +21,8 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Relay")
-            .with_inner_size([1260.0, 840.0])
-            .with_min_inner_size([860.0, 580.0]),
+            .with_inner_size([1180.0, 780.0])
+            .with_min_inner_size([640.0, 460.0]),
         vsync: true,
         ..Default::default()
     };

@@ -77,7 +77,6 @@ pub fn show(ui: &mut egui::Ui, usage: &Usage, palette: Palette, connected: bool)
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing.y = 4.;
         ui.spacing_mut().interact_size.y = 18.;
-        ui.label(RichText::new("Лимиты Claude").size(12.).color(palette.muted));
         if !connected {
             ui.label(RichText::new("Нет подключения").size(12.).color(palette.muted));
             return;
@@ -109,22 +108,31 @@ pub fn show(ui: &mut egui::Ui, usage: &Usage, palette: Palette, connected: bool)
         let mut needs_countdown = false;
         for (index, window) in windows.iter().take(3).enumerate() {
             if index > 0 {
-                ui.add_space(7.);
+                ui.add_space(4.);
             }
             let value = percent(window.utilization);
+            let reset = countdown(window.resets_at, now);
+            needs_countdown |= reset.is_some();
             ui.horizontal(|ui| {
-                ui.label(RichText::new(title(window)).size(12.).color(palette.text));
+                ui.label(RichText::new(title(window)).size(11.5).color(palette.text));
+                if let Some(reset) = &reset {
+                    ui.label(
+                        RichText::new(reset.replace("Сброс через ", "· сброс "))
+                            .size(11.)
+                            .color(palette.muted),
+                    );
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
                         RichText::new(value.map_or_else(|| "—".into(), |value| format!("{value:.0}%")))
-                            .size(12.)
+                            .size(11.5)
                             .color(value.map_or(palette.muted, tint)),
                     )
                     .on_hover_text("Использовано от общего лимита");
                 });
             });
             let (rect, response) = ui.allocate_exact_size(
-                Vec2::new(ui.available_width(), 5.),
+                Vec2::new(ui.available_width(), 3.),
                 egui::Sense::hover(),
             );
             ui.painter().rect_filled(rect, 3., palette.line);
@@ -136,10 +144,6 @@ pub fn show(ui: &mut egui::Ui, usage: &Usage, palette: Palette, connected: bool)
                 response.on_hover_text(format!("Использовано {value:.0}% · осталось {:.0}%", 100. - value));
             } else {
                 response.on_hover_text("Claude не сообщил процент использования этого лимита.");
-            }
-            if let Some(reset) = countdown(window.resets_at, now) {
-                ui.label(RichText::new(reset).size(11.).color(palette.muted));
-                needs_countdown = true;
             }
         }
         if usage.updated_at.is_finite() && usage.updated_at > 0. && now - usage.updated_at > 300. {

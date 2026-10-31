@@ -2,7 +2,7 @@ use crate::{
     model::{self, Message},
     ui::{self as design, Palette, ACCENT},
 };
-use eframe::egui::{self, Align, RichText};
+use eframe::egui::{self, RichText};
 use std::{collections::HashMap, ops::Range};
 
 #[derive(Debug, PartialEq)]
@@ -152,27 +152,25 @@ pub fn show(
             if busy {
                 design::dots(ui, ACCENT);
             }
+            let open = state.openness(ui.ctx());
             let title = ui.add(
-                egui::Label::new(RichText::new(title).size(12.).color(color))
-                    .sense(egui::Sense::click()),
+                egui::Button::new(RichText::new(format!("     {title}")).size(12.).color(color))
+                    .fill(design::mix(palette.base, palette.line, 0.45))
+                    .stroke(egui::Stroke::NONE)
+                    .corner_radius(12.)
+                    .min_size(egui::vec2(0., 24.)),
             );
-            let mut clicked = title.on_hover_text("Открыть журнал действий").clicked();
-            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                clicked |= ui
-                    .add(
-                        egui::Button::new(
-                            RichText::new(if state.is_open() {
-                                "Скрыть"
-                            } else {
-                                "Показать"
-                            })
-                            .size(11.),
-                        )
-                        .small()
-                        .frame(false),
-                    )
-                    .clicked();
-            });
+            // Chevron painted by hand: the bundled fonts have no triangle glyphs.
+            let c = egui::pos2(title.rect.left() + 13., title.rect.center().y);
+            let turn = egui::emath::Rot2::from_angle(open * std::f32::consts::FRAC_PI_2);
+            let points = [egui::vec2(-1.5, -3.5), egui::vec2(2., 0.), egui::vec2(-1.5, 3.5)]
+                .map(|v| c + turn * v)
+                .to_vec();
+            ui.painter()
+                .add(egui::Shape::line(points, egui::Stroke::new(1.4_f32, color)));
+            let clicked = title
+                .on_hover_text(if state.is_open() { "Скрыть журнал действий" } else { "Открыть журнал действий" })
+                .clicked();
             if clicked {
                 state.toggle(ui);
             }
@@ -182,7 +180,7 @@ pub fn show(
         egui::Frame::new()
             .fill(palette.side)
             .corner_radius(10.)
-            .inner_margin(10.)
+            .inner_margin(egui::Margin::symmetric(10, 6))
             .show(ui, |ui| {
                 egui::ScrollArea::vertical()
                     .id_salt(id.with("journal"))
