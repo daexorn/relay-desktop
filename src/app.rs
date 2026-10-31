@@ -1936,6 +1936,23 @@ impl RelayApp {
                     });
                     return;
                 };
+                if !self.notice.is_empty() {
+                    let mut clear = false;
+                    egui::TopBottomPanel::top("board-notice")
+                        .show_separator_line(false)
+                        .frame(egui::Frame::new().fill(ACCENT.gamma_multiply(0.12)).inner_margin(egui::Margin::symmetric(20, 6)))
+                        .show_inside(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                label(ui, self.notice.clone(), 12.5, p.text);
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    clear = design::button(ui, "", Some(Icon::Close), Kind::Ghost, p, Vec2::splat(24.)).clicked();
+                                });
+                            });
+                        });
+                    if clear {
+                        self.notice.clear();
+                    }
+                }
                 let me = self.settings.actor();
                 let mut ops = crate::board::show(ui, &state, &mut self.board_view, p, &me);
                 ops.extend(crate::board::take_queued(&mut self.board_view));

@@ -74,6 +74,45 @@ class BoardTests(unittest.TestCase):
         self.assertEqual(len({t["id"] for t in state["tasks"]}), 40)
         self.assertEqual(len(self.board.activity()), 40)
 
+    def test_categories_create_rename_reorder_and_delete(self):
+        made = self.board.apply([{"op": "category", "new": True, "name": "Корабли и море"},
+                                 {"op": "category", "new": True, "name": "Кузня", "color": "#AABBCC"}], "champ", "pc", "relay")["ids"]
+        self.assertEqual(made[0], "корабли-и-море")
+        ships, smith = made
+        task = self.board.apply({"op": "create", "title": "Якорь", "category": ships}, "champ", "pc", "relay")["ids"][0]
+        self.board.apply({"op": "category", "id": ships, "name": "Флот", "color": "#112233", "description": "всё о судах"}, "champ", "pc", "relay")
+        state = self.board.state()
+        fleet = next(c for c in state["categories"] if c["id"] == ships)
+        self.assertEqual((fleet["name"], fleet["color"], fleet["description"]), ("Флот", "#112233", "всё о судах"))
+        self.assertEqual(state["tasks"][0]["category"], ships)
+        self.assertIn("«Корабли и море» → «Флот»", state["activity"][0]["text"])
+        self.board.apply({"op": "reorder_categories", "ids": [smith, ships]}, "champ", "pc", "relay")
+        self.assertEqual([c["id"] for c in self.board.state()["categories"]], [smith, ships])
+        self.board.apply({"op": "category", "id": ships, "delete": True, "move_to": smith}, "champ", "pc", "relay")
+        state = self.board.state()
+        self.assertEqual([c["id"] for c in state["categories"]], [smith])
+        self.assertEqual(state["tasks"][0]["category"], smith)
+        self.assertIn("задачи (1) → Кузня", state["activity"][0]["text"])
+        self.assertEqual(task, "T-1")
+
+    def test_category_validation(self):
+        self.board.apply({"op": "category", "new": True, "name": "Кузня"}, "x", "h", "cli")
+        for bad in ({"op": "category", "new": True, "name": "кузня"},
+                    {"op": "category", "new": True, "name": "  "},
+                    {"op": "category", "id": "кузня", "color": "red"},
+                    {"op": "category", "id": "кузня", "name": ""},
+                    {"op": "category", "id": "кузня", "delete": True, "move_to": "нет-такой"},
+                    {"op": "category", "id": "нет-такой", "delete": True}):
+            with self.assertRaises(ValueError, msg=bad):
+                self.board.apply(bad, "x", "h", "cli")
+        self.assertEqual(len(self.board.state()["categories"]), 1)
+
+    def test_agent_category_tool(self):
+        text = board.call(self.board, "board_category", {"name": "Экономика", "color": "#e5b84b"}, "Claude", "dev", "agent")
+        self.assertIn("экономика", text)
+        board.call(self.board, "board_category", {"id": "экономика", "description": "торговля"}, "Claude", "dev", "agent")
+        self.assertEqual(self.board.state()["categories"][0]["description"], "торговля")
+
     def test_mcp_and_cli_share_the_board(self):
         env = dict(os.environ, RELAY_BOARD_DIR=self.dir.name, RELAY_BOARD_NAME="t", RELAY_BOARD_ACTOR="Claude · test")
         subprocess.run([sys.executable, str(SOURCE), "add", "Плавильня", "--estimate", "2"], env=env, check=True, capture_output=True)

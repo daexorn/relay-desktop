@@ -340,10 +340,14 @@ def load_board():
     namespace = {"__name__": "relay_board"}
     exec(source, namespace)
     # Next to the data, so terminal agents (`relay-board`) run the same version as Relay.
+    def version(text):
+        match = re.search(r"^BOARD_VERSION = (\d+)", text, re.M)
+        return int(match.group(1)) if match else 0
     for path in (namespace["root"]() / "board.py", Path.home() / ".cache/relay-desktop/board.py"):
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            if not path.exists() or path.read_text(encoding="utf-8") != source:
+            existing = path.read_text(encoding="utf-8") if path.exists() else ""
+            if version(existing) < namespace.get("BOARD_VERSION", 0) or not existing:
                 path.write_text(source, encoding="utf-8")
                 path.chmod(0o664)
             return namespace, path

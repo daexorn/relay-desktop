@@ -22,7 +22,10 @@ const CARD_GAP: f32 = 8.;
 /// Finished cards shown before "show more": the history is long and rarely needed.
 const COLLAPSED: usize = 8;
 const LANE_COLLAPSED: usize = 3;
-const SWATCHES: [&str; 8] = ["#d97757", "#5cb884", "#5b8def", "#c58af9", "#e5b84b", "#4fb6c4", "#e06c9f", "#9aa36b"];
+const SWATCHES: [&str; 16] = [
+    "#d97757", "#5cb884", "#5b8def", "#c58af9", "#e5b84b", "#4fb6c4", "#e06c9f", "#9aa36b",
+    "#b08968", "#8e8e96", "#e8845c", "#6fbf73", "#7aa2f7", "#d4a5ff", "#f2c94c", "#56c2b0",
+];
 
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
@@ -35,6 +38,37 @@ struct Drag {
     grab: Vec2,
     /// Some(kind) when Shift was held: draws a link instead of moving the card.
     link: Option<&'static str>,
+}
+
+/// The category editor: buffers for names being typed, so a rename is sent once, when done.
+struct Manager {
+    names: HashMap<String, String>,
+    descriptions: HashMap<String, String>,
+    new_name: String,
+    new_color: String,
+    focus_new: bool,
+    focus: Option<String>,
+    focus_once: bool,
+    palette: Option<String>,
+    deleting: Option<(String, String)>,
+    drag: Option<String>,
+}
+
+impl Manager {
+    fn open(board: &Board, focus: Option<String>) -> Self {
+        Self {
+            names: HashMap::new(),
+            descriptions: HashMap::new(),
+            new_name: String::new(),
+            new_color: SWATCHES[board.categories.len() % SWATCHES.len()].into(),
+            focus_new: focus.is_none(),
+            focus_once: focus.is_some(),
+            focus,
+            palette: None,
+            deleting: None,
+            drag: None,
+        }
+    }
 }
 
 struct Create {
@@ -91,11 +125,15 @@ pub struct BoardView {
     comment: String,
     link_to: String,
     link_kind: String,
-    new_category: String,
     queued: Vec<Value>,
     /// View changes made while drawing the canvas; applied after the scene stores its own.
     pending: Option<(Pos2, f32)>,
     fitted: bool,
+    manager: Option<Manager>,
+    chip_drag: Option<String>,
+    lane_drag: Option<String>,
+    /// Preview only: open the category editor on the first frame (focus, palette, delete).
+    demo_editor: Option<(Option<String>, bool, bool)>,
 }
 
 impl Default for BoardView {
@@ -119,10 +157,13 @@ impl Default for BoardView {
             comment: String::new(),
             link_to: String::new(),
             link_kind: "blocks".into(),
-            new_category: String::new(),
             queued: vec![],
             pending: None,
             fitted: false,
+            manager: None,
+            chip_drag: None,
+            lane_drag: None,
+            demo_editor: None,
         }
     }
 }
@@ -209,7 +250,21 @@ impl BoardView {
             self.mode = Mode::Lanes;
         }
         self.links = args.iter().any(|a| a == "--demo-links");
+        if let Some(i) = args.iter().position(|a| a == "--demo-categories") {
+            let focus = args.get(i + 1).filter(|a| !a.starts_with("--")).cloned();
+            self.demo_editor = Some((focus, args.iter().any(|a| a == "--demo-palette"), args.iter().any(|a| a == "--demo-delete")));
+        }
     }
+}
+
+/// New order of categories after moving `dragged` in front of `before` (or to the end);
+/// None when nothing actually moves, so the journal stays clean.
+fn reorder(board: &Board, dragged: &str, before: Option<&str>) -> Option<Value> {
+    let current: Vec<String> = board.categories.iter().map(|c| text(&c["id"])).collect();
+    let mut ids: Vec<String> = current.iter().filter(|id| *id != dragged).cloned().collect();
+    let at = before.and_then(|b| ids.iter().position(|id| id == b)).unwrap_or(ids.len());
+    ids.insert(at, dragged.to_owned());
+    (ids != current).then(|| json!({"op":"reorder_categories","ids":ids}))
 }
 
 pub fn take_queued(view: &mut BoardView) -> Vec<Value> {
@@ -246,10 +301,17 @@ impl<'a> Board<'a> {
 pub fn show(ui: &mut egui::Ui, state: &Value, view: &mut BoardView, p: Palette, me: &str) -> Vec<Value> {
     let mut ops = vec![];
     let board = Board::new(state);
+    if let Some((focus, palette, delete)) = view.demo_editor.take() {
+        let mut manager = Manager::open(&board, focus.clone());
+        manager.palette = focus.clone().filter(|_| palette);
+        manager.deleting = focus.filter(|_| delete).map(|id| (id, String::new()));
+        manager.focus_once = false;
+        view.manager = Some(manager);
+    }
     if view.selected.as_ref().is_some_and(|id| board.task(id).is_none()) {
         view.selected = None;
     }
-    if ui.input(|i| i.key_pressed(egui::Key::Escape)) && view.create.is_none() {
+    if ui.input(|i| i.key_pressed(egui::Key::Escape)) && view.create.is_none() && view.manager.is_none() {
         view.selected = None;
         view.drag = None;
     }
@@ -273,6 +335,7 @@ pub fn show(ui: &mut egui::Ui, state: &Value, view: &mut BoardView, p: Palette, 
         canvas(ui, &board, view, p, &mut ops);
     });
     create_dialog(ui.ctx(), &board, view, p, &mut ops);
+    category_editor(ui.ctx(), &board, view, p, &mut ops);
     ops
 }
 
@@ -342,12 +405,14 @@ enum Chip {
     Links,
     Search,
     Category(String),
+    AddCategory,
 }
 
 /// Fixed-size chips laid out by hand, so they wrap instead of being squeezed or cut off.
 fn chips(ui: &mut egui::Ui, board: &Board, view: &mut BoardView, p: Palette) {
     let mut items = vec![Chip::Mode(Mode::Columns, "Колонки"), Chip::Mode(Mode::Lanes, "Категории"), Chip::Links, Chip::Search];
     items.extend(board.categories.iter().map(|c| Chip::Category(text(&c["id"]))));
+    items.push(Chip::AddCategory);
     let font = FontId::proportional(12.);
     let width = ui.available_width() - 40.;
     let painter = ui.painter().clone();
@@ -358,6 +423,7 @@ fn chips(ui: &mut egui::Ui, board: &Board, view: &mut BoardView, p: Palette) {
             Chip::Links => "Все связи".into(),
             Chip::Search => String::new(),
             Chip::Category(id) => board.names.get(id).cloned().unwrap_or_default(),
+            Chip::AddCategory => "Категория".into(),
         }
     };
     let mut placed = vec![];
@@ -368,6 +434,7 @@ fn chips(ui: &mut egui::Ui, board: &Board, view: &mut BoardView, p: Palette) {
             Chip::Links => measure(&label(chip)) + 24.,
             Chip::Search => 190.,
             Chip::Category(_) => measure(&label(chip)) + 66.,
+            Chip::AddCategory => measure(&label(chip)) + 40.,
         };
         // The mode switch is one segmented control; a wider gap separates the filters.
         let gap = match i {
@@ -384,11 +451,16 @@ fn chips(ui: &mut egui::Ui, board: &Board, view: &mut BoardView, p: Palette) {
         placed.push(Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, 24.)));
         x += w;
     }
+    let mut category_rects: Vec<(String, Rect)> = vec![];
+    let mut dropped = false;
     ui.horizontal(|ui| {
         ui.add_space(20.);
         let (area, _) = ui.allocate_exact_size(Vec2::new(width, y + 24.), Sense::hover());
         for (chip, rect) in items.iter().zip(placed) {
             let rect = rect.translate(area.min.to_vec2());
+            if let Chip::Category(cid) = chip {
+                category_rects.push((cid.clone(), rect));
+            }
             if let Chip::Search = chip {
                 let painter = ui.painter();
                 painter.rect_filled(rect, 12., design::mix(p.base, p.line, 0.55));
@@ -404,7 +476,8 @@ fn chips(ui: &mut egui::Ui, board: &Board, view: &mut BoardView, p: Palette) {
                 continue;
             }
             let id = ui.id().with(("chip", label(chip)));
-            let response = ui.interact(rect, id, Sense::click());
+            let sense = if matches!(chip, Chip::Category(_)) { Sense::click_and_drag() } else { Sense::click() };
+            let response = ui.interact(rect, id, sense);
             let hover = response.hovered();
             let painter = ui.painter();
             let idle = if hover { p.line } else { design::mix(p.base, p.line, 0.5) };
@@ -433,7 +506,25 @@ fn chips(ui: &mut egui::Ui, board: &Board, view: &mut BoardView, p: Palette) {
                     response.on_hover_text("Показывать все связи на полотне, а не только у карточки под мышью");
                 }
                 Chip::Search => {}
+                Chip::AddCategory => {
+                    painter.rect_stroke(rect, 12., Stroke::new(1.0_f32, if hover { p.muted } else { p.line }), egui::StrokeKind::Inside);
+                    design::icon(painter, Rect::from_center_size(Pos2::new(rect.left() + 14., rect.center().y), Vec2::splat(12.)), Icon::Plus, p.muted);
+                    painter.text(Pos2::new(rect.left() + 25., rect.center().y), egui::Align2::LEFT_CENTER, "Категория", font.clone(), p.muted);
+                    if response.on_hover_text("Создать, переименовать, перекрасить или удалить категории").clicked() {
+                        view.manager = Some(Manager::open(board, None));
+                    }
+                }
                 Chip::Category(cid) => {
+                    if response.drag_started() {
+                        view.chip_drag = Some(cid.clone());
+                    }
+                    if response.drag_stopped() && view.chip_drag.as_deref() == Some(cid.as_str()) {
+                        dropped = true;
+                    }
+                    if response.double_clicked() || response.secondary_clicked() {
+                        view.manager = Some(Manager::open(board, Some(cid.clone())));
+                    }
+                    let dragging = view.chip_drag.as_deref() == Some(cid.as_str());
                     let active = view.filter.as_deref() == Some(cid.as_str());
                     let tint = board.tint(cid, p);
                     let stats = &board.state["progress"]["categories"][cid];
@@ -448,11 +539,22 @@ fn chips(ui: &mut egui::Ui, board: &Board, view: &mut BoardView, p: Palette) {
                     // Progress as a hairline along the bottom of the chip.
                     let track = Rect::from_min_max(Pos2::new(rect.left() + 10., rect.bottom() - 3.), Pos2::new(rect.right() - 10., rect.bottom() - 1.5));
                     bar(painter, track, percent, tint, p);
+                    if dragging {
+                        ui.painter().rect_filled(rect, 12., p.base.gamma_multiply(0.6));
+                    }
                     if response.clicked() {
                         view.filter = if active { None } else { Some(cid.clone()) };
                     }
+                    let description = board
+                        .categories
+                        .iter()
+                        .find(|c| c["id"] == cid.as_str())
+                        .map(|c| text(&c["description"]))
+                        .filter(|d| !d.is_empty())
+                        .map(|d| format!("{d}\n"))
+                        .unwrap_or_default();
                     response.on_hover_text(format!(
-                        "{} · готово {} из {}\nНажми, чтобы оставить только её",
+                        "{} · готово {} из {}\n{description}Щелчок — только она · двойной — изменить · тяни — переставить",
                         label(chip),
                         stats["done"].as_u64().unwrap_or(0),
                         stats["tasks"].as_u64().unwrap_or(0)
@@ -461,6 +563,36 @@ fn chips(ui: &mut egui::Ui, board: &Board, view: &mut BoardView, p: Palette) {
             }
         }
     });
+    // Dragging a category chip: a mark where it will land, the chip under the pointer.
+    let Some(dragged) = view.chip_drag.clone() else { return };
+    let Some(pointer) = ui.ctx().pointer_latest_pos() else { return };
+    let before = category_rects
+        .iter()
+        .filter(|(id, _)| *id != dragged)
+        .find(|(_, r)| r.top() > pointer.y + 6. || (r.y_range().contains(pointer.y) && r.center().x > pointer.x))
+        .map(|(id, r)| (id.clone(), *r));
+    let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("chip-drag")));
+    let mark = match &before {
+        Some((_, r)) => Rect::from_min_size(Pos2::new(r.left() - 4., r.top()), Vec2::new(2.5, r.height())),
+        None => category_rects
+            .iter()
+            .filter(|(id, _)| *id != dragged)
+            .next_back()
+            .map_or(Rect::NOTHING, |(_, r)| Rect::from_min_size(Pos2::new(r.right() + 2., r.top()), Vec2::new(2.5, r.height()))),
+    };
+    painter.rect_filled(mark, 1., ACCENT);
+    let name = board.names.get(&dragged).cloned().unwrap_or_default();
+    let galley = painter.layout_no_wrap(name, FontId::proportional(12.), p.text);
+    let ghost = Rect::from_min_size(pointer + Vec2::new(8., -12.), galley.size() + Vec2::new(30., 10.));
+    painter.add(Shadow { offset: [0, 4], blur: 12, spread: 0, color: Color32::from_black_alpha(60) }.as_shape(ghost, 12.));
+    painter.rect_filled(ghost, 12., p.surface);
+    painter.circle_filled(Pos2::new(ghost.left() + 12., ghost.center().y), 4., board.tint(&dragged, p));
+    painter.galley(Pos2::new(ghost.left() + 21., ghost.center().y - galley.size().y / 2.), galley, p.text);
+    ui.ctx().request_repaint();
+    if dropped || !ui.input(|i| i.pointer.any_down()) {
+        view.queued.extend(reorder(board, &dragged, before.as_ref().map(|(id, _)| id.as_str())));
+        view.chip_drag = None;
+    }
 }
 
 // --- canvas ---------------------------------------------------------------------------------
@@ -697,6 +829,9 @@ fn lanes(ui: &egui::Ui, board: &Board, view: &mut BoardView, p: Palette) -> Plan
         lanes.push((String::new(), "Без категории".into(), p.muted));
     }
     let mut y = 40.;
+    let mut lane_rects: Vec<(String, Rect)> = vec![];
+    let mut lane_pointer = None;
+    let mut lane_dropped = false;
     for (n, (cid, cname, tint)) in lanes.iter().enumerate() {
         if view.filter.as_ref().is_some_and(|f| f != cid) {
             continue;
@@ -752,9 +887,32 @@ fn lanes(ui: &egui::Ui, board: &Board, view: &mut BoardView, p: Palette) -> Plan
             Shape::rect_filled(lane, 14., design::mix(p.base, p.side, if n % 2 == 0 { 0.85 } else { 0.55 })),
             Shape::rect_filled(Rect::from_min_size(lane.min + Vec2::new(10., 14.), Vec2::new(3., height - 28.)), 2., *tint),
         ]));
+        // The label is the lane's handle: drag to reorder, double click to edit the category.
+        if !cid.is_empty() {
+            let handle = Rect::from_min_size(lane.min, Vec2::new(LABEL, height));
+            let response = ui.interact(handle, ui.id().with(("lane-label", cid)), Sense::click_and_drag());
+            if response.drag_started() {
+                view.lane_drag = Some(cid.clone());
+            }
+            if view.lane_drag.as_deref() == Some(cid.as_str()) {
+                lane_pointer = response.interact_pointer_pos();
+                lane_dropped |= response.drag_stopped();
+                painter.rect_filled(lane, 14., p.base.gamma_multiply(0.5));
+            }
+            if response.double_clicked() {
+                view.manager = Some(Manager::open(board, Some(cid.clone())));
+            }
+            if response.hovered() && view.lane_drag.is_none() {
+                let grip = Pos2::new(LABEL - 46., y + 23.);
+                for (dx, dy) in [(0., -4.), (0., 0.), (0., 4.), (4., -4.), (4., 0.), (4., 4.)] {
+                    painter.circle_filled(grip + Vec2::new(dx, dy), 1.2, p.muted);
+                }
+            }
+            lane_rects.push((cid.clone(), lane));
+        }
         let stats = &board.state["progress"]["categories"][cid];
         let percent = stats["percent"].as_f64().unwrap_or(0.) as f32;
-        let mut job = LayoutJob::simple(cname.clone(), FontId::proportional(14.5), p.text, LABEL - 40.);
+        let mut job = LayoutJob::simple(cname.clone(), FontId::proportional(14.5), p.text, LABEL - 64.);
         job.wrap.max_rows = 2;
         let galley = painter.layout_job(job);
         let title_height = galley.size().y;
@@ -781,6 +939,28 @@ fn lanes(ui: &egui::Ui, board: &Board, view: &mut BoardView, p: Palette) -> Plan
             });
         }
         y += height + 10.;
+    }
+    if let (Some(dragged), Some(pos)) = (view.lane_drag.clone(), lane_pointer) {
+        let before = lane_rects.iter().filter(|(id, _)| *id != dragged).find(|(_, r)| r.center().y > pos.y);
+        let line_y = match before {
+            Some((_, r)) => r.top() - 5.,
+            None => lane_rects.iter().filter(|(id, _)| *id != dragged).map(|(_, r)| r.bottom() + 5.).fold(40., f32::max),
+        };
+        painter.line_segment([Pos2::new(0., line_y), Pos2::new(width, line_y)], Stroke::new(3.0_f32, ACCENT));
+        let name = board.names.get(&dragged).cloned().unwrap_or_default();
+        let galley = painter.layout_no_wrap(name, FontId::proportional(14.), p.text);
+        let ghost = Rect::from_min_size(pos + Vec2::new(10., -16.), galley.size() + Vec2::new(32., 14.));
+        painter.add(Shadow { offset: [0, 6], blur: 18, spread: 0, color: Color32::from_black_alpha(70) }.as_shape(ghost, 10.));
+        painter.rect_filled(ghost, 10., p.surface);
+        painter.rect_filled(Rect::from_min_size(ghost.min + Vec2::new(8., 7.), Vec2::new(3., ghost.height() - 14.)), 1.5, board.tint(&dragged, p));
+        painter.galley(ghost.min + Vec2::new(18., 7.), galley, p.text);
+        ui.ctx().request_repaint();
+        if lane_dropped {
+            view.queued.extend(reorder(board, &dragged, before.map(|(id, _)| id.as_str())));
+            view.lane_drag = None;
+        }
+    } else if view.lane_drag.is_some() && !ui.input(|i| i.pointer.any_down()) {
+        view.lane_drag = None;
     }
     plan.content = Rect::from_min_size(Pos2::ZERO, Vec2::new(width, y));
     plan
@@ -1170,7 +1350,7 @@ fn create_dialog(ctx: &egui::Context, board: &Board, view: &mut BoardView, p: Pa
                     .desired_rows(2)
                     .desired_width(f32::INFINITY)
                     .font(FontId::proportional(14.))
-                    .hint_text("Что нужно сделать · Enter — создать"),
+                    .hint_text(RichText::new("Что нужно сделать · Enter — создать").color(p.muted)),
             );
             if create.focus {
                 response.request_focus();
@@ -1219,6 +1399,279 @@ fn create_dialog(ctx: &egui::Context, board: &Board, view: &mut BoardView, p: Pa
     }
     if close || modal.should_close() {
         view.create = None;
+    }
+}
+
+fn plural(n: usize, one: &str, few: &str, many: &str) -> String {
+    let word = match (n % 10, n % 100) {
+        (1, r) if r != 11 => one,
+        (2..=4, r) if !(12..=14).contains(&r) => few,
+        _ => many,
+    };
+    format!("{n} {word}")
+}
+
+fn grip(painter: &egui::Painter, center: Pos2, color: Color32) {
+    for (dx, dy) in [(-2.5, -5.), (-2.5, 0.), (-2.5, 5.), (2.5, -5.), (2.5, 0.), (2.5, 5.)] {
+        painter.circle_filled(center + Vec2::new(dx, dy), 1.4, color);
+    }
+}
+
+/// Create, rename, recolour, describe, reorder and delete categories. Every change is sent
+/// as soon as it is made; names and descriptions when the field is left.
+fn category_editor(ctx: &egui::Context, board: &Board, view: &mut BoardView, p: Palette, ops: &mut Vec<Value>) {
+    let Some(manager) = view.manager.as_mut() else { return };
+    let mut close = false;
+    let mut dropped = false;
+    let mut deleted = None;
+    let mut rows: Vec<(String, Rect)> = vec![];
+    let counts: HashMap<String, usize> = board.categories.iter().map(|c| {
+        let id = text(&c["id"]);
+        let n = board.tasks.iter().filter(|t| t["category"] == id.as_str()).count();
+        (id, n)
+    }).collect();
+    let modal = egui::Modal::new(egui::Id::new("board-categories"))
+        .frame(egui::Frame::new().fill(p.surface).corner_radius(14.).inner_margin(20.))
+        .show(ctx, |ui| {
+            ui.set_width(580.);
+            ui.horizontal(|ui| {
+                small(ui, "Категории", 18., p.text);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if design::button(ui, "", Some(Icon::Close), Kind::Ghost, p, Vec2::splat(28.)).clicked() {
+                        close = true;
+                    }
+                });
+            });
+            small(ui, "Тяни за точки слева, чтобы поменять порядок. Изменения сохраняются сразу и видны всей команде.", 11.5, p.muted);
+            ui.add_space(10.);
+            egui::ScrollArea::vertical().max_height(430.).auto_shrink([false, true]).show(ui, |ui| {
+                for (index, category) in board.categories.iter().enumerate() {
+                    let id = text(&category["id"]);
+                    let current = text(&category["name"]);
+                    let tint = board.tint(&id, p);
+                    let focused = manager.focus.as_deref() == Some(id.as_str());
+                    let dragging = manager.drag.as_deref() == Some(id.as_str());
+                    let count = counts.get(&id).copied().unwrap_or(0);
+                    let frame = egui::Frame::new()
+                        .fill(if focused { tint.gamma_multiply(0.12) } else { design::mix(p.surface, p.line, 0.3) })
+                        .corner_radius(10.)
+                        .inner_margin(egui::Margin { left: 6, right: 8, top: 8, bottom: 8 })
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            if dragging {
+                                ui.set_opacity(0.35);
+                            }
+                            ui.horizontal(|ui| {
+                                let (handle, response) = ui.allocate_exact_size(Vec2::new(18., 28.), Sense::drag());
+                                let response = response.on_hover_cursor(egui::CursorIcon::Grab).on_hover_text("Перетащи, чтобы поменять порядок");
+                                grip(ui.painter(), handle.center(), if response.hovered() { p.text } else { p.muted });
+                                if response.drag_started() {
+                                    manager.drag = Some(id.clone());
+                                }
+                                dropped |= response.drag_stopped();
+                                let (dot, response) = ui.allocate_exact_size(Vec2::splat(26.), Sense::click());
+                                ui.painter().circle_filled(dot.center(), 9., tint);
+                                if response.hovered() {
+                                    ui.painter().circle_stroke(dot.center(), 11.5, Stroke::new(1.5_f32, p.text));
+                                }
+                                if response.on_hover_text("Цвет").clicked() {
+                                    manager.palette = if manager.palette.as_deref() == Some(id.as_str()) { None } else { Some(id.clone()) };
+                                }
+                                let name = manager.names.entry(id.clone()).or_insert_with(|| current.clone());
+                                let response = ui.add(
+                                    egui::TextEdit::singleline(name)
+                                        .desired_width(220.)
+                                        .font(FontId::proportional(14.))
+                                        .hint_text(RichText::new("Название").color(p.muted)),
+                                );
+                                if focused && manager.focus_once {
+                                    response.request_focus();
+                                    response.scroll_to_me(Some(Align::Center));
+                                    manager.focus_once = false;
+                                }
+                                if response.lost_focus() {
+                                    let new = name.trim().to_owned();
+                                    if !new.is_empty() && new != current {
+                                        ops.push(json!({"op":"category","id":id,"name":new}));
+                                    } else {
+                                        *name = current.clone();
+                                    }
+                                } else if !response.has_focus() {
+                                    *name = current.clone();
+                                }
+                                small(ui, plural(count, "задача", "задачи", "задач"), 11.5, p.muted);
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    ui.spacing_mut().item_spacing.x = 2.;
+                                    if design::button(ui, "Удалить", None, Kind::Ghost, p, Vec2::new(0., 26.)).clicked() {
+                                        manager.deleting = Some((id.clone(), String::new()));
+                                    }
+                                    let last = index + 1 == board.categories.len();
+                                    ui.add_enabled_ui(!last, |ui| {
+                                        if design::button(ui, "↓", None, Kind::Ghost, p, Vec2::new(26., 26.)).on_hover_text("Ниже").clicked() {
+                                            let after = board.categories.get(index + 2).map(|c| text(&c["id"]));
+                                            ops.extend(reorder(board, &id, after.as_deref()));
+                                        }
+                                    });
+                                    ui.add_enabled_ui(index > 0, |ui| {
+                                        if design::button(ui, "↑", None, Kind::Ghost, p, Vec2::new(26., 26.)).on_hover_text("Выше").clicked() {
+                                            let previous = text(&board.categories[index.saturating_sub(1)]["id"]);
+                                            ops.extend(reorder(board, &id, Some(&previous)));
+                                        }
+                                    });
+                                });
+                            });
+                            ui.horizontal(|ui| {
+                                ui.add_space(50.);
+                                let current = text(&category["description"]);
+                                let description = manager.descriptions.entry(id.clone()).or_insert_with(|| current.clone());
+                                let response = ui.add(
+                                    egui::TextEdit::singleline(description)
+                                        .desired_width(f32::INFINITY)
+                                        .font(FontId::proportional(12.))
+                                        .hint_text(RichText::new("Описание: что сюда входит (необязательно)").color(p.muted)),
+                                );
+                                if response.lost_focus() {
+                                    if description.trim() != current {
+                                        ops.push(json!({"op":"category","id":id,"description":description.trim()}));
+                                    }
+                                } else if !response.has_focus() {
+                                    *description = current;
+                                }
+                            });
+                            if manager.palette.as_deref() == Some(id.as_str()) {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.add_space(50.);
+                                    let selected = category["color"].as_str().unwrap_or("").to_lowercase();
+                                    for hex in SWATCHES {
+                                        let (r, response) = ui.allocate_exact_size(Vec2::splat(24.), Sense::click());
+                                        ui.painter().circle_filled(r.center(), 9., color(hex));
+                                        if selected == hex || response.hovered() {
+                                            ui.painter().circle_stroke(r.center(), 11.5, Stroke::new(1.5_f32, p.text));
+                                        }
+                                        if response.clicked() {
+                                            ops.push(json!({"op":"category","id":id,"color":hex}));
+                                            manager.palette = None;
+                                        }
+                                    }
+                                });
+                            }
+                            if let Some((target, move_to)) = manager.deleting.as_mut().filter(|(target, _)| *target == id) {
+                                ui.add_space(4.);
+                                egui::Frame::new()
+                                    .fill(ACCENT.gamma_multiply(0.1))
+                                    .corner_radius(8.)
+                                    .inner_margin(egui::Margin::symmetric(10, 8))
+                                    .show(ui, |ui| {
+                                        ui.horizontal_wrapped(|ui| {
+                                            if count == 0 {
+                                                small(ui, format!("Удалить «{current}»? Задач в ней нет."), 12.5, p.text);
+                                            } else {
+                                                small(ui, format!("Удалить «{current}»? Её {} перенести в", plural(count, "задачу", "задачи", "задач")), 12.5, p.text);
+                                                egui::ComboBox::from_id_salt("delete-move")
+                                                    .selected_text(board.names.get(move_to.as_str()).cloned().unwrap_or_else(|| "без категории".into()))
+                                                    .width(170.)
+                                                    .show_ui(ui, |ui| {
+                                                        ui.selectable_value(move_to, String::new(), "без категории");
+                                                        for other in &board.categories {
+                                                            let other_id = text(&other["id"]);
+                                                            if other_id != *target {
+                                                                ui.selectable_value(move_to, other_id, text(&other["name"]));
+                                                            }
+                                                        }
+                                                    });
+                                            }
+                                        });
+                                        ui.add_space(6.);
+                                        ui.horizontal(|ui| {
+                                            if design::button(ui, "Удалить категорию", None, Kind::Primary, p, Vec2::new(0., 28.)).clicked() {
+                                                ops.push(json!({"op":"category","id":target,"delete":true,"move_to":move_to}));
+                                                deleted = Some(target.clone());
+                                            }
+                                            if design::button(ui, "Отмена", None, Kind::Ghost, p, Vec2::new(0., 28.)).clicked() {
+                                                deleted = Some(String::new());
+                                            }
+                                        });
+                                    });
+                            }
+                        });
+                    rows.push((id, frame.response.rect));
+                    ui.add_space(6.);
+                }
+            });
+            if let Some(dragged) = manager.drag.clone() {
+                let pointer = ui.ctx().pointer_latest_pos().unwrap_or_default();
+                let before = rows.iter().filter(|(id, _)| *id != dragged).find(|(_, r)| r.center().y > pointer.y);
+                let y = match before {
+                    Some((_, r)) => r.top() - 3.,
+                    None => rows.iter().filter(|(id, _)| *id != dragged).map(|(_, r)| r.bottom() + 3.).fold(f32::MIN, f32::max),
+                };
+                if let Some((_, first)) = rows.first() {
+                    ui.painter().line_segment([Pos2::new(first.left(), y), Pos2::new(first.right(), y)], Stroke::new(3.0_f32, ACCENT));
+                }
+                ui.ctx().request_repaint();
+                if dropped || !ui.input(|i| i.pointer.any_down()) {
+                    ops.extend(reorder(board, &dragged, before.map(|(id, _)| id.as_str())));
+                    manager.drag = None;
+                }
+            }
+            ui.add_space(6.);
+            ui.separator();
+            ui.add_space(6.);
+            ui.horizontal(|ui| {
+                ui.add_space(24.);
+                let (dot, response) = ui.allocate_exact_size(Vec2::splat(26.), Sense::click());
+                ui.painter().circle_filled(dot.center(), 9., color(&manager.new_color));
+                if response.hovered() {
+                    ui.painter().circle_stroke(dot.center(), 11.5, Stroke::new(1.5_f32, p.text));
+                }
+                if response.on_hover_text("Другой цвет").clicked() {
+                    let at = SWATCHES.iter().position(|s| *s == manager.new_color).unwrap_or(0);
+                    manager.new_color = SWATCHES[(at + 1) % SWATCHES.len()].into();
+                }
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut manager.new_name)
+                        .desired_width(260.)
+                        .font(FontId::proportional(14.))
+                        .hint_text(RichText::new("Новая категория").color(p.muted)),
+                );
+                if manager.focus_new {
+                    response.request_focus();
+                    manager.focus_new = false;
+                }
+                let name = manager.new_name.trim().to_owned();
+                let exists = board.categories.iter().any(|c| text(&c["name"]).to_lowercase() == name.to_lowercase());
+                let ready = !name.is_empty() && !exists;
+                let enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let mut add = false;
+                ui.add_enabled_ui(ready, |ui| {
+                    add = design::button(ui, "Добавить", Some(Icon::Plus), Kind::Primary, p, Vec2::new(0., 30.)).clicked();
+                });
+                if exists {
+                    small(ui, "уже есть", 11.5, ACCENT);
+                }
+                if ready && (add || enter) {
+                    ops.push(json!({"op":"category","new":true,"name":name,"color":manager.new_color}));
+                    manager.new_name.clear();
+                    let at = SWATCHES.iter().position(|s| *s == manager.new_color).unwrap_or(0);
+                    manager.new_color = SWATCHES[(at + 1) % SWATCHES.len()].into();
+                    manager.focus_new = true;
+                }
+            });
+            ui.add_space(14.);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if design::button(ui, "Готово", None, Kind::Secondary, p, Vec2::new(0., 30.)).clicked() {
+                    close = true;
+                }
+            });
+        });
+    if let Some(target) = deleted {
+        manager.deleting = None;
+        if !target.is_empty() && view.filter.as_deref() == Some(target.as_str()) {
+            view.filter = None;
+        }
+    }
+    if close || modal.should_close() {
+        view.manager = None;
     }
 }
 
@@ -1305,7 +1758,7 @@ fn detail(ui: &mut egui::Ui, task: &Value, board: &Board, view: &mut BoardView, 
             ui.end_row();
             small(ui, "Исполнитель", 12.5, p.muted);
             ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut edit.assignee).desired_width(170.).hint_text("никто"));
+                ui.add(egui::TextEdit::singleline(&mut edit.assignee).desired_width(170.).hint_text(RichText::new("никто").color(p.muted)));
                 if !me.is_empty() && edit.assignee != me && design::button(ui, "Я", None, Kind::Secondary, p, Vec2::new(0., 26.)).on_hover_text("Взять себе").clicked() {
                     edit.assignee = me.to_owned();
                 }
@@ -1339,7 +1792,7 @@ fn detail(ui: &mut egui::Ui, task: &Value, board: &Board, view: &mut BoardView, 
             egui::TextEdit::multiline(&mut edit.description)
                 .desired_rows(4)
                 .desired_width(f32::INFINITY)
-                .hint_text("Что сделать, критерии готовности, ссылки на файлы"),
+                .hint_text(RichText::new("Что сделать, критерии готовности, ссылки на файлы").color(p.muted)),
         );
 
         section(ui, "Связи", p);
@@ -1392,7 +1845,7 @@ fn detail(ui: &mut egui::Ui, task: &Value, board: &Board, view: &mut BoardView, 
                         ui.selectable_value(&mut view.link_kind, v.into(), n);
                     }
                 });
-            ui.add(egui::TextEdit::singleline(&mut view.link_to).desired_width(70.).hint_text("T-12"));
+            ui.add(egui::TextEdit::singleline(&mut view.link_to).desired_width(70.).hint_text(RichText::new("T-12").color(p.muted)));
             let target = view.link_to.trim().to_uppercase();
             if ui.add_enabled(board.task(&target).is_some() && target != id, egui::Button::new("Связать")).clicked() {
                 ops.push(json!({"op":"link","id":id,"to":target,"kind":view.link_kind}));
@@ -1401,7 +1854,7 @@ fn detail(ui: &mut egui::Ui, task: &Value, board: &Board, view: &mut BoardView, 
         });
 
         section(ui, "Обсуждение и история", p);
-        ui.add(egui::TextEdit::multiline(&mut view.comment).desired_rows(2).desired_width(f32::INFINITY).hint_text("Комментарий для команды и агентов"));
+        ui.add(egui::TextEdit::multiline(&mut view.comment).desired_rows(2).desired_width(f32::INFINITY).hint_text(RichText::new("Комментарий для команды и агентов").color(p.muted)));
         if !view.comment.trim().is_empty() && design::button(ui, "Добавить", None, Kind::Secondary, p, Vec2::new(0., 28.)).clicked() {
             ops.push(json!({"op":"comment","id":id,"text":view.comment.trim()}));
             view.comment.clear();
@@ -1459,13 +1912,10 @@ fn journal(ui: &mut egui::Ui, board: &Board, view: &mut BoardView, p: Palette) {
     });
     small(ui, "Кто, что и с какого хоста менял — люди и агенты", 11.5, p.muted);
     section(ui, "Категории", p);
-    ui.horizontal(|ui| {
-        ui.add(egui::TextEdit::singleline(&mut view.new_category).desired_width(200.).hint_text("Новая категория"));
-        if !view.new_category.trim().is_empty() && design::button(ui, "Добавить", None, Kind::Secondary, p, Vec2::new(0., 26.)).clicked() {
-            let n = board.categories.len();
-            let name = view.new_category.trim().to_owned();
-            view.queued.push(json!({"op":"category","id":name.to_lowercase().replace(' ', "-"),"name":name,"color":SWATCHES[n % SWATCHES.len()],"order":n}));
-            view.new_category.clear();
+    ui.horizontal_wrapped(|ui| {
+        small(ui, format!("{} категорий", board.categories.len()), 12., p.muted);
+        if design::button(ui, "Изменить категории", Some(Icon::Settings), Kind::Secondary, p, Vec2::new(0., 28.)).clicked() {
+            view.manager = Some(Manager::open(board, None));
         }
     });
     section(ui, "Последние изменения", p);
@@ -1491,4 +1941,39 @@ fn journal(ui: &mut egui::Ui, board: &Board, view: &mut BoardView, p: Palette) {
             ui.add_space(6.);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state() -> Value {
+        json!({"categories":[{"id":"a","name":"A","order":0},{"id":"b","name":"B","order":1},{"id":"c","name":"C","order":2}],"tasks":[],"columns":[]})
+    }
+
+    #[test]
+    fn reorder_moves_in_front_of_target_or_to_the_end() {
+        let state = state();
+        let board = Board::new(&state);
+        assert_eq!(reorder(&board, "c", Some("a")).unwrap()["ids"], json!(["c", "a", "b"]));
+        assert_eq!(reorder(&board, "a", None).unwrap()["ids"], json!(["b", "c", "a"]));
+        assert_eq!(reorder(&board, "a", Some("c")).unwrap()["ids"], json!(["b", "a", "c"]));
+    }
+
+    #[test]
+    fn reorder_to_the_same_place_sends_nothing() {
+        let state = state();
+        let board = Board::new(&state);
+        assert!(reorder(&board, "b", Some("c")).is_none());
+        assert!(reorder(&board, "c", None).is_none());
+    }
+
+    #[test]
+    fn russian_plurals() {
+        assert_eq!(plural(1, "задача", "задачи", "задач"), "1 задача");
+        assert_eq!(plural(3, "задача", "задачи", "задач"), "3 задачи");
+        assert_eq!(plural(11, "задача", "задачи", "задач"), "11 задач");
+        assert_eq!(plural(22, "задача", "задачи", "задач"), "22 задачи");
+        assert_eq!(plural(15, "задача", "задачи", "задач"), "15 задач");
+    }
 }

@@ -12,9 +12,14 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import re
 import socket
 import sys
 import time
+
+# Bumped with every change; the bridge only replaces an older board.py next to the data,
+# so teammates on different Relay versions do not overwrite each other's copy.
+BOARD_VERSION = 2
 
 COLUMNS = [
     ("backlog", "Бэклог"),
@@ -27,6 +32,8 @@ STATUSES = [c[0] for c in COLUMNS]
 LINKS = ("blocks", "relates", "duplicates")
 FIELDS = ("title", "description", "category", "priority", "assignee", "estimate", "progress", "tags")
 MAX_TEXT = 20000
+SWATCHES = ("#d97757", "#5cb884", "#5b8def", "#c58af9", "#e5b84b", "#4fb6c4", "#e06c9f", "#9aa36b",
+            "#b08968", "#8e8e96", "#e8845c", "#6fbf73", "#7aa2f7", "#d4a5ff", "#f2c94c", "#56c2b0")
 
 
 def root():
@@ -170,20 +177,15 @@ def _apply(data, op, actor):
         data["tasks"].append(task)
         return ident, task["title"]
     if kind == "category":
-        ident = str(op.get("id") or op.get("name", "")).strip()[:40]
-        if not ident:
-            raise ValueError("category id")
-        existing = next((c for c in data["categories"] if c["id"] == ident), None)
-        if op.get("delete"):
-            data["categories"] = [c for c in data["categories"] if c["id"] != ident]
-            return ident, "категория удалена"
-        if existing is None:
-            existing = {"id": ident, "name": ident, "color": "#8e8e96", "order": len(data["categories"])}
-            data["categories"].append(existing)
-        for field in ("name", "color", "description", "order"):
-            if field in op:
-                existing[field] = op[field]
-        return ident, existing["name"]
+        return _category(data, op)
+    if kind == "reorder_categories":
+        ids = [str(i) for i in op.get("ids") or []]
+        rank = {ident: n for n, ident in enumerate(ids)}
+        ordered = sorted(data["categories"], key=lambda c: (rank.get(c["id"], len(ids)), c.get("order", 0)))
+        for n, category in enumerate(ordered):
+            category["order"] = n
+        data["categories"] = ordered
+        return "categories", "порядок категорий: " + ", ".join(c["name"] for c in ordered)
     task = _task(data, str(op.get("id", "")))
     task["updated_at"] = stamp
     if kind == "update":
@@ -244,6 +246,83 @@ def _apply(data, op, actor):
     raise ValueError(f"Неизвестная операция {kind}")
 
 
+def _color(value):
+    value = str(value or "").strip().lower()
+    if not re.fullmatch(r"#[0-9a-f]{6}", value):
+        raise ValueError("Цвет в виде #rrggbb")
+    return value
+
+
+def _slug(name, taken):
+    base = re.sub(r"-+", "-", "".join(c if c.isalnum() else "-" for c in name.lower())).strip("-")[:32] or "category"
+    ident, n = base, 2
+    while ident in taken:
+        ident, n = f"{base}-{n}", n + 1
+    return ident
+
+
+def _category(data, op):
+    """Create, rename, recolour, describe or delete a category. Tasks refer to its id,
+    so renaming never touches them; deleting can move them to another category."""
+    taken = {c["id"] for c in data["categories"]}
+    if op.get("new"):
+        name = str(op.get("name") or "").strip()[:60]
+        if not name:
+            raise ValueError("Пустое название категории")
+        if any(c["name"].lower() == name.lower() for c in data["categories"]):
+            raise ValueError(f"Категория «{name}» уже есть")
+        category = {"id": _slug(name, taken), "name": name,
+                    "color": _color(op["color"]) if op.get("color") else SWATCHES[len(taken) % len(SWATCHES)],
+                    "description": str(op.get("description") or "")[:500],
+                    "order": max((c.get("order", 0) for c in data["categories"]), default=-1) + 1}
+        data["categories"].append(category)
+        return category["id"], f"новая категория «{name}»"
+    ident = str(op.get("id") or op.get("name") or "").strip()[:40]
+    if not ident:
+        raise ValueError("category id")
+    category = next((c for c in data["categories"] if c["id"] == ident), None)
+    if category is None:
+        if op.get("delete"):
+            raise ValueError(f"Нет категории {ident}")
+        # Explicit ids (seed scripts, older clients) create the category as given.
+        category = {"id": ident, "name": ident, "color": "#8e8e96", "description": "",
+                    "order": max((c.get("order", 0) for c in data["categories"]), default=-1) + 1}
+        data["categories"].append(category)
+    if op.get("delete"):
+        target = str(op.get("move_to") or "")
+        if target and (target not in taken or target == ident):
+            raise ValueError("Перенести задачи можно только в другую существующую категорию")
+        moved = 0
+        for task in data["tasks"]:
+            if task.get("category") == ident:
+                task["category"] = target
+                moved += 1
+        data["categories"] = [c for c in data["categories"] if c["id"] != ident]
+        where = next((c["name"] for c in data["categories"] if c["id"] == target), "без категории")
+        return ident, f"удалена категория «{category['name']}»" + (f", задачи ({moved}) → {where}" if moved else "")
+    changes = []
+    if "name" in op:
+        name = str(op["name"] or "").strip()[:60]
+        if not name:
+            raise ValueError("Пустое название категории")
+        if name != category["name"]:
+            changes.append(f"«{category['name']}» → «{name}»")
+            category["name"] = name
+    if "color" in op:
+        color = _color(op["color"])
+        if color != category.get("color"):
+            changes.append("цвет")
+            category["color"] = color
+    if "description" in op:
+        description = str(op["description"] or "")[:500]
+        if description != category.get("description", ""):
+            changes.append("описание")
+            category["description"] = description
+    if "order" in op:
+        category["order"] = float(op["order"])
+    return ident, f"категория «{category['name']}»" + (": " + ", ".join(changes) if changes else "")
+
+
 def progress(data):
     def summary(tasks):
         total = sum(t.get("estimate") or 1 for t in tasks)
@@ -281,6 +360,7 @@ TOOLS = [
     {"name": "board_move", "description": "Move a task to another column (backlog, todo, doing, review, done) with an optional summary of what changed.", "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}, "status": {"type": "string"}, "summary": {"type": "string"}}, "required": ["id", "status"]}},
     {"name": "board_done", "description": "Finish a task with a summary of what was done (versions, files, what was verified and how). Use 'review' via board_move instead if a person must check it first.", "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}, "summary": {"type": "string"}}, "required": ["id", "summary"]}},
     {"name": "board_comment", "description": "Add a note to a task: findings, blockers, questions.", "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}, "text": {"type": "string"}}, "required": ["id", "text"]}},
+    {"name": "board_category", "description": "Create a category (only when no existing one fits) or rename/recolour/describe one by id. Categories group tasks on the board; tasks refer to the category id.", "inputSchema": {"type": "object", "properties": {"id": {"type": "string", "description": "Existing category id to change; omit to create a new one."}, "name": {"type": "string"}, "color": {"type": "string", "description": "#rrggbb"}, "description": {"type": "string"}}}},
     {"name": "board_link", "description": "Link two tasks: kind blocks (id blocks to), relates or duplicates.", "inputSchema": {"type": "object", "properties": {"id": {"type": "string"}, "to": {"type": "string"}, "kind": {"type": "string", "enum": list(LINKS)}}, "required": ["id", "to"]}},
 ]
 
@@ -318,6 +398,12 @@ def call(board, name, args, actor, host, via):
         data = board.state()
         task = _task(data, args["id"])
         return json.dumps({**task, "activity": board.activity(50, task["id"])}, ensure_ascii=False, indent=1)
+    if name == "board_category":
+        fields = {k: v for k, v in args.items() if k in ("id", "name", "color", "description") and v not in (None, "")}
+        if "id" not in fields:
+            fields["new"] = True
+        result = board.apply([{**fields, "op": "category"}], actor, host, via)
+        return f"Готово: категория {result['ids'][0]}"
     op = {"board_create": "create", "board_update": "update", "board_claim": "claim", "board_move": "move",
           "board_done": "done", "board_comment": "comment", "board_link": "link"}.get(name)
     if not op:
@@ -367,6 +453,7 @@ def cli(argv):
   add "title" [--category C] [--status S] [--estimate N] [--description D]
   claim ID | move ID STATUS [summary] | done ID "summary"
   comment ID "text" | link ID TO [blocks|relates|duplicates]
+  category "name" [--id ID] [--color #rrggbb] [--description D]   create, or change by --id
 Env: RELAY_BOARD_ACTOR (your name), RELAY_BOARD_NAME (default sbrp), RELAY_BOARD_DIR."""
     if not argv or argv[0] in ("-h", "--help"):
         print(usage)
@@ -381,7 +468,8 @@ Env: RELAY_BOARD_ACTOR (your name), RELAY_BOARD_NAME (default sbrp), RELAY_BOARD
             i += 1
     command, rest = rest[0], rest[1:]
     names = {"overview": "board_overview", "list": "board_list", "get": "board_get", "add": "board_create",
-             "claim": "board_claim", "move": "board_move", "done": "board_done", "comment": "board_comment", "link": "board_link"}
+             "claim": "board_claim", "move": "board_move", "done": "board_done", "comment": "board_comment", "link": "board_link",
+             "category": "board_category"}
     args = dict(flags)
     if command == "list" and rest:
         args["status"] = rest[0]
@@ -397,6 +485,8 @@ Env: RELAY_BOARD_ACTOR (your name), RELAY_BOARD_NAME (default sbrp), RELAY_BOARD
         args.update(id=rest[0], text=" ".join(rest[1:]))
     elif command == "link":
         args.update(id=rest[0], to=rest[1], kind=rest[2] if len(rest) > 2 else "relates")
+    elif command == "category" and rest:
+        args["name"] = rest[0]
     if "estimate" in args:
         args["estimate"] = float(args["estimate"])
     board = Board(os.environ.get("RELAY_BOARD_NAME", "sbrp"))

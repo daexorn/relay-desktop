@@ -144,6 +144,11 @@ class ProtocolTests(unittest.TestCase):
         with mock.patch.dict('os.environ',{'RELAY_BOARD_DIR':str(self.root/'board'),'HOME':str(self.root)}),mock.patch.object(bridge,'BOARD_SOURCE',source,create=True):
             host=bridge.Bridge(send=self.events.put,transcripts=bridge.Transcripts(self.root/'transcripts'),binary=str(self.cli))
             self.assertTrue(host.board_file.exists())
+            # An older Relay must not replace a newer board.py next to the data.
+            host.board_file.write_text("BOARD_VERSION = 99\n# newer\n")
+            bridge.load_board();self.assertIn('newer',host.board_file.read_text())
+            host.board_file.write_text("BOARD_VERSION = 1\n")
+            bridge.load_board();self.assertIn('BOARD_VERSION = 2',host.board_file.read_text())
             host.dispatch({'op':'board_apply','actor':'champ','host':'pc','ops':[{'op':'create','title':'Плавильня','status':'todo'}]})
             state=self.wait('board')['state'];self.assertEqual(state['tasks'][0]['title'],'Плавильня');self.assertEqual(state['activity'][0]['actor'],'champ')
             host.dispatch({'op':'board','since':state['rev']});self.assertTrue(self.wait('board')['state']['unchanged'])
