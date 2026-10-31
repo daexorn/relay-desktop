@@ -29,6 +29,12 @@ impl Drop for Download {
         let _ = fs::remove_file(&self.temp);
     }
 }
+struct TestJob {
+    request: Value,
+    dir: PathBuf,
+    next: usize,
+    cancel: Arc<AtomicBool>,
+}
 struct ArtifactRequest {
     source: String,
     target: Option<PathBuf>,
@@ -44,6 +50,9 @@ pub struct Desktop {
     server: String,
     commands: HashMap<String, Arc<AtomicBool>>,
     workers: Vec<std::thread::JoinHandle<()>>,
+    /// In-game tests: "auto", "ask" or "off", chosen in the composer.
+    tests: String,
+    jobs: HashMap<String, TestJob>,
 }
 impl Desktop {
     pub fn new(requests: UnboundedSender<Value>, bus: Bus, server: String) -> Self {
@@ -58,7 +67,98 @@ impl Desktop {
             server,
             commands: HashMap::new(),
             workers: vec![],
+            tests: "ask".into(),
+            jobs: HashMap::new(),
         }
+    }
+    fn test_status(&self, id: &str, stage: &str, message: impl Into<String>, result: Value) {
+        let purpose = self.jobs.get(id).map(|j| j.request["input"]["purpose"].clone());
+        self.bus.send(Event::Data {
+            server: self.server.clone(),
+            value: json!({"type":"game_test_status","id":id,"stage":stage,"message":message.into(),"result":result,"purpose":purpose}),
+        });
+    }
+    /// Asks the server for the next mod jar of a test, or starts the game once all arrived.
+    fn advance_test(&mut self, id: &str) {
+        let Some(job) = self.jobs.get(id) else {
+            return;
+        };
+        let mods = job.request["input"]["mods"].as_array().cloned().unwrap_or_default();
+        if job.next < mods.len() {
+            let name = file_name(mods[job.next]["name"].as_str().unwrap_or("mod.jar"));
+            let message = format!("Передаём моды · {}/{}", job.next + 1, mods.len());
+            let index = job.next;
+            match self.begin(job.dir.join("mods").join(name)) {
+                Ok(download) => {
+                    self.downloads.insert(id.to_owned(), download);
+                    let _ = self
+                        .requests
+                        .send(json!({"op":"desktop_download","id":id,"index":index}));
+                    self.test_status(id, "transfer", message, Value::Null);
+                }
+                Err(error) => self.fail_test(id, error),
+            }
+            return;
+        }
+        let input = &job.request["input"];
+        let test = crate::gametest::Job {
+            version: input["minecraft_version"].as_str().unwrap_or("1.21.8").into(),
+            loader: input["loader_version"].as_str().unwrap_or("").into(),
+            scenario: input["scenario"].as_str().unwrap_or("").into(),
+            timeout: Duration::from_secs(input["timeout_seconds"].as_u64().unwrap_or(300).clamp(60, 900)),
+            mods: job.dir.join("mods"),
+            out: job.dir.join("out"),
+        };
+        let cancel = job.cancel.clone();
+        let purpose = job.request["input"]["purpose"].clone();
+        let requests = self.requests.clone();
+        let bus = self.bus.clone();
+        let server = self.server.clone();
+        let id = id.to_owned();
+        let worker_id = id.clone();
+        self.workers.retain(|worker| !worker.is_finished());
+        self.workers.push(std::thread::spawn(move || {
+            let id = worker_id;
+            let status = |stage: &str, message: String, result: Value| {
+                bus.send(Event::Data {
+                    server: server.clone(),
+                    value: json!({"type":"game_test_status","id":id,"stage":stage,"message":message,"result":result,"purpose":purpose}),
+                });
+            };
+            let mut result = match crate::gametest::run(&test, &cancel, &|m| status("running", m, Value::Null)) {
+                Ok(v) => v,
+                Err(e) => json!({"ok":false,"message":format!("{e:#}")}),
+            };
+            status("upload", "Отправляем результаты на сервер".into(), Value::Null);
+            let mut sent = 0u64;
+            let mut names = vec![];
+            for path in crate::gametest::results(&test.out) {
+                let Ok(body) = fs::read(&path) else { continue };
+                if sent + body.len() as u64 > 60 * 1024 * 1024 {
+                    break;
+                }
+                sent += body.len() as u64;
+                let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                for (sequence, chunk) in body.chunks(128 * 1024).enumerate() {
+                    let _ = requests.send(json!({"op":"desktop_upload","id":id,"name":name,"sequence":sequence,"data":STANDARD.encode(chunk)}));
+                }
+                let _ = requests.send(json!({"op":"desktop_upload_end","id":id,"name":name}));
+                names.push(name);
+            }
+            result["uploaded"] = json!(names);
+            result["local_folder"] = json!(test.out);
+            status("done", String::new(), result.clone());
+            let _ = requests.send(json!({"op":"desktop_result","id":id,"result":result}));
+        }));
+        if let Some(job) = self.jobs.get_mut(&id) {
+            job.next = usize::MAX;
+        }
+    }
+    fn fail_test(&mut self, id: &str, error: impl ToString) {
+        self.test_status(id, "done", error.to_string(), json!({"ok":false,"message":error.to_string()}));
+        self.jobs.remove(id);
+        self.downloads.remove(id);
+        self.fail(id, error);
     }
     fn result(&self, id: &str, result: Value) {
         let _ = self
@@ -142,6 +242,19 @@ impl Desktop {
                     }
                 }
             }
+            "_tests_policy" => {
+                if let Some(mode) = value["mode"].as_str().filter(|m| ["auto", "ask", "off"].contains(m)) {
+                    self.tests = mode.into();
+                }
+            }
+            "_game_test_stop" => {
+                if let Some(job) = self.jobs.get(id) {
+                    job.cancel.store(true, Ordering::Relaxed);
+                    if job.next != usize::MAX {
+                        self.fail_test(id, "Тест остановлен пользователем");
+                    }
+                }
+            }
             "_desktop_deny" => {
                 if self.pending.remove(id).is_some() {
                     self.fail(id, "The user declined this action in Relay.");
@@ -149,6 +262,20 @@ impl Desktop {
             }
             "_desktop_approve" => {
                 if let Some(request) = self.pending.remove(id) {
+                    if request["tool"] == "minecraft_test" {
+                        let dir = crate::gametest::root().join("runs").join(id);
+                        let _ = fs::remove_dir_all(&dir);
+                        if let Err(error) = fs::create_dir_all(dir.join("mods")) {
+                            self.fail(id, error);
+                            return true;
+                        }
+                        self.jobs.insert(
+                            id.to_owned(),
+                            TestJob { request, dir, next: 0, cancel: Arc::new(AtomicBool::new(false)) },
+                        );
+                        self.advance_test(id);
+                        return true;
+                    }
                     if self.workspace.is_none() {
                         self.fail(id, "Local access is disabled");
                         return true;
@@ -337,8 +464,20 @@ impl Desktop {
                     && !self.downloads.contains_key(id)
                     && !self.commands.contains_key(id)
                     && self.pending.len() + self.downloads.len() < 8
-                    && self.workspace.is_some()
+                    && (self.workspace.is_some() || value["tool"] == "minecraft_test")
                     && match value["tool"].as_str() {
+                        Some("minecraft_test") => {
+                            self.tests != "off"
+                                && self.jobs.len() < 2
+                                && value["input"]["scenario"].as_str().is_some_and(|s| s.len() <= 65536)
+                                && value["input"]["mods"].as_array().is_some_and(|mods| {
+                                    (1..=16).contains(&mods.len())
+                                        && mods.iter().all(|m| {
+                                            m["size"].as_u64().is_some_and(|s| s <= 256 * 1024 * 1024)
+                                                && m["name"].as_str().is_some_and(|n| file_name(n) == n && n.ends_with(".jar"))
+                                        })
+                                })
+                        }
                         Some("download_file") => value["input"]["size"]
                             .as_u64()
                             .is_some_and(|s| s <= 512 * 1024 * 1024),
@@ -353,11 +492,15 @@ impl Desktop {
                     self.pending.insert(id.to_owned(), value.clone());
                     let mut request = value.clone();
                     request["local_workspace"] = json!(self.workspace);
-                    let auto = request["sid"]
-                        .as_str()
-                        .and_then(|sid| self.policies.get(sid))
-                        .copied()
-                        .unwrap_or(false);
+                    let auto = if request["tool"] == "minecraft_test" {
+                        self.tests == "auto"
+                    } else {
+                        request["sid"]
+                            .as_str()
+                            .and_then(|sid| self.policies.get(sid))
+                            .copied()
+                            .unwrap_or(false)
+                    };
                     if auto {
                         self.approve_auto(id);
                     } else {
@@ -366,6 +509,8 @@ impl Desktop {
                             value: request,
                         });
                     }
+                } else if value["tool"] == "minecraft_test" && self.tests == "off" {
+                    self.fail(id, "The user turned in-game tests off in Relay. Continue without them and say what stays unverified.");
                 } else {
                     self.fail(id,"Local access is off or the request is invalid. Ask the user to choose a local workspace in Relay.");
                 }
@@ -373,6 +518,9 @@ impl Desktop {
             }
             "desktop_cancel" => {
                 self.pending.remove(id);
+                if let Some(job) = self.jobs.remove(id) {
+                    job.cancel.store(true, Ordering::Relaxed);
+                }
                 if let Some(cancel) = self.commands.remove(id) {
                     cancel.store(true, Ordering::Relaxed);
                 }
@@ -398,7 +546,11 @@ impl Desktop {
                 })();
                 if let Err(error) = result {
                     self.downloads.remove(id);
-                    self.complete(id, json!({"ok":false,"message":error.to_string()}));
+                    if self.jobs.contains_key(id) {
+                        self.fail_test(id, error);
+                    } else {
+                        self.complete(id, json!({"ok":false,"message":error.to_string()}));
+                    }
                 }
                 true
             }
@@ -446,6 +598,18 @@ impl Desktop {
                             json!({"ok":true,"path":download.target,"size":download.size,"sha256":hash,"previous_file_backup":backup}),
                         )
                     })();
+                    if self.jobs.contains_key(id) {
+                        match result {
+                            Ok(_) => {
+                                if let Some(job) = self.jobs.get_mut(id) {
+                                    job.next += 1;
+                                }
+                                self.advance_test(id);
+                            }
+                            Err(error) => self.fail_test(id, error),
+                        }
+                        return true;
+                    }
                     match result {
                         Ok(result) => {
                             if !self.artifacts.contains_key(id) {

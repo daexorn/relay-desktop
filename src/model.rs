@@ -27,6 +27,12 @@ pub struct Server {
     pub local_workspace: Option<String>,
     #[serde(default)]
     pub local_control: bool,
+    /// In-game tests on this PC: "auto", "ask" or "off".
+    #[serde(default = "default_tests")]
+    pub tests: String,
+}
+fn default_tests() -> String {
+    "ask".into()
 }
 fn default_mode() -> String {
     "auto".into()
@@ -52,6 +58,7 @@ impl Default for Server {
             effort: default_model(),
             local_workspace: None,
             local_control: false,
+            tests: default_tests(),
         }
     }
 }

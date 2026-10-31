@@ -51,6 +51,38 @@ class DesktopTests(unittest.TestCase):
                 self.assertEqual(event['sequence'],sequence);sequence+=1;chunks.append(base64.b64decode(event['data']))
             self.assertEqual(b''.join(chunks),body);self.assertEqual(event['sha256'],hashlib.sha256(body).hexdigest())
             self.service.result(request['id'],{'ok':True});self.assertTrue(result.get(timeout=2)['ok'])
+    def test_tools_list_follows_session_tools(self):
+        data=json.dumps({'jsonrpc':'2.0','id':1,'method':'tools/list'})+'\n'
+        env=dict(__import__('os').environ,RELAY_DESKTOP_TOOLS='minecraft_test')
+        output=subprocess.run([sys.executable,str(SOURCE)],input=data,text=True,capture_output=True,timeout=3,check=True,env=env)
+        self.assertEqual([t['name'] for t in json.loads(output.stdout)['result']['tools']],['minecraft_test'])
+    def test_minecraft_test_streams_mods_by_index_and_collects_uploads(self):
+        with tempfile.TemporaryDirectory() as folder,tempfile.TemporaryDirectory() as home:
+            mcp.TEST_ROOT=Path(home)
+            first=Path(folder)/'mod.jar';first.write_bytes(b'one');second=Path(folder)/'fabric-api.jar';second.write_bytes(b'two'*1000)
+            result=self.call('minecraft_test',{'purpose':'GUI opens','scenario':'test_world\nquit','mods':[str(first),str(second)]})
+            request=self.events.get(timeout=2);self.assertEqual([m['name'] for m in request['input']['mods']],['mod.jar','fabric-api.jar'])
+            self.assertEqual(request['input']['minecraft_version'],'1.21.8');self.assertEqual(request['input']['timeout_seconds'],300)
+            self.service.download(request['id'],1);chunks=[]
+            while True:
+                event=self.events.get(timeout=2)
+                if event['type']=='desktop_end':break
+                chunks.append(base64.b64decode(event['data']))
+            self.assertEqual(b''.join(chunks),b'two'*1000)
+            self.service.download(request['id'],1);self.assertTrue(self.events.empty())
+            png=b'\x89PNG'+bytes(300000)
+            for i in range(0,len(png),131072):self.service.upload(request['id'],'01-title.png',i//131072,base64.b64encode(png[i:i+131072]).decode())
+            self.service.upload_end(request['id'],'01-title.png')
+            self.service.upload(request['id'],'../escape.png',0,base64.b64encode(b'x').decode())
+            self.service.result(request['id'],{'ok':False,'report':{'ok':False}})
+            body=result.get(timeout=2);saved=Path(body['files'][0])
+            self.assertEqual(saved.name,'01-title.png');self.assertEqual(saved.read_bytes(),png);self.assertEqual(len(body['files']),1)
+            self.assertFalse((Path(home)/'escape.png').exists())
+    def test_minecraft_test_rejects_non_jar_mods(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'notes.txt';path.write_text('x')
+            result=self.call('minecraft_test',{'purpose':'x','scenario':'quit','mods':[str(path)]}).get(timeout=3)
+            self.assertFalse(result['ok']);self.assertIn('Not a mod jar',result['message']);self.assertTrue(self.events.empty())
     def test_download_destination_is_forwarded_to_desktop(self):
         with tempfile.TemporaryDirectory() as folder:
             path=Path(folder)/'example.jar';path.write_bytes(b'jar')

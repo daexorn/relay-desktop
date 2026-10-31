@@ -112,6 +112,8 @@ pub struct RelayApp {
     capture_requested: bool,
     close_confirm: bool,
     desktop_requests: Vec<(String, Value)>,
+    /// Latest status of each in-game test, by request id.
+    game_tests: Vec<(String, Value)>,
     downloads: crate::artifacts::Downloads,
 }
 fn key(server: &str, sid: &str) -> String {
@@ -161,6 +163,7 @@ impl RelayApp {
             capture_requested: false,
             close_confirm: false,
             desktop_requests: vec![],
+            game_tests: vec![],
             downloads: Default::default(),
         };
         if demo {
@@ -226,6 +229,13 @@ impl RelayApp {
                     app.chats.get_mut(&k).unwrap().mode = "manual".into();
                 }
                 app.desktop_requests.push(("demo".into(),json!({"id":"demo-action","tool":"run_local_command","input":{"command":"ls -lh mods/ && tail -n 20 logs/latest.log","timeout_seconds":30}})));
+            }
+            if args.iter().any(|a| a == "--demo-gametest") {
+                app.game_tests.push(("demo".into(),json!({"id":"t1","stage":"done","purpose":"Наковальня: мини-игра ковки открывается и принимает удары","result":{"ok":true,"seconds":38,"local_folder":"/tmp"}})));
+                if args.iter().any(|a| a == "--demo-gametest-ask") {
+                    app.desktop_requests.push(("demo".into(),json!({"id":"t3","tool":"minecraft_test","input":{"purpose":"Наковальня: мини-игра ковки открывается и принимает удары","minecraft_version":"1.21.8","timeout_seconds":300,"mods":[{"name":"sbrp-client-0.7.309.jar"},{"name":"fabric-api-0.136.1+1.21.8.jar"}],"scenario":"test_world\nwait_world\ncommand /give @s sbrp:hammer\nkey key.use\nscreenshot anvil\nquit"}})));
+                }
+                app.game_tests.push(("demo".into(),json!({"id":"t2","stage":"running","message":"шаг 4/9","purpose":"Новый инвентарь: палитры переключаются"})));
             }
             if args.iter().any(|a| a == "--demo-tables") {
                 if let Some(k) = app.current_key() {
@@ -658,6 +668,14 @@ impl RelayApp {
                 self.desktop_requests
                     .retain(|(s, v)| s != &server || v["id"] != value["id"]);
             }
+            "game_test_status" => {
+                let id = value["id"].clone();
+                self.game_tests.retain(|(_, v)| v["id"] != id);
+                self.game_tests.push((server, value));
+                if self.game_tests.len() > 4 {
+                    self.game_tests.remove(0);
+                }
+            }
             "desktop_status" => {
                 self.notice = value["message"].as_str().unwrap_or("").into();
             }
@@ -687,6 +705,14 @@ impl RelayApp {
                     .and_then(|s| s.local_workspace.clone());
                 self.controller
                     .send(&server, json!({"op":"_desktop_workspace","path":workspace}));
+                let tests = self
+                    .settings
+                    .servers
+                    .iter()
+                    .find(|s| s.id == server)
+                    .map_or("ask".to_owned(), |s| s.tests.clone());
+                self.controller
+                    .send(&server, json!({"op":"_tests_policy","mode":tests}));
                 if let Some(sid) = self.selected_chat.get(&server) {
                     if let Some(c) = self.chats.get_mut(&key(&server, sid)) {
                         if !c.loaded && !c.loading {
@@ -856,7 +882,7 @@ impl RelayApp {
             json!({"op":"_desktop_workspace","path":if server.local_control {server.local_workspace.clone()}else{None}}),
         );
         self.controller.send(&server.id,json!({"op":"_desktop_policy","sid":c.sid,"auto":server.local_control && c.mode=="auto"}));
-        let request = json!({"op":"prompt","sid":c.sid,"cwd":c.cwd,"text":text,"images":images,"files":files,"model":c.model,"mode":c.mode,"effort":c.effort,"desktop_enabled":server.local_control && server.local_workspace.is_some(),"desktop_context":{"os":std::env::consts::OS,"workspace":server.local_workspace,"downloads":dirs::download_dir(),"auto":c.mode=="auto"}});
+        let request = json!({"op":"prompt","sid":c.sid,"cwd":c.cwd,"text":text,"images":images,"files":files,"model":c.model,"mode":c.mode,"effort":c.effort,"desktop_enabled":(server.local_control && server.local_workspace.is_some()) || server.tests!="off","desktop_context":{"os":std::env::consts::OS,"workspace":server.local_workspace,"downloads":dirs::download_dir(),"auto":c.mode=="auto","local":server.local_control && server.local_workspace.is_some(),"tests":server.tests}});
         if self.demo {
             c.error = "Это предпросмотр интерфейса. Добавь свой сервер для работы.".into();
             return;
@@ -1671,6 +1697,8 @@ impl RelayApp {
             }
         });
         ui.add_space(4.);
+        let mut tests = server.tests.clone();
+        self.game_test_cards(ui, &server.id, p);
         let chat = self.chats.get_mut(k).unwrap();
         let previous = (chat.model.clone(), chat.mode.clone(), chat.effort.clone());
         if !chat.error.is_empty() {
@@ -1751,7 +1779,7 @@ impl RelayApp {
                     send = true;
                 }
                 let compact =
-                    ui.available_width() < if chat.mode == "manual" { 470. } else { 430. };
+                    ui.available_width() < if chat.mode == "manual" { 600. } else { 560. };
                 ui.add_space(4.);
                 ui.horizontal(|ui| {
                     ui.add_space(-6.);
@@ -1769,7 +1797,7 @@ impl RelayApp {
                         attach = true;
                     }
                     if !compact {
-                        composer_selectors(ui, chat, p);
+                        composer_selectors(ui, chat, &mut tests, p);
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if chat.busy {
@@ -1815,7 +1843,7 @@ impl RelayApp {
                 });
                 if compact {
                     ui.add_space(4.);
-                    ui.horizontal_wrapped(|ui| composer_selectors(ui, chat, p));
+                    ui.horizontal_wrapped(|ui| composer_selectors(ui, chat, &mut tests, p));
                 }
             });
         let current = (chat.model.clone(), chat.mode.clone(), chat.effort.clone());
@@ -1830,11 +1858,96 @@ impl RelayApp {
             }
             self.save();
         }
+        if tests != server.tests {
+            if let Some(s) = self.settings.servers.iter_mut().find(|s| s.id == server.id) {
+                s.tests = tests.clone();
+            }
+            self.controller
+                .send(&server.id, json!({"op":"_tests_policy","mode":tests}));
+            self.save();
+        }
         if send {
             self.send_prompt();
         }
         if attach {
             self.pick_images();
+        }
+    }
+    fn game_test_cards(&mut self, ui: &mut egui::Ui, server: &str, p: Palette) {
+        let mut stop = None;
+        let mut close = None;
+        for (s, status) in &self.game_tests {
+            if s != server {
+                continue;
+            }
+            let done = status["stage"] == "done";
+            let result = &status["result"];
+            let ok = done && result["ok"] == true;
+            let purpose = status["purpose"].as_str().unwrap_or("");
+            egui::Frame::new()
+                .fill(design::mix(p.surface, if ok { GREEN } else { ACCENT }, if done { 0.08 } else { 0.05 }))
+                .stroke(Stroke::new(1.0_f32, p.line))
+                .corner_radius(10.)
+                .inner_margin(egui::Margin::symmetric(12, 8))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        if done {
+                            let (r, _) = ui.allocate_exact_size(Vec2::splat(16.), egui::Sense::hover());
+                            design::icon(ui.painter(), r, if ok { Icon::Check } else { Icon::Close }, if ok { GREEN } else { ACCENT });
+                        } else {
+                            design::dots(ui, ACCENT);
+                        }
+                        let headline = if !done {
+                            format!("Игровой тест · {}", status["message"].as_str().unwrap_or(""))
+                        } else if ok {
+                            format!("Игровой тест пройден · {} с", result["seconds"].as_u64().unwrap_or(0))
+                        } else {
+                            let failed = result["report"]["steps"]
+                                .as_array()
+                                .and_then(|steps| steps.iter().find(|s| s["ok"] == false))
+                                .and_then(|s| s["error"].as_str())
+                                .or(result["message"].as_str())
+                                .unwrap_or("не пройден");
+                            format!("Игровой тест: {}", model::shorten(failed, 90))
+                        };
+                        label(ui, headline, 12.5, p.text);
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let id = status["id"].as_str().unwrap_or("").to_owned();
+                            if done {
+                                if design::button(ui, "", Some(Icon::Close), Kind::Ghost, p, Vec2::splat(24.))
+                                    .on_hover_text("Скрыть")
+                                    .clicked()
+                                {
+                                    close = Some(id);
+                                }
+                                if let Some(folder) = result["local_folder"].as_str() {
+                                    if design::button(ui, "", Some(Icon::Folder), Kind::Ghost, p, Vec2::splat(24.))
+                                        .on_hover_text("Скриншоты и логи на этом ПК")
+                                        .clicked()
+                                    {
+                                        open_folder(folder);
+                                    }
+                                }
+                            } else if design::button(ui, "", Some(Icon::Stop), Kind::Ghost, p, Vec2::splat(24.))
+                                .on_hover_text("Остановить тест")
+                                .clicked()
+                            {
+                                stop = Some(id);
+                            }
+                        });
+                    });
+                    if !purpose.is_empty() {
+                        label(ui, purpose, 11.5, p.muted);
+                    }
+                });
+            ui.add_space(6.);
+        }
+        if let Some(id) = stop {
+            self.controller.send(server, json!({"op":"_game_test_stop","id":id}));
+        }
+        if let Some(id) = close {
+            self.game_tests.retain(|(_, v)| v["id"] != id.as_str());
         }
     }
     fn permission_card(&mut self, ui: &mut egui::Ui, k: &str, p: Palette) {
@@ -1979,7 +2092,65 @@ impl RelayApp {
                 .and_then(|s| s.local_workspace.as_deref())
                 .unwrap_or("Не подключено");
             let command = request["tool"] == "run_local_command";
-            let modal = egui::Modal::new(egui::Id::new("desktop-approval")).show(ctx, |ui| {
+            let test = request["tool"] == "minecraft_test";
+            let modal = egui::Modal::new(egui::Id::new("desktop-approval"))
+                .frame(egui::Frame::new().fill(p.surface).corner_radius(14.).inner_margin(20.))
+                .show(ctx, |ui| {
+                if test {
+                    ui.set_width(460.);
+                    label(ui, "Прогнать тест?", 18., p.text);
+                    label(ui, format!("Claude из {name} хочет проверить изменения в игре"), 12., p.muted);
+                    ui.add_space(10.);
+                    label(ui, request["input"]["purpose"].as_str().unwrap_or("Проверка в игре"), 14., p.text);
+                    ui.add_space(6.);
+                    let mods: Vec<_> = request["input"]["mods"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|m| m["name"].as_str())
+                        .collect();
+                    let steps = request["input"]["scenario"]
+                        .as_str()
+                        .unwrap_or("")
+                        .lines()
+                        .map(str::trim)
+                        .filter(|l| !l.is_empty() && !l.starts_with('#') && *l != "quit")
+                        .count();
+                    label(
+                        ui,
+                        format!(
+                            "Minecraft {} · шагов: {steps} · до {} мин\nМоды: {}",
+                            request["input"]["minecraft_version"].as_str().unwrap_or("1.21.8"),
+                            request["input"]["timeout_seconds"].as_u64().unwrap_or(300).div_ceil(60),
+                            mods.join(", ")
+                        ),
+                        12.,
+                        p.muted,
+                    );
+                    egui::CollapsingHeader::new(RichText::new("Сценарий").size(12.).color(p.muted))
+                        .id_salt("test-scenario")
+                        .show(ui, |ui| {
+                            egui::ScrollArea::vertical().max_height(160.).show(ui, |ui| {
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(request["input"]["scenario"].as_str().unwrap_or("")).monospace().size(12.),
+                                    )
+                                    .wrap(),
+                                );
+                            });
+                        });
+                    label(ui, "Игра запустится скрыто в отдельной папке Relay и не заберёт фокус.", 11.5, p.muted);
+                    ui.add_space(12.);
+                    ui.horizontal(|ui| {
+                        if design::button(ui, "Пропустить", None, Kind::Secondary, p, Vec2::new(0., 32.)).clicked() {
+                            decision = Some(false);
+                        }
+                        if design::button(ui, "Прогнать", Some(Icon::Check), Kind::Primary, p, Vec2::new(0., 32.)).clicked() {
+                            decision = Some(true);
+                        }
+                    });
+                    return;
+                }
                 ui.set_width(480.);
                 label(
                     ui,
@@ -2610,7 +2781,7 @@ impl RelayApp {
         self.chats.insert(key(&s.id, &c.sid), c);
     }
 }
-fn composer_selectors(ui: &mut egui::Ui, chat: &mut Chat, p: Palette) {
+fn composer_selectors(ui: &mut egui::Ui, chat: &mut Chat, tests: &mut String, p: Palette) {
     ui.scope(|ui| {
         ui.spacing_mut().button_padding = Vec2::new(8., 5.);
         ui.spacing_mut().interact_size.y = 28.;
@@ -2696,6 +2867,32 @@ fn composer_selectors(ui: &mut egui::Ui, chat: &mut Chat, p: Palette) {
             })
             .response
             .on_hover_text("Применяется к следующему сообщению");
+        egui::ComboBox::from_id_salt("tests-selector")
+            .selected_text(
+                RichText::new(format!(
+                    "Тесты: {}",
+                    match tests.as_str() {
+                        "auto" => "авто",
+                        "off" => "выкл",
+                        _ => "спрашивать",
+                    }
+                ))
+                .size(12.5)
+                .color(p.muted),
+            )
+            .width(0.)
+            .show_ui(ui, |ui| {
+                label(ui, "Игровые тесты на этом ПК", 12., p.muted);
+                for (id, name) in [
+                    ("auto", "Авто — запускать сразу"),
+                    ("ask", "Спрашивать перед запуском"),
+                    ("off", "Отключены"),
+                ] {
+                    ui.selectable_value(tests, id.into(), name);
+                }
+            })
+            .response
+            .on_hover_text("Claude запускает скрытый Minecraft с модами и смотрит скриншоты. Окно не появляется и не забирает фокус.");
     });
 }
 fn attachment_view(ui: &mut egui::Ui, file: &Attachment, p: Palette, removable: bool) -> bool {
@@ -2772,6 +2969,10 @@ fn folder_name(path: &str) -> &str {
         .rsplit(['/', '\\'])
         .find(|s| !s.is_empty())
         .unwrap_or("/")
+}
+fn open_folder(path: &str) {
+    let program = if cfg!(windows) { "explorer" } else { "xdg-open" };
+    let _ = std::process::Command::new(program).arg(path).spawn();
 }
 fn relative(time: f64) -> String {
     let now = chrono::Local::now().timestamp();

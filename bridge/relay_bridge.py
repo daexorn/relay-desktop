@@ -382,9 +382,18 @@ class Run:
         system_prompt="Relay supports downloadable server files in chat. When the user requests a built mod or other generated artifact, include a Markdown download link [filename](absolute_server_file_path) for the real existing file. Verify it exists before offering it. A bare filename or a statement that the build succeeded is not file delivery. Never claim the file was delivered to the PC unless the transfer tool actually succeeded."
         if getattr(owner,"desktop_requested",False):
             self.desktop_enabled=True
-            args += ["--mcp-config", owner.desktop.config(sid)]
-            system_prompt += " Relay desktop tools operate on the user's computer, not this server. Use relay_desktop.download_file for delivery to the computer, and relay_desktop.run_local_command for local commands. Relay applies the local permission mode: Auto runs commands and downloads without per-action confirmation; other modes ask the user. This is full access with the local user permissions; the working directory is not a sandbox. Invoke the tools directly rather than asking for approval in chat. Never claim local execution or delivery before the tool succeeds. Local computer context: " + self.desktop_context
-            env["MCP_TOOL_TIMEOUT"]="650000"
+            try:context=json.loads(self.desktop_context or "{}")
+            except ValueError:context={}
+            local=bool(context.get("local",True))
+            tests=context.get("tests","off") if context.get("tests") in ("auto","ask") else "off"
+            tools=(("download_file","run_local_command") if local else ())+(("minecraft_test",) if tests!="off" else ())
+            args += ["--mcp-config", owner.desktop.config(sid,tools)]
+            if local:
+                system_prompt += " Relay desktop tools operate on the user's computer, not this server. Use relay_desktop.download_file for delivery to the computer, and relay_desktop.run_local_command for local commands. Relay applies the local permission mode: Auto runs commands and downloads without per-action confirmation; other modes ask the user. This is full access with the local user permissions; the working directory is not a sandbox. Invoke the tools directly rather than asking for approval in chat. Never claim local execution or delivery before the tool succeeds."
+            if tests!="off":
+                system_prompt += " In-game tests: relay_desktop.minecraft_test runs a hidden Minecraft with given mod jars on the user's computer and returns screenshots and logs saved on this server. Call it when a change can only be confirmed by playing (GUI, rendering, input, client behaviour). The user's Relay setting is '" + ("run automatically" if tests=="auto" else "ask before each run") + "'; Relay enforces it, so call the tool directly rather than asking in chat. Look at the returned screenshots yourself before reporting. If the test was skipped or failed, say what remains unverified."
+            system_prompt += " Local computer context: " + self.desktop_context
+            env["MCP_TOOL_TIMEOUT"]="2000000"
         args += ["--append-system-prompt",system_prompt]
         self.process = subprocess.Popen(args, cwd=cwd, env=env,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -427,7 +436,7 @@ class Run:
                     req = data.get("request", {})
                     request_id = data.get("request_id", "")
                     if req.get("subtype") == "can_use_tool":
-                        if self.desktop_enabled and req.get("tool_name") in ("mcp__relay_desktop__download_file","mcp__relay_desktop__run_local_command"):
+                        if self.desktop_enabled and req.get("tool_name") in ("mcp__relay_desktop__download_file","mcp__relay_desktop__run_local_command","mcp__relay_desktop__minecraft_test"):
                             # Actual authorization is enforced by the desktop UI
                             # or its locally enabled automatic policy, not here.
                             self.write({"type":"control_response","response":{"subtype":"success","request_id":request_id,"response":{"behavior":"allow","updatedInput":req.get("input",{})}}})
@@ -608,7 +617,11 @@ class Bridge:
             elif op == "desktop_result":
                 if self.desktop:self.desktop.result(req.get("id"),req.get("result",{}))
             elif op == "desktop_download":
-                if self.desktop:self.desktop.download(req.get("id"))
+                if self.desktop:self.desktop.download(req.get("id"),req.get("index"))
+            elif op == "desktop_upload":
+                if self.desktop:self.desktop.upload(req.get("id"),req.get("name"),req.get("sequence"),req.get("data"))
+            elif op == "desktop_upload_end":
+                if self.desktop:self.desktop.upload_end(req.get("id"),req.get("name"))
             elif op == "usage":
                 self.send(self.usage.snapshot())
                 self.usage.refresh_async(self.send)
@@ -772,7 +785,11 @@ def main():
             try:
                 req = json.loads(line)
                 if isinstance(req, dict):
-                    threading.Thread(target=bridge.dispatch, args=(req,), daemon=True).start()
+                    # Upload chunks and the result that follows them must stay in order.
+                    if req.get("op") in ("desktop_upload", "desktop_upload_end", "desktop_result"):
+                        bridge.dispatch(req)
+                    else:
+                        threading.Thread(target=bridge.dispatch, args=(req,), daemon=True).start()
             except ValueError:
                 continue
     except (BrokenPipeError, KeyboardInterrupt):
