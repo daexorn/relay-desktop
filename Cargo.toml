@@ -1,6 +1,6 @@
 [package]
 name = "relay-desktop"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 description = "A small native desktop for Claude Code on your servers"
 license = "MIT"
@@ -22,7 +22,8 @@ rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "t
 russh = { version = "=0.65.0", default-features = false, features = ["ring", "rsa"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "io-util", "macros"] }
+sha2 = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "io-util", "macros", "process"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 zeroize = "1"
 

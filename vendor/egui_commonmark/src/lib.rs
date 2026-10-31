@@ -441,6 +441,18 @@ mod relay_list_layout_tests {
         let gap=body.pos.y-heading.pos.y-heading.galley.size().y;assert!((0.0..=8.).contains(&gap),"heading lost spacing structure: {gap}");
     }
     #[test]
+    fn table_cells_keep_row_height_and_readable_column_width(){
+        for width in [240.,420.,840.]{
+            let markdown="| № | Risk | Rank | Strategy |\n|---|---|---|---|\n| 1 | First very long explanation repeated enough to wrap across multiple lines without overlapping the next row. | 3×3 = 9 | Reduce impact with a longer description. |\n| 2 | Second risk description with multiple words. | 2×3 = 6 | Reduce probability. |\n\nAfter table.";
+            let shapes=render(markdown,width);
+            let first=text(&shapes,"First very long");let second=text(&shapes,"Second risk");
+            assert!(!first.galley.job.justify,"Cell text must not be stretched across the row");
+            assert!(second.pos.y>=first.pos.y+first.galley.size().y,"Rows overlap at width={width}");
+            assert!(first.galley.size().x>=60.,"Prose column collapsed at width={width}");
+            assert!(first.galley.rows.len()<15,"Single-word table column at width={width}");
+        }
+    }
+    #[test]
     fn long_inline_code_urls_and_words_stay_inside_the_viewport(){
         let token="LongUnbrokenDirectorySegment".repeat(18);
         let path=format!("/opt/projects/{token}/file.rs");

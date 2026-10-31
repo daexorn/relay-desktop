@@ -5,6 +5,7 @@
 
 mod app;
 mod connection;
+mod desktop;
 mod images;
 mod limits;
 mod model;

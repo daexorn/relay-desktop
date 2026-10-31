@@ -283,3 +283,14 @@ class UsageTests(unittest.TestCase):
 
 
 if __name__=='__main__':unittest.main()
+
+class LegacySessionTests(unittest.TestCase):
+    def test_corrupt_rows_do_not_hide_other_sessions(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);project=root/'-root';project.mkdir()
+            valid=str(uuid.uuid4());legacy=str(uuid.uuid4())
+            (project/(valid+'.jsonl')).write_text(json.dumps({'type':'user','cwd':'/tmp','message':{'role':'user','content':'Keep this session'},'uuid':'u'})+'\n')
+            (project/(legacy+'.jsonl')).write_bytes(b'[]\nnull\n{"message":null}\n\xff\n'+json.dumps({'type':'user','cwd':'/tmp','message':{'content':'Legacy title'}}).encode()+b'\n{"partial":')
+            store=bridge.Transcripts(root)
+            self.assertEqual({row['id'] for row in store.sessions()},{valid,legacy})
+            self.assertEqual(store.history(legacy)[0]['text'],'Legacy title')

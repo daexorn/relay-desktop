@@ -449,8 +449,8 @@ impl CommonMarkViewerInternal {
     fn table<'e>(
         &mut self,
         events: &mut Peekable<impl Iterator<Item = EventIteratorItem<'e>>>,
-        cache: &mut CommonMarkCache,
-        options: &CommonMarkOptions,
+        _cache: &mut CommonMarkCache,
+        _options: &CommonMarkOptions,
         ui: &mut Ui,
         max_width: f32,
     ) {
@@ -460,44 +460,72 @@ impl CommonMarkViewerInternal {
             let id = ui.id().with("_table").with(self.curr_table);
             self.curr_table += 1;
 
-            egui::Frame::group(ui.style()).show(ui, |ui| {
-                let Table { header, rows } = parse_table(events);
-
-                egui::Grid::new(id).striped(true).show(ui, |ui| {
-                    for col in header {
-                        ui.horizontal(|ui| {
-                            for (e, src_span) in col {
-                                let tmp_start =
-                                    std::mem::replace(&mut self.line.should_start_newline, false);
-                                let tmp_end =
-                                    std::mem::replace(&mut self.line.should_end_newline, false);
-                                self.event(ui, e, src_span, cache, options, max_width);
-                                self.line.should_start_newline = tmp_start;
-                                self.line.should_end_newline = tmp_end;
-                            }
-                        });
-                    }
-
-                    ui.end_row();
-
-                    for row in rows {
-                        for col in row {
-                            ui.horizontal(|ui| {
-                                for (e, src_span) in col {
-                                    let tmp_start = std::mem::replace(
-                                        &mut self.line.should_start_newline,
-                                        false,
-                                    );
-                                    let tmp_end =
-                                        std::mem::replace(&mut self.line.should_end_newline, false);
-                                    self.event(ui, e, src_span, cache, options, max_width);
-                                    self.line.should_start_newline = tmp_start;
-                                    self.line.should_end_newline = tmp_end;
+            let Table { header, rows } = parse_table(events);
+            let columns = header.len().max(rows.iter().map(Vec::len).max().unwrap_or(0)).max(1);
+            let available = ui.available_width().min(max_width).max(120.);
+            let mut weights = vec![5.0f32; columns];
+            for row in std::iter::once(&header).chain(rows.iter()) {
+                for (index, col) in row.iter().enumerate() {
+                    let length: usize = col.iter().map(|(event,_)| match event {
+                        pulldown_cmark::Event::Text(t) | pulldown_cmark::Event::Code(t) => t.chars().count(),
+                        _ => 0,
+                    }).sum();
+                    weights[index] = weights[index].max((length as f32).min(36.));
+                }
+            }
+            let total: f32 = weights.iter().sum();
+            let minimums:Vec<f32>=weights.iter().map(|weight|if *weight<=6.{32.}else if *weight<=12.{72.}else{128.}).collect();
+            let extra=(available-12.*columns as f32-minimums.iter().sum::<f32>()).max(0.);
+            let widths:Vec<f32>=minimums.iter().zip(&weights).map(|(minimum,weight)|minimum+extra*weight/total).collect();
+            let table_width=widths.iter().sum::<f32>()+12.*columns as f32;
+            egui::ScrollArea::horizontal().id_salt(id.with("scroll")).auto_shrink([false,true]).max_width(available)
+                .scroll_bar_visibility(if table_width>available+0.5{egui::scroll_area::ScrollBarVisibility::AlwaysVisible}else{egui::scroll_area::ScrollBarVisibility::AlwaysHidden}).show(ui, |ui| {
+                ui.vertical(|ui| {
+                    ui.set_min_width(table_width);
+                    ui.spacing_mut().item_spacing.y=0.;
+                    for (row_index,row) in std::iter::once(header).chain(rows).enumerate() {
+                        let mut cells=Vec::new();
+                        let mut height=ui.text_style_height(&egui::TextStyle::Body);
+                        for index in 0..columns {
+                            let mut job=egui::text::LayoutJob::default();
+                            let mut strong=row_index==0;let mut italics=false;let mut strike=false;let mut links=Vec::new();
+                            if let Some(col)=row.get(index) {for (event,_) in col {
+                                let mut code=false;
+                                let text=match event {
+                                    pulldown_cmark::Event::Text(t)=>Some(t.as_ref()),
+                                    pulldown_cmark::Event::Code(t)=>{code=true;Some(t.as_ref())},
+                                    pulldown_cmark::Event::SoftBreak=>Some(" "),
+                                    pulldown_cmark::Event::HardBreak=>Some("\n"),
+                                    pulldown_cmark::Event::Start(pulldown_cmark::Tag::Strong)=>{strong=true;None},
+                                    pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Strong)=>{strong=row_index==0;None},
+                                    pulldown_cmark::Event::Start(pulldown_cmark::Tag::Emphasis)=>{italics=true;None},
+                                    pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Emphasis)=>{italics=false;None},
+                                    pulldown_cmark::Event::Start(pulldown_cmark::Tag::Strikethrough)=>{strike=true;None},
+                                    pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Strikethrough)=>{strike=false;None},
+                                    pulldown_cmark::Event::Start(pulldown_cmark::Tag::Link{dest_url,..})=>{links.push(dest_url.to_string());None},
+                                    _=>None,
+                                };
+                                if let Some(text)=text {
+                                    let mut rich=egui::RichText::new(text);
+                                    if strong {rich=rich.strong();} if italics{rich=rich.italics();} if strike{rich=rich.strikethrough();} if code{rich=rich.code();}
+                                    rich.append_to(&mut job,ui.style(),egui::FontSelection::Default,egui::Align::Min);
                                 }
-                            });
+                            }}
+                            job.wrap.max_width=widths[index];
+                            let galley=ui.painter().layout_job(job.clone());height=height.max(galley.size().y);
+                            cells.push((job,links));
                         }
-
-                        ui.end_row();
+                        let (rect,_)=ui.allocate_exact_size(egui::vec2(table_width,height+16.),egui::Sense::hover());
+                        if row_index==0 || row_index%2==1 {ui.painter().rect_filled(rect,0.,ui.visuals().faint_bg_color);}
+                        ui.painter().hline(rect.x_range(),rect.bottom(),ui.visuals().widgets.noninteractive.bg_stroke);
+                        let mut x=rect.left()+6.;
+                        for (index,(job,links)) in cells.into_iter().enumerate(){
+                            let cell=egui::Rect::from_min_size(egui::pos2(x,rect.top()+8.),egui::vec2(widths[index],height));
+                            let mut child=ui.new_child(egui::UiBuilder::new().max_rect(cell).layout(egui::Layout::top_down(egui::Align::Min)));
+                            child.set_width(widths[index]);
+                            child.add(egui::Label::new(job).wrap().halign(egui::Align::Min).selectable(true)).on_hover_ui(|ui|{for url in links{ui.hyperlink(&url);}});
+                            x+=widths[index]+12.;
+                        }
                     }
                 });
             });

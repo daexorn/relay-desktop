@@ -3572,7 +3572,7 @@ dependencies = [
 
 [[package]]
 name = "relay-desktop"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -3587,6 +3587,7 @@ dependencies = [
  "russh",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
  "uuid",
  "zeroize",

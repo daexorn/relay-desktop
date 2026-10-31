@@ -25,6 +25,10 @@ struct Remote {
     home: String,
     usage: Usage,
     usage_requested: Option<Instant>,
+    sessions_requested: Option<Instant>,
+    sessions_loaded: bool,
+    sessions_retries: u8,
+    sessions_error: String,
 }
 struct Chat {
     sid: String,
@@ -108,6 +112,7 @@ pub struct RelayApp {
     capture_at: f64,
     capture_requested: bool,
     close_confirm: bool,
+    desktop_requests: Vec<(String, Value)>,
 }
 fn key(server: &str, sid: &str) -> String {
     format!("{server}/{sid}")
@@ -200,6 +205,7 @@ impl RelayApp {
             capture_at: 0.0,
             capture_requested: false,
             close_confirm: false,
+            desktop_requests: vec![],
         };
         if demo {
             app.seed_demo();
@@ -218,6 +224,15 @@ impl RelayApp {
             }
             if args.iter().any(|a| a == "--demo-empty") {
                 app.new_chat();
+            }
+            if args.iter().any(|a| a == "--demo-desktop") {
+                app.settings.servers[0].local_workspace = Some("/home/player/Minecraft".into());
+                app.desktop_requests.push(("demo".into(),json!({"id":"demo-action","tool":"run_local_command","input":{"command":"ls -lh mods/ && tail -n 20 logs/latest.log","timeout_seconds":30}})));
+            }
+            if args.iter().any(|a| a == "--demo-tables") {
+                if let Some(k) = app.current_key() {
+                    app.chats.get_mut(&k).unwrap().messages=vec![Message{role:"assistant".into(),text:"Шесть рисков, все взяты из проекта:\n\n| № | Риск | Ранг | Стратегия |\n|---|---|---|---|\n| 1 | Распознавание не справляется с нарезками из коротких видео | 3×3 = 9 | Снижение влияния: добавить обработку аудио |\n| 2 | Потеря файлов при передаче готовой сборки | 2×3 = 6 | Проверять размер и контрольную сумму |\n| 3 | Автоматические проверки занимают много времени | 3×2 = 6 | Разделить запуск и проверку результата |\n\nТекст после таблицы остаётся читаемым.".into(),..Default::default()}];
+                }
             }
             if args.iter().any(|a| a == "--demo-lists") {
                 if let Some(k) = app.current_key() {
@@ -302,14 +317,14 @@ impl RelayApp {
         v.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, p.line);
         ctx.set_visuals(v);
         let mut style = (*ctx.style()).clone();
-        style.spacing.item_spacing = Vec2::new(8.0, 8.0);
+        style.spacing.item_spacing = Vec2::new(6.0, 5.0);
         style.spacing.button_padding = Vec2::new(12.0, 9.0);
-        style.spacing.interact_size.y = 38.;
+        style.spacing.interact_size.y = 30.;
         style.spacing.window_margin = egui::Margin::same(24);
         style.animation_time = 0.28;
         style
             .text_styles
-            .insert(egui::TextStyle::Body, FontId::proportional(15.0));
+            .insert(egui::TextStyle::Body, FontId::proportional(14.0));
         style
             .text_styles
             .insert(egui::TextStyle::Button, FontId::proportional(14.0));
@@ -514,6 +529,18 @@ impl RelayApp {
                         answer,
                     })
                 }
+                Event::Workspace { server, path } => {
+                    if let Some(path) = path {
+                        if let Some(profile) =
+                            self.settings.servers.iter_mut().find(|s| s.id == server)
+                        {
+                            profile.local_workspace = Some(path.clone());
+                        }
+                        self.controller
+                            .send(&server, json!({"op":"_desktop_workspace","path":path}));
+                        self.save();
+                    }
+                }
                 Event::Password { server, password } => {
                     if let Some(password) = password {
                         self.establish(server, password);
@@ -533,6 +560,7 @@ impl RelayApp {
                 }
                 Event::Disconnected { server } => {
                     let r = self.remote.entry(server.clone()).or_default();
+                    self.desktop_requests.retain(|(s, _)| s != &server);
                     r.connected = false;
                     r.connecting = false;
                     for (k, c) in &mut self.chats {
@@ -541,6 +569,7 @@ impl RelayApp {
                                 c.error="Подключение прервалось. Подключись снова, чтобы продолжить эту сессию.".into();
                             }
                             c.busy = false;
+                            c.loading = false;
                             c.permissions.clear();
                         }
                     }
@@ -574,7 +603,30 @@ impl RelayApp {
     }
     fn data(&mut self, server: String, value: Value) {
         let kind = value["type"].as_str().unwrap_or("");
+        if kind == "error" && value["op"] == "sessions" {
+            let remote = self.remote.entry(server).or_default();
+            remote.sessions_error = "Не удалось загрузить сессии. Повторяем…".into();
+            remote.sessions_requested = Some(Instant::now());
+            return;
+        }
         match kind {
+            "desktop_request" => {
+                if self.desktop_requests.len() < 8
+                    && !self
+                        .desktop_requests
+                        .iter()
+                        .any(|(s, v)| s == &server && v["id"] == value["id"])
+                {
+                    self.desktop_requests.push((server, value));
+                }
+            }
+            "desktop_cancel" => {
+                self.desktop_requests
+                    .retain(|(s, v)| s != &server || v["id"] != value["id"]);
+            }
+            "desktop_status" => {
+                self.notice = value["message"].as_str().unwrap_or("").into();
+            }
             "hello" => {
                 let r = self.remote.entry(server.clone()).or_default();
                 r.connected = true;
@@ -582,6 +634,9 @@ impl RelayApp {
                 r.version = value["version"].as_str().unwrap_or("Claude Code").into();
                 r.home = value["home"].as_str().unwrap_or("~").into();
                 r.usage_requested = Some(Instant::now());
+                r.sessions_requested = Some(Instant::now());
+                r.sessions_loaded = false;
+                r.sessions_retries = 0;
                 if let Some(s) = self.settings.servers.iter_mut().find(|s| s.id == server) {
                     if s.cwd == "~" {
                         s.cwd = r.home.clone();
@@ -589,6 +644,14 @@ impl RelayApp {
                 }
                 self.controller.send(&server, json!({"op":"sessions"}));
                 self.controller.send(&server, json!({"op":"usage"}));
+                let workspace = self
+                    .settings
+                    .servers
+                    .iter()
+                    .find(|s| s.id == server)
+                    .and_then(|s| s.local_workspace.clone());
+                self.controller
+                    .send(&server, json!({"op":"_desktop_workspace","path":workspace}));
                 if let Some(sid) = self.selected_chat.get(&server) {
                     if let Some(c) = self.chats.get_mut(&key(&server, sid)) {
                         if !c.loaded && !c.loading {
@@ -606,9 +669,19 @@ impl RelayApp {
                 }
             }
             "sessions" => {
-                let sessions: Vec<Session> =
-                    serde_json::from_value(value["sessions"].clone()).unwrap_or_default();
-                self.remote.entry(server.clone()).or_default().sessions = sessions.clone();
+                let Some(rows) = value["sessions"].as_array() else {
+                    return;
+                };
+                let sessions: Vec<Session> = rows
+                    .iter()
+                    .filter_map(|row| serde_json::from_value::<Session>(row.clone()).ok())
+                    .filter(|s| !s.id.is_empty())
+                    .collect();
+                let remote = self.remote.entry(server.clone()).or_default();
+                remote.sessions = sessions.clone();
+                remote.sessions_loaded = true;
+                remote.sessions_requested = None;
+                remote.sessions_error.clear();
                 for s in &sessions {
                     if let Some(c) = self.chats.get_mut(&key(&server, &s.id)) {
                         c.title = s.title.clone();
@@ -645,8 +718,14 @@ impl RelayApp {
                 let sid = value["sid"].as_str().unwrap_or("");
                 if let Some(c) = self.chats.get_mut(&key(&server, sid)) {
                     if !c.busy {
-                        c.messages =
-                            serde_json::from_value(value["messages"].clone()).unwrap_or_default();
+                        c.messages = value["messages"]
+                            .as_array()
+                            .map(|rows| {
+                                rows.iter()
+                                    .filter_map(|r| serde_json::from_value(r.clone()).ok())
+                                    .collect()
+                            })
+                            .unwrap_or_default();
                         c.loading = false;
                         c.loaded = true;
                     }
@@ -656,7 +735,12 @@ impl RelayApp {
                 let sid = value["sid"].as_str().unwrap_or("");
                 if let Some(c) = self.chats.get_mut(&key(&server, sid)) {
                     match kind {
-                        "claude" => reduce(c, &value["data"]),
+                        "claude" => {
+                            reduce(c, &value["data"]);
+                            if value["data"]["type"] == "result" {
+                                self.controller.send(&server, json!({"op":"sessions"}));
+                            }
+                        }
                         "permission" => c.permissions.push(Permission {
                             id: value["id"].as_str().unwrap_or("").into(),
                             tool: value["tool"].as_str().unwrap_or("Действие").into(),
@@ -732,7 +816,11 @@ impl RelayApp {
             .filter(|a| a.source["type"] == "file")
             .map(|a| a.source.clone())
             .collect();
-        let request = json!({"op":"prompt","sid":c.sid,"cwd":c.cwd,"text":text,"images":images,"files":files,"model":c.model,"mode":c.mode,"effort":c.effort});
+        self.controller.send(
+            &server.id,
+            json!({"op":"_desktop_workspace","path":server.local_workspace}),
+        );
+        let request = json!({"op":"prompt","sid":c.sid,"cwd":c.cwd,"text":text,"images":images,"files":files,"model":c.model,"mode":c.mode,"effort":c.effort,"desktop_enabled":server.local_workspace.is_some(),"desktop_context":{"os":std::env::consts::OS,"workspace":server.local_workspace}});
         if self.demo {
             c.error = "Это предпросмотр интерфейса. Добавь свой сервер для работы.".into();
             return;
@@ -893,9 +981,9 @@ impl RelayApp {
     fn sidebar(&mut self, ctx: &egui::Context) {
         let p = design::animated_palette(ctx, self.settings.light);
         egui::SidePanel::left("sessions")
-            .default_width(286.)
-            .width_range(244.0..=340.0)
-            .frame(egui::Frame::new().fill(p.side).inner_margin(20.))
+            .default_width(258.)
+            .width_range(224.0..=320.0)
+            .frame(egui::Frame::new().fill(p.side).inner_margin(16.))
             .show(ctx, |ui| {
                 ui.add_space(8.);
                 ui.horizontal(|ui| {
@@ -923,7 +1011,7 @@ impl RelayApp {
                         }
                     });
                 });
-                ui.add_space(23.);
+                ui.add_space(14.);
                 if design::button(
                     ui,
                     "Новая сессия",
@@ -954,7 +1042,7 @@ impl RelayApp {
                             );
                         });
                     });
-                ui.add_space(22.);
+                ui.add_space(14.);
                 let Some(server) = self.server() else {
                     label(ui, "Подключи свой первый сервер", 13., p.muted);
                     return;
@@ -995,6 +1083,12 @@ impl RelayApp {
                         .on_hover_text("Обновить список")
                         .clicked()
                         {
+                            if let Some(remote) = self.remote.get_mut(&server.id) {
+                                remote.sessions_requested = Some(Instant::now());
+                                remote.sessions_loaded = false;
+                                remote.sessions_retries = 0;
+                                remote.sessions_error.clear();
+                            }
                             self.controller.send(&server.id, json!({"op":"sessions"}));
                         }
                     });
@@ -1147,6 +1241,27 @@ impl RelayApp {
                             ui.add_space(4.);
                         }
                         if count == 0 {
+                            if let Some(remote) = self.remote.get(&server.id) {
+                                if !remote.sessions_loaded && connected {
+                                    label(
+                                        ui,
+                                        if remote.sessions_error.is_empty() {
+                                            "Загружаем сессии…"
+                                        } else {
+                                            &remote.sessions_error
+                                        },
+                                        12.,
+                                        p.muted,
+                                    );
+                                }
+                                if !remote.sessions.is_empty()
+                                    && !self.all_folders
+                                    && query.is_empty()
+                                    && ui.button("Показать сессии из всех папок").clicked()
+                                {
+                                    self.all_folders = true;
+                                }
+                            }
                             ui.add_space(15.);
                             label(
                                 ui,
@@ -1173,7 +1288,7 @@ impl RelayApp {
                     .frame(
                         egui::Frame::new()
                             .fill(p.base)
-                            .inner_margin(egui::Margin::symmetric(30, 20)),
+                            .inner_margin(egui::Margin::symmetric(24, 12)),
                     )
                     .show_inside(ui, |ui| {
                         ui.horizontal(|ui| {
@@ -1264,7 +1379,7 @@ impl RelayApp {
                     .frame(
                         egui::Frame::new()
                             .fill(p.base)
-                            .inner_margin(egui::Margin::symmetric(24, 18)),
+                            .inner_margin(egui::Margin::symmetric(20, 10)),
                     )
                     .show_inside(ui, |ui| {
                         design::content(ui, 860., |ui| {
@@ -1484,6 +1599,20 @@ impl RelayApp {
         let connected = self.connected(&server.id);
         let mut send = false;
         let mut attach = false;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().interact_size.y=22.;
+            let active=server.local_workspace.is_some();
+            let text=server.local_workspace.as_ref().map(|p|format!("Этот ПК · {}",std::path::Path::new(p).file_name().unwrap_or_default().to_string_lossy())).unwrap_or_else(||"Подключить этот ПК".into());
+            if ui.small_button(text).on_hover_text("Выбрать папку на компьютере. Claude сможет запрашивать скачивание файлов и локальные команды; каждое действие подтверждается отдельно.").clicked(){
+                let bus=self.controller.bus.clone();let id=server.id.clone();
+                self.controller.runtime.spawn(async move{let folder=rfd::AsyncFileDialog::new().set_title("Рабочая папка на этом компьютере").pick_folder().await;bus.send(Event::Workspace{server:id,path:folder.map(|f|f.path().to_string_lossy().into_owned())});});
+            }
+            if active && ui.small_button("Отключить").clicked(){
+                if let Some(profile)=self.settings.servers.iter_mut().find(|s|s.id==server.id){profile.local_workspace=None;}
+                self.controller.send(&server.id,json!({"op":"_desktop_workspace","path":null}));self.save();
+            }
+        });
+        ui.add_space(4.);
         let chat = self.chats.get_mut(k).unwrap();
         let previous = (chat.model.clone(), chat.mode.clone(), chat.effort.clone());
         if !chat.error.is_empty() {
@@ -1520,8 +1649,8 @@ impl RelayApp {
                 1.0_f32,
                 design::mix(p.line, ACCENT, focus * 0.65),
             ))
-            .corner_radius(22.)
-            .inner_margin(18.)
+            .corner_radius(16.)
+            .inner_margin(12.)
             .shadow(egui::epaint::Shadow {
                 offset: [0, 5],
                 blur: 24,
@@ -1543,30 +1672,37 @@ impl RelayApp {
                     }
                     ui.add_space(10.);
                 }
-                let response = ui.add_sized(
-                    [ui.available_width(), 66.],
-                    egui::TextEdit::multiline(&mut chat.draft)
-                        .id(egui::Id::new("prompt-field"))
-                        .frame(false)
-                        .hint_text("Напиши задачу…")
-                        .font(FontId::proportional(16.))
-                        .desired_rows(3),
-                );
+                let response = egui::ScrollArea::vertical()
+                    .id_salt("draft-scroll")
+                    .max_height(132.)
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::TextEdit::multiline(&mut chat.draft)
+                                .id(egui::Id::new("prompt-field"))
+                                .frame(false)
+                                .hint_text("Напиши задачу…")
+                                .font(FontId::proportional(14.))
+                                .desired_width(ui.available_width())
+                                .desired_rows(1),
+                        )
+                    })
+                    .inner;
                 if response.has_focus()
                     && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift)
                 {
                     send = true;
                 }
-                let compact = ui.available_width() < 800.;
+                let compact =
+                    ui.available_width() < if chat.mode == "manual" { 610. } else { 580. };
                 ui.add_space(6.);
                 ui.horizontal(|ui| {
                     if design::button(
                         ui,
-                        "Прикрепить файлы",
+                        "Файлы",
                         Some(Icon::Attach),
                         Kind::Ghost,
                         p,
-                        Vec2::new(183., 40.),
+                        Vec2::new(100., 32.),
                     )
                     .on_hover_text("Выбор файлов, перетаскивание или Ctrl+V")
                     .clicked()
@@ -1584,7 +1720,7 @@ impl RelayApp {
                                 Some(Icon::Stop),
                                 Kind::Secondary,
                                 p,
-                                Vec2::splat(40.),
+                                Vec2::splat(32.),
                             )
                             .on_hover_text("Остановить ответ")
                             .clicked()
@@ -1603,7 +1739,7 @@ impl RelayApp {
                                     Some(if connected { Icon::Send } else { Icon::Arrow }),
                                     Kind::Primary,
                                     p,
-                                    Vec2::splat(40.),
+                                    Vec2::splat(32.),
                                 )
                                 .on_hover_text(if connected {
                                     "Отправить · Enter"
@@ -1779,6 +1915,91 @@ impl RelayApp {
     }
     fn dialogs(&mut self, ctx: &egui::Context) {
         let p = design::animated_palette(ctx, self.settings.light);
+        if let Some((server, request)) = self.desktop_requests.first().cloned() {
+            let mut decision = None;
+            let profile = self.settings.servers.iter().find(|s| s.id == server);
+            let name = profile.map(|s| s.name.as_str()).unwrap_or("Сервер");
+            let workspace = profile
+                .and_then(|s| s.local_workspace.as_deref())
+                .unwrap_or("Не подключено");
+            let command = request["tool"] == "run_local_command";
+            let modal = egui::Modal::new(egui::Id::new("desktop-approval")).show(ctx, |ui| {
+                ui.set_width(480.);
+                label(
+                    ui,
+                    if command {
+                        "Команда на этом компьютере"
+                    } else {
+                        "Файл с сервера"
+                    },
+                    20.,
+                    p.text,
+                );
+                label(ui, format!("Запрос из {name}"), 12., p.muted);
+                ui.add_space(8.);
+                egui::ScrollArea::vertical()
+                    .max_height(220.)
+                    .show(ui, |ui| {
+                        let text = if command {
+                            request["input"]["command"].as_str().unwrap_or("")
+                        } else {
+                            request["input"]["server_path"].as_str().unwrap_or("")
+                        };
+                        ui.add(egui::Label::new(RichText::new(text).monospace().size(13.)).wrap());
+                    });
+                label(
+                    ui,
+                    if command {
+                        format!(
+                            "Папка: {workspace} · {} · до {} с",
+                            std::env::consts::OS,
+                            request["input"]["timeout_seconds"]
+                                .as_u64()
+                                .unwrap_or(60)
+                                .clamp(1, 120)
+                        )
+                    } else {
+                        format!(
+                            "{} · место сохранения выберешь сам",
+                            format!(
+                                "{:.1} МБ",
+                                request["input"]["size"].as_u64().unwrap_or(0) as f64 / 1048576.
+                            )
+                        )
+                    },
+                    12.,
+                    p.muted,
+                );
+                ui.add_space(12.);
+                ui.horizontal(|ui| {
+                    if ui.button("Отклонить").clicked() {
+                        decision = Some(false);
+                    }
+                    if ui
+                        .button(if command {
+                            "Выполнить"
+                        } else {
+                            "Сохранить…"
+                        })
+                        .clicked()
+                    {
+                        decision = Some(true);
+                    }
+                });
+            });
+            if modal.should_close() {
+                decision = Some(false);
+            }
+            if let Some(allow) = decision {
+                self.desktop_requests.remove(0);
+                if allow {
+                    self.controller.approve_desktop(&server, &request);
+                } else {
+                    self.controller
+                        .send(&server, json!({"op":"_desktop_deny","id":request["id"]}));
+                }
+            }
+        }
         let visible =
             self.editor.is_some() || self.trust.is_some() || self.folder_open || self.close_confirm;
         let modal_t = ctx.animate_bool_with_time_and_easing(
@@ -2296,6 +2517,10 @@ impl RelayApp {
                     "updated_at":chrono::Local::now().timestamp()
                 })).unwrap_or_default(),
                 usage_requested: None,
+                sessions_requested: None,
+                sessions_loaded: true,
+                sessions_retries: 0,
+                sessions_error: String::new(),
                 sessions: vec![
                     Session {
                         id: "demo-chat".into(),
@@ -2331,8 +2556,8 @@ impl RelayApp {
 }
 fn composer_selectors(ui: &mut egui::Ui, chat: &mut Chat, p: Palette) {
     ui.scope(|ui| {
-        ui.spacing_mut().button_padding = Vec2::new(12., 10.);
-        ui.spacing_mut().interact_size.y = 40.;
+        ui.spacing_mut().button_padding = Vec2::new(8., 6.);
+        ui.spacing_mut().interact_size.y = 30.;
         egui::ComboBox::from_id_salt("model-selector")
             .selected_text(
                 RichText::new(match chat.model.as_str() {
@@ -2343,7 +2568,7 @@ fn composer_selectors(ui: &mut egui::Ui, chat: &mut Chat, p: Palette) {
                 .size(13.)
                 .color(p.muted),
             )
-            .width(132.)
+            .width(116.)
             .show_ui(ui, |ui| {
                 for (id, name) in [
                     ("default", "Модель сервера"),
@@ -2364,7 +2589,7 @@ fn composer_selectors(ui: &mut egui::Ui, chat: &mut Chat, p: Palette) {
                 .size(13.)
                 .color(if chat.mode == "auto" { ACCENT } else { p.muted }),
             )
-            .width(if chat.mode == "manual" { 175. } else { 130. })
+            .width(if chat.mode == "manual" { 154. } else { 102. })
             .show_ui(ui, |ui| {
                 for (id, name) in [
                     ("auto", "Авто"),
@@ -2633,6 +2858,29 @@ impl eframe::App for RelayApp {
             }
         }
         self.frames += 1;
+        if !self.demo {
+            for (server, remote) in &mut self.remote {
+                if remote.connected
+                    && !remote.sessions_loaded
+                    && remote.sessions_retries < 3
+                    && remote
+                        .sessions_requested
+                        .is_some_and(|at| at.elapsed() >= Duration::from_secs(12))
+                {
+                    remote.sessions_requested = Some(Instant::now());
+                    remote.sessions_retries += 1;
+                    remote.sessions_error = "Загрузка занимает больше времени. Повторяем…".into();
+                    self.controller.send(server, json!({"op":"sessions"}));
+                }
+            }
+            if self
+                .remote
+                .values()
+                .any(|r| r.connected && !r.sessions_loaded)
+            {
+                ctx.request_repaint_after(Duration::from_secs(1));
+            }
+        }
         if ctx.input(|i| i.viewport().close_requested()) && self.chats.values().any(|c| c.busy) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.close_confirm = true;

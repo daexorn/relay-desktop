@@ -45,6 +45,10 @@ pub enum Event {
         images: Vec<crate::images::Attachment>,
         errors: Vec<String>,
     },
+    Workspace {
+        server: String,
+        path: Option<String>,
+    },
     Password {
         server: Server,
         password: Option<String>,
@@ -121,8 +125,42 @@ impl Controller {
             .get(server)
             .is_some_and(|c| c.send(value).is_ok())
     }
+    pub fn approve_desktop(&self, server: &str, request: &Value) {
+        let Some(sender) = self.channels.get(server).cloned() else {
+            return;
+        };
+        let id = request["id"].as_str().unwrap_or("").to_owned();
+        if request["tool"] == "download_file" {
+            let name = crate::desktop::file_name(
+                request["input"]["name"].as_str().unwrap_or("download.bin"),
+            );
+            let workspace = request["local_workspace"]
+                .as_str()
+                .map(std::path::PathBuf::from);
+            self.runtime.spawn(async move {
+                let mut dialog = rfd::AsyncFileDialog::new();
+                if let Some(workspace) = workspace {
+                    dialog = dialog.set_directory(workspace);
+                }
+                let target = dialog
+                    .set_title("Сохранить файл с сервера")
+                    .set_file_name(name)
+                    .save_file()
+                    .await;
+                let value = match target {
+                    Some(target) => json!({"op":"_desktop_approve","id":id,"target":target.path()}),
+                    None => json!({"op":"_desktop_deny","id":id}),
+                };
+                let _ = sender.send(value);
+            });
+        } else {
+            let _ = sender.send(json!({"op":"_desktop_approve","id":id}));
+        }
+    }
     pub fn disconnect(&mut self, server: &str) {
-        self.channels.remove(server);
+        if let Some(sender) = self.channels.remove(server) {
+            let _ = sender.send(json!({"op":"_disconnect"}));
+        }
         *self.generations.entry(server.into()).or_default() += 1;
     }
     pub fn is_current(&self, server: &str, generation: u64) -> bool {
@@ -208,10 +246,16 @@ async fn run(
             true,
             format!(
                 "python3 -u -c {}",
-                shell_quote(include_str!("../bridge/relay_bridge.py"))
+                shell_quote(&format!(
+                    "DESKTOP_SOURCE = {}\n{}",
+                    serde_json::to_string(include_str!("../bridge/desktop_mcp.py"))?,
+                    include_str!("../bridge/relay_bridge.py")
+                ))
             ),
         )
         .await?;
+    let (local_tx, mut local_rx) = async_mpsc::unbounded_channel::<Value>();
+    let mut desktop = crate::desktop::Desktop::new(local_tx, bus.clone(), server.id.clone());
     let mut buffer = Vec::new();
     let mut stderr = String::new();
     let mut greeted = false;
@@ -219,9 +263,10 @@ async fn run(
     tokio::pin!(deadline);
     loop {
         tokio::select! {
+            Some(value)=local_rx.recv()=>{let mut encoded=serde_json::to_vec(&value)?;encoded.push(b'\n');channel.data(&encoded[..]).await?;},
             _=&mut deadline, if !greeted => anyhow::bail!("Не удалось запустить помощник. На сервере нужны Python 3 и Claude Code."),
             request=requests.recv()=>match request {
-                Some(value)=>{let mut encoded=serde_json::to_vec(&value)?;encoded.push(b'\n');channel.data(&encoded[..]).await?;},
+                Some(value)=>{if value["op"]=="_disconnect"{let _=channel.eof().await;break;}if desktop.local(&value){continue;}let mut encoded=serde_json::to_vec(&value)?;encoded.push(b'\n');channel.data(&encoded[..]).await?;},
                 None=>{let _=channel.eof().await;break;}
             },
             incoming=channel.wait()=>match incoming {
@@ -232,7 +277,7 @@ async fn run(
                         let line:Vec<_>=buffer.drain(..=end).collect();
                         let value:Value=serde_json::from_slice(&line).context("Сервер вернул некорректный ответ.")?;
                         if value["type"]=="hello" {greeted=true;}
-                        bus.send(Event::Data{server:server.id.clone(),value});
+                        if !desktop.incoming(&value){bus.send(Event::Data{server:server.id.clone(),value});}
                     }
                 },
                 Some(ChannelMsg::ExtendedData{data,..})=>{if stderr.len()<4000 {stderr.push_str(&String::from_utf8_lossy(&data));}},
@@ -259,12 +304,22 @@ pub fn probe() -> Result<()> {
     );
     let ctx = egui::Context::default();
     let (mut controller, rx) = Controller::new(ctx);
-    controller.connect(
-        profile.clone(),
-        value["password"].as_str().unwrap_or_default().to_owned(),
-    );
+    let password = value["password"]
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| {
+            if value["use_keyring"] == true {
+                crate::storage::password(&profile.id)
+            } else {
+                None
+            }
+        })
+        .context("Probe credentials unavailable")?;
+    controller.connect(profile.clone(), password);
     line.clear();
     let exercise = value["exercise"].as_bool().unwrap_or(false);
+    let desktop_probe = value["desktop_probe"].as_bool().unwrap_or(false);
+    let mut desktop_exercised = false;
     let sid = value["sid"]
         .as_str()
         .map(str::to_owned)
@@ -294,7 +349,25 @@ pub fn probe() -> Result<()> {
                     controller.disconnect(&profile.id);
                     return Ok(());
                 }
-                controller.send(&profile.id,json!({"op":"prompt","sid":sid,"cwd":"/tmp","mode":mode,"model":"default","text":prompt,"images":images,"files":files}));
+                if desktop_probe {
+                    controller.send(
+                        &profile.id,
+                        json!({"op":"_desktop_workspace","path":std::env::temp_dir()}),
+                    );
+                }
+                controller.send(&profile.id,json!({"op":"prompt","sid":sid,"cwd":"/tmp","mode":mode,"model":"default","text":prompt,"images":images,"files":files,"desktop_enabled":desktop_probe,"desktop_context":{"os":std::env::consts::OS,"workspace":std::env::temp_dir()}}));
+            }
+            Ok(Event::Data { value: frame, .. }) if frame["type"] == "desktop_request" => {
+                // Only this fixed harmless probe command can bypass the test UI.
+                if desktop_probe
+                    && frame["tool"] == "run_local_command"
+                    && frame["input"]["command"] == "printf RELAY_DESKTOP_PROBE"
+                {
+                    desktop_exercised = true;
+                    controller.approve_desktop(&profile.id, &frame);
+                } else {
+                    controller.send(&profile.id, json!({"op":"_desktop_deny","id":frame["id"]}));
+                }
             }
             Ok(Event::Data { value: frame, .. }) if frame["type"] == "claude" => {
                 let data = &frame["data"];
@@ -313,9 +386,13 @@ pub fn probe() -> Result<()> {
                         "Claude returned an error: {}",
                         data
                     );
+                    anyhow::ensure!(
+                        !desktop_probe || desktop_exercised,
+                        "Claude did not call the desktop probe tool"
+                    );
                     println!(
                         "{}",
-                        json!({"ok":true,"sessions":count,"sid":sid,"response":reply})
+                        json!({"ok":true,"sessions":count,"sid":sid,"response":reply,"desktop_exercised":desktop_exercised})
                     );
                     controller.disconnect(&profile.id);
                     return Ok(());

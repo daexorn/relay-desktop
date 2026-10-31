@@ -19,6 +19,7 @@ import time
 import uuid
 import datetime
 import math
+import stat
 import urllib.request
 import urllib.error
 
@@ -181,7 +182,7 @@ def plain(content):
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        return "\n".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
+        return "\n".join(b["text"] for b in content if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"),str))
     return ""
 
 
@@ -227,9 +228,12 @@ class Transcripts:
         # Only primary conversations. Subagent transcripts stay inside their parent.
         return [p for p in self.root.glob("*/*.jsonl") if re.fullmatch(r"[0-9a-fA-F-]{36}", p.stem)]
 
+    def find(self, session):
+        session=valid_id(session)
+        return next((p for p in self.files() if p.stem.lower()==session),None)
+
     def path(self, session):
-        session = valid_id(session)
-        found = next(self.root.glob("*/" + session + ".jsonl"), None)
+        found = self.find(session)
         if found is None:
             raise ValueError("Сессия не найдена. Обнови список разговоров.")
         return found
@@ -256,14 +260,15 @@ class Transcripts:
                 except (ValueError, UnicodeError):
                     pass
         cwd = next((r["cwd"] for r in reversed(rows) if isinstance(r.get("cwd"), str)), str(Path.home()))
+        cwd = str(Path(cwd).expanduser().resolve())
         title = next((r.get("customTitle") or r.get("custom_title") for r in reversed(rows) if r.get("type") == "custom-title"), None)
         if not title:
-            title = next((visible_text(plain(r.get("message", {}).get("content"))) for r in rows
-                          if r.get("type") == "user" and not r.get("isSidechain") and visible_text(plain(r.get("message", {}).get("content")))), "Новый разговор")
+            title = next((visible_text(plain((r.get("message") if isinstance(r.get("message"),dict) else {}).get("content"))) for r in rows
+                          if r.get("type") == "user" and not r.get("isSidechain") and visible_text(plain((r.get("message") if isinstance(r.get("message"),dict) else {}).get("content")))), "Новый разговор")
         title = visible_text(str(title)) if title else ""
         if not title or title == "Новый разговор":
-            title = next((visible_text(plain(r.get("message", {}).get("content"))) for r in records(path, limit=8*1024*1024)
-                          if r.get("type") == "user" and not r.get("isSidechain") and visible_text(plain(r.get("message", {}).get("content")))), "Разговор от " + time.strftime("%d.%m", time.localtime(stat.st_mtime)))
+            title = next((visible_text(plain((r.get("message") if isinstance(r.get("message"),dict) else {}).get("content"))) for r in records(path, limit=8*1024*1024)
+                          if r.get("type") == "user" and not r.get("isSidechain") and visible_text(plain((r.get("message") if isinstance(r.get("message"),dict) else {}).get("content")))), "Разговор от " + time.strftime("%d.%m", time.localtime(stat.st_mtime)))
         title = " ".join(str(title).split())[:100]
         result = {"id": path.stem, "title": title, "cwd": cwd, "modified": stat.st_mtime, "messages": 0}
         self.cache[str(path)] = (key, result)
@@ -274,7 +279,7 @@ class Transcripts:
         for path in self.files():
             try:
                 result.append(self.metadata(path))
-            except (OSError, ValueError):
+            except (OSError, ValueError, TypeError, AttributeError, UnicodeError):
                 continue
         result.sort(key=lambda r: r["modified"], reverse=True)
         return result[:2000]
@@ -299,9 +304,12 @@ class Transcripts:
                     chain.append(nodes[key])
                 key = parents[key]
             chain.reverse()
+        if not chain and nodes:
+            chain = list(nodes.values())
         result = []
         for row in chain:
-            message = row.get("message", {})
+            message = row.get("message") or {}
+            if not isinstance(message,dict):continue
             role = message.get("role", row.get("type"))
             content = message.get("content", "")
             text = visible_text(plain(content)) if role == "user" else plain(content)
@@ -357,6 +365,8 @@ class Run:
     def __init__(self, owner, sid, cwd, model, mode, resume, effort="default"):
         self.owner, self.sid, self.cwd = owner, sid, cwd
         self.model, self.mode, self.effort = model, mode, effort
+        self.desktop_enabled = False
+        self.desktop_context = getattr(owner,"desktop_context", "")
         self.busy = False
         self.closed = False
         self.ready = threading.Event()
@@ -367,7 +377,12 @@ class Run:
         env = dict(os.environ)
         env.pop("CLAUDECODE", None)  # The transport is not a nested terminal conversation.
         env["CLAUDE_CODE_ENTRYPOINT"] = "relay-desktop"
-        self.process = subprocess.Popen(command(owner.binary, sid, resume, model, mode, effort), cwd=cwd, env=env,
+        args = command(owner.binary, sid, resume, model, mode, effort)
+        if getattr(owner,"desktop_requested",False):
+            self.desktop_enabled=True
+            args += ["--mcp-config", owner.desktop.config(sid), "--append-system-prompt", "Relay desktop tools operate on the user's computer, not this server. Use relay_desktop.download_file for delivery to the computer, and relay_desktop.run_local_command for local commands. The user approves every local action in Relay. Never claim local execution or delivery before the tool succeeds. Local computer context: " + self.desktop_context]
+            env["MCP_TOOL_TIMEOUT"]="650000"
+        self.process = subprocess.Popen(args, cwd=cwd, env=env,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             encoding="utf-8", errors="replace", bufsize=1, start_new_session=True)
         threading.Thread(target=self.read, daemon=True).start()
@@ -454,6 +469,7 @@ class Run:
         self.write({"type": "control_response", "response": {"subtype": "success", "request_id": request_id, "response": response}})
 
     def stop(self):
+        if getattr(self.owner,"desktop",None):self.owner.desktop.cancel(self.sid)
         if not self.busy:
             return
         self.write({"type": "control_request", "request_id": "relay-stop-" + uuid.uuid4().hex,
@@ -466,6 +482,7 @@ class Run:
         threading.Thread(target=fallback, daemon=True).start()
 
     def close(self):
+        if getattr(self.owner,"desktop",None):self.owner.desktop.cancel(self.sid)
         self.closed = True
         if self.process.poll() is None:
             try:
@@ -485,6 +502,9 @@ class Bridge:
         self.runs = {}
         self.run_lock = threading.RLock()
         self.usage = UsageState()
+        self.desktop = None
+        self.desktop_requested = False
+        self.desktop_context = ""
 
     def hello(self):
         try:
@@ -492,7 +512,7 @@ class Bridge:
         except (OSError, subprocess.SubprocessError):
             version = "Claude Code"
         self.send({"type": "hello", "home": str(Path.home()), "hostname": os.uname().nodename,
-                   "version": version, "protocol": 1})
+                   "version": version, "protocol": 2})
 
     def dispatch(self, req):
         op = req.get("op")
@@ -500,6 +520,10 @@ class Bridge:
         try:
             if op == "sessions":
                 self.send({"type": "sessions", "sessions": self.transcripts.sessions()})
+            elif op == "desktop_result":
+                if self.desktop:self.desktop.result(req.get("id"),req.get("result",{}))
+            elif op == "desktop_download":
+                if self.desktop:self.desktop.download(req.get("id"))
             elif op == "usage":
                 self.send(self.usage.snapshot())
                 self.usage.refresh_async(self.send)
@@ -532,10 +556,20 @@ class Bridge:
                 mode, model = req.get("mode", "manual"), req.get("model", "default")
                 effort = validate_effort(req.get("effort", "default"))
                 with self.run_lock:
+                    desktop_enabled=bool(req.get("desktop_enabled",False))
+                    if desktop_enabled and self.desktop is None:
+                        namespace={"__name__":"relay_desktop_adapter"}
+                        source=globals().get("DESKTOP_SOURCE")
+                        if not source:raise ValueError("Обнови Relay для работы с этим ПК.")
+                        namespace["SOURCE"]=source
+                        exec(source,namespace)
+                        self.desktop=namespace["RelayDesktop"](self.send)
+                    self.desktop_requested=desktop_enabled
+                    self.desktop_context=json.dumps(req.get("desktop_context",{}),ensure_ascii=False)[:5000] if desktop_enabled else ""
                     run = self.runs.get(sid)
                     if run and run.busy:
                         raise ValueError("Дождись ответа Claude или останови его.")
-                    if run and (run.closed or run.process.poll() is not None or (run.cwd, run.model, run.mode, run.effort) != (cwd, model, mode, effort)):
+                    if run and (run.closed or run.process.poll() is not None or (run.cwd, run.model, run.mode, run.effort, getattr(run,"desktop_enabled",False), getattr(run,"desktop_context","")) != (cwd, model, mode, effort, desktop_enabled, self.desktop_context)):
                         run.close()
                         self.runs.pop(sid, None)
                         run = None
@@ -546,7 +580,7 @@ class Bridge:
                                 self.runs.pop(idle).close()
                             else:
                                 raise ValueError("Уже работают 24 разговора. Дождись завершения одного из них.")
-                        existing = next(self.transcripts.root.glob("*/" + sid + ".jsonl"), None)
+                        existing = self.transcripts.find(sid)
                         if existing and self.transcripts.metadata(existing)["cwd"] != cwd:
                             raise ValueError("Открой исходную рабочую папку этой сессии.")
                         run = Run(self, sid, cwd, model, mode, bool(existing), effort)
@@ -569,7 +603,7 @@ class Bridge:
                 self.send({"type": "pong"})
             else:
                 raise ValueError("Обнови приложение: сервер не знает это действие.")
-        except (ValueError, OSError, subprocess.SubprocessError) as error:
+        except (ValueError, OSError, subprocess.SubprocessError, TypeError, AttributeError, UnicodeError) as error:
             sid = req.get("sid", "")
             run = self.runs.get(sid)
             if op == "prompt" and run and claimed:
@@ -579,6 +613,7 @@ class Bridge:
     def close(self):
         for run in list(self.runs.values()):
             run.close()
+        if self.desktop:self.desktop.close()
 
 
 def validate_images(images):
