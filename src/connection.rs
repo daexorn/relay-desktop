@@ -121,6 +121,14 @@ impl Controller {
             .get(server)
             .is_some_and(|c| c.send(value).is_ok())
     }
+    pub fn download_artifact(&self, server: &str, path: &str, cwd: &str) -> Option<String> {
+        let id = uuid::Uuid::new_v4().to_string();
+        self.send(
+            server,
+            json!({"op":"_artifact_download","id":id,"path":path,"cwd":cwd}),
+        )
+        .then_some(id)
+    }
     pub fn approve_desktop(&self, server: &str, request: &Value) {
         let Some(sender) = self.channels.get(server).cloned() else {
             return;
@@ -259,7 +267,7 @@ async fn run(
     tokio::pin!(deadline);
     loop {
         tokio::select! {
-            Some(value)=local_rx.recv()=>{let mut encoded=serde_json::to_vec(&value)?;encoded.push(b'\n');channel.data(&encoded[..]).await?;},
+            Some(value)=local_rx.recv()=>{if desktop.local(&value){continue;}let mut encoded=serde_json::to_vec(&value)?;encoded.push(b'\n');channel.data(&encoded[..]).await?;},
             _=&mut deadline, if !greeted => anyhow::bail!("Не удалось запустить помощник. На сервере нужны Python 3 и Claude Code."),
             request=requests.recv()=>match request {
                 Some(value)=>{if value["op"]=="_disconnect"{let _=channel.eof().await;break;}if desktop.local(&value){continue;}let mut encoded=serde_json::to_vec(&value)?;encoded.push(b'\n');channel.data(&encoded[..]).await?;},
@@ -316,6 +324,10 @@ pub fn probe() -> Result<()> {
     let exercise = value["exercise"].as_bool().unwrap_or(false);
     let desktop_probe = value["desktop_probe"].as_bool().unwrap_or(false);
     let mut desktop_exercised = false;
+    let artifact_probe = value["artifact_probe"].as_str().map(str::to_owned);
+    let artifact_target =
+        std::env::temp_dir().join(format!("relay-file-probe-{}.jar", uuid::Uuid::new_v4()));
+    let artifact_id = uuid::Uuid::new_v4().to_string();
     let desktop_probe_auto = value["desktop_probe_auto"].as_bool().unwrap_or(false);
     let sid = value["sid"]
         .as_str()
@@ -341,6 +353,10 @@ pub fn probe() -> Result<()> {
             }
             Ok(Event::Data { value, .. }) if value["type"] == "sessions" => {
                 count = value["sessions"].as_array().map(Vec::len).unwrap_or(0);
+                if let Some(path) = artifact_probe.as_ref() {
+                    controller.send(&profile.id,json!({"op":"_artifact_download","id":artifact_id,"path":path,"cwd":"/tmp","target":artifact_target}));
+                    continue;
+                }
                 if !exercise {
                     println!("{}", json!({"ok":true,"sessions":count}));
                     controller.disconnect(&profile.id);
@@ -359,6 +375,30 @@ pub fn probe() -> Result<()> {
                     );
                 }
                 controller.send(&profile.id,json!({"op":"prompt","sid":sid,"cwd":"/tmp","mode":mode,"model":"default","text":prompt,"images":images,"files":files,"desktop_enabled":desktop_probe,"desktop_context":{"os":std::env::consts::OS,"workspace":std::env::temp_dir()}}));
+            }
+            Ok(Event::Data { value: frame, .. })
+                if frame["type"] == "artifact_status" && frame["id"] == artifact_id =>
+            {
+                anyhow::ensure!(
+                    frame["stage"] != "failed",
+                    "{}",
+                    frame["message"].as_str().unwrap_or("Download failed")
+                );
+                if frame["stage"] == "saved" {
+                    use sha2::Digest;
+                    let bytes = std::fs::read(&artifact_target)?;
+                    let hash = format!("{:x}", sha2::Sha256::digest(&bytes));
+                    if let Some(expected) = value["expected_sha256"].as_str() {
+                        anyhow::ensure!(expected == hash, "Downloaded file checksum differs");
+                    }
+                    std::fs::remove_file(&artifact_target)?;
+                    println!(
+                        "{}",
+                        json!({"ok":true,"bytes":bytes.len(),"sha256":hash,"pc_control_enabled":false})
+                    );
+                    controller.disconnect(&profile.id);
+                    return Ok(());
+                }
             }
             Ok(Event::Data { value: frame, .. }) if frame["type"] == "desktop_completed" => {
                 if desktop_probe

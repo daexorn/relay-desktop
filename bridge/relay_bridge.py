@@ -19,6 +19,7 @@ import time
 import uuid
 import datetime
 import math
+import hashlib
 import stat
 import urllib.request
 import urllib.error
@@ -378,10 +379,13 @@ class Run:
         env.pop("CLAUDECODE", None)  # The transport is not a nested terminal conversation.
         env["CLAUDE_CODE_ENTRYPOINT"] = "relay-desktop"
         args = command(owner.binary, sid, resume, model, mode, effort)
+        system_prompt="Relay supports downloadable server files in chat. When the user requests a built mod or other generated artifact, include a Markdown download link [filename](absolute_server_file_path) for the real existing file. Verify it exists before offering it. A bare filename or a statement that the build succeeded is not file delivery. Never claim the file was delivered to the PC unless the transfer tool actually succeeded."
         if getattr(owner,"desktop_requested",False):
             self.desktop_enabled=True
-            args += ["--mcp-config", owner.desktop.config(sid), "--append-system-prompt", "Relay desktop tools operate on the user's computer, not this server. Use relay_desktop.download_file for delivery to the computer, and relay_desktop.run_local_command for local commands. Relay applies the local permission mode: Auto runs commands and downloads without per-action confirmation; other modes ask the user. This is full access with the local user permissions; the working directory is not a sandbox. Invoke the tools directly rather than asking for approval in chat. Never claim local execution or delivery before the tool succeeds. Local computer context: " + self.desktop_context]
+            args += ["--mcp-config", owner.desktop.config(sid)]
+            system_prompt += " Relay desktop tools operate on the user's computer, not this server. Use relay_desktop.download_file for delivery to the computer, and relay_desktop.run_local_command for local commands. Relay applies the local permission mode: Auto runs commands and downloads without per-action confirmation; other modes ask the user. This is full access with the local user permissions; the working directory is not a sandbox. Invoke the tools directly rather than asking for approval in chat. Never claim local execution or delivery before the tool succeeds. Local computer context: " + self.desktop_context
             env["MCP_TOOL_TIMEOUT"]="650000"
+        args += ["--append-system-prompt",system_prompt]
         self.process = subprocess.Popen(args, cwd=cwd, env=env,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             encoding="utf-8", errors="replace", bufsize=1, start_new_session=True)
@@ -499,6 +503,75 @@ class Run:
                 pass
 
 
+class FileTransfers:
+    """Downloads explicitly initiated by the desktop UI, independent of PC control."""
+    def __init__(self,send):
+        self.send=send;self.lock=threading.RLock();self.items={}
+
+    def info(self,ident,path,cwd):
+        source=None
+        try:
+            ident=valid_id(ident)
+            if not isinstance(path,str) or not path.strip() or len(path)>4096 or "\x00" in path:
+                raise ValueError("Некорректный путь файла.")
+            requested=Path(path).expanduser()
+            if not requested.is_absolute():
+                base=directory(cwd);requested=base/requested
+                if not requested.exists() and len(Path(path).parts)==1:
+                    matches={p.resolve() for parent in ("build/libs","target","dist","download") if (p:=base/parent/path).is_file()}
+                    if len(matches)>1:raise ValueError("Найдено несколько файлов с таким именем. Нужен полный путь к готовому файлу.")
+                    if matches:requested=matches.pop()
+            requested=requested.resolve()
+            descriptor=os.open(requested,os.O_RDONLY | os.O_NONBLOCK | getattr(os,"O_NOFOLLOW",0))
+            source=os.fdopen(descriptor,"rb");metadata=os.fstat(source.fileno())
+            if not stat.S_ISREG(metadata.st_mode):raise ValueError("Скачивать можно только обычные файлы.")
+            if metadata.st_size>512*1024*1024:raise ValueError("Размер файла — до 512 МБ.")
+            with self.lock:
+                if len(self.items)>=8 or ident in self.items:raise ValueError("Уже скачивается несколько файлов. Дождись завершения.")
+                self.items[ident]={"file":source,"cancel":threading.Event(),"active":False}
+                source=None
+            self.send({"type":"artifact_info","id":ident,"path":str(requested),"name":requested.name,"size":metadata.st_size})
+        except FileNotFoundError:
+            self.send({"type":"artifact_info","id":ident,"error":"Файл на сервере не найден. Claude должен указать путь к реально собранному файлу."})
+        except (ValueError,OSError,TypeError) as error:
+            self.send({"type":"artifact_info","id":ident,"error":str(error)[:500]})
+        finally:
+            if source is not None:source.close()
+
+    def stream(self,ident):
+        with self.lock:
+            item=self.items.get(ident)
+            if not item or item["active"]:return
+            item["active"]=True
+        try:
+            digest=hashlib.sha256();size=0;sequence=0
+            while not item["cancel"].is_set():
+                body=item["file"].read(128*1024)
+                if not body:
+                    self.send({"type":"desktop_end","id":ident,"size":size,"sha256":digest.hexdigest()});return
+                size+=len(body)
+                if size>512*1024*1024:raise ValueError("Размер файла превысил 512 МБ.")
+                digest.update(body)
+                self.send({"type":"desktop_chunk","id":ident,"sequence":sequence,"data":base64.b64encode(body).decode()});sequence+=1
+        except (OSError,ValueError) as error:
+            try:self.send({"type":"desktop_end","id":ident,"error":str(error)[:500]})
+            except OSError:pass
+        finally:
+            with self.lock:self.items.pop(ident,None)
+            item["file"].close()
+
+    def cancel(self,ident):
+        with self.lock:
+            item=self.items.get(ident)
+            if item:
+                item["cancel"].set()
+                if not item["active"]:self.items.pop(ident,None);item["file"].close()
+
+    def close(self):
+        with self.lock:
+            for ident in list(self.items):self.cancel(ident)
+
+
 class Bridge:
     def __init__(self, send=emit, transcripts=None, binary=None):
         self.send = send
@@ -507,6 +580,7 @@ class Bridge:
         self.runs = {}
         self.run_lock = threading.RLock()
         self.usage = UsageState()
+        self.files = FileTransfers(self.send)
         self.desktop = None
         self.desktop_requested = False
         self.desktop_context = ""
@@ -525,6 +599,12 @@ class Bridge:
         try:
             if op == "sessions":
                 self.send({"type": "sessions", "sessions": self.transcripts.sessions()})
+            elif op == "file_info":
+                self.files.info(req.get("id"),req.get("path"),req.get("cwd"))
+            elif op == "file_stream":
+                self.files.stream(req.get("id"))
+            elif op == "file_cancel":
+                self.files.cancel(req.get("id"))
             elif op == "desktop_result":
                 if self.desktop:self.desktop.result(req.get("id"),req.get("result",{}))
             elif op == "desktop_download":
@@ -619,6 +699,7 @@ class Bridge:
         for run in list(self.runs.values()):
             run.close()
         if self.desktop:self.desktop.close()
+        self.files.close()
 
 
 def validate_images(images):

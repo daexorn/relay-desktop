@@ -302,3 +302,33 @@ class LegacySessionTests(unittest.TestCase):
             store=bridge.Transcripts(root)
             self.assertEqual({row['id'] for row in store.sessions()},{valid,legacy})
             self.assertEqual(store.history(legacy)[0]['text'],'Legacy title')
+
+class FileTransferTests(unittest.TestCase):
+    def test_real_bytes_are_streamed_with_a_checksum_and_no_cli_prompt(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'mod with spaces.jar';body=bytes(range(256))*1600;path.write_bytes(body)
+            events=[];transfer=bridge.FileTransfers(events.append);ident=str(uuid.uuid4())
+            transfer.info(ident,str(path),folder)
+            self.assertEqual(events[0]['type'],'artifact_info');self.assertEqual(events[0]['size'],len(body))
+            self.assertEqual(len(events),1)
+            transfer.stream(ident)
+            chunks=[e for e in events if e['type']=='desktop_chunk']
+            self.assertEqual([e['sequence'] for e in chunks],list(range(len(chunks))))
+            self.assertEqual(b''.join(base64.b64decode(e['data']) for e in chunks),body)
+            import hashlib
+            self.assertEqual(events[-1]['sha256'],hashlib.sha256(body).hexdigest());self.assertFalse(transfer.items)
+    def test_missing_file_returns_an_explicit_error(self):
+        with tempfile.TemporaryDirectory() as folder:
+            events=[];transfer=bridge.FileTransfers(events.append)
+            transfer.info(str(uuid.uuid4()),str(Path(folder)/'absent.jar'),folder)
+            self.assertIn('не найден',events[0]['error']);self.assertFalse(transfer.items)
+    def test_bare_filename_uses_unique_build_output_and_cancellation_closes_it(self):
+        with tempfile.TemporaryDirectory() as folder:
+            output=Path(folder)/'build/libs';output.mkdir(parents=True);(output/'mod.jar').write_bytes(b'jar')
+            events=[];transfer=bridge.FileTransfers(events.append);ident=str(uuid.uuid4())
+            transfer.info(ident,'mod.jar',folder);self.assertEqual(events[0]['path'],str(output/'mod.jar'))
+            source=transfer.items[ident]['file'];transfer.cancel(ident);self.assertTrue(source.closed);self.assertFalse(transfer.items)
+    def test_directory_is_not_offered_as_a_download(self):
+        with tempfile.TemporaryDirectory() as folder:
+            events=[];transfer=bridge.FileTransfers(events.append)
+            transfer.info(str(uuid.uuid4()),folder,folder);self.assertIn('error',events[0]);self.assertFalse(transfer.items)

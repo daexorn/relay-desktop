@@ -29,9 +29,14 @@ impl Drop for Download {
         let _ = fs::remove_file(&self.temp);
     }
 }
+struct ArtifactRequest {
+    source: String,
+    target: Option<PathBuf>,
+}
 pub struct Desktop {
     pending: HashMap<String, Value>,
     downloads: HashMap<String, Download>,
+    artifacts: HashMap<String, ArtifactRequest>,
     workspace: Option<PathBuf>,
     policies: HashMap<String, bool>,
     requests: UnboundedSender<Value>,
@@ -45,6 +50,7 @@ impl Desktop {
         Self {
             pending: HashMap::new(),
             downloads: HashMap::new(),
+            artifacts: HashMap::new(),
             workspace: None,
             policies: HashMap::new(),
             requests,
@@ -59,6 +65,16 @@ impl Desktop {
             .requests
             .send(json!({"op":"desktop_result","id":id,"result":result}));
     }
+    fn complete(&mut self, id: &str, result: Value) {
+        if let Some(request) = self.artifacts.remove(id) {
+            let path = request.source;
+            let ok = result["ok"].as_bool().unwrap_or(false);
+            self.bus.send(Event::Data{server:self.server.clone(),value:json!({"type":"artifact_status","id":id,"path":path,"stage":if ok{"saved"}else{"failed"},"message":result["message"],"local_path":result["path"]})});
+            let _ = self.requests.send(json!({"op":"file_cancel","id":id}));
+        } else {
+            self.result(id, result);
+        }
+    }
     fn fail(&self, id: &str, message: impl ToString) {
         self.result(id, json!({"ok":false,"message":message.to_string()}));
     }
@@ -66,6 +82,25 @@ impl Desktop {
     pub fn local(&mut self, value: &Value) -> bool {
         let id = value["id"].as_str().unwrap_or("");
         match value["op"].as_str().unwrap_or("") {
+            "_artifact_download" => {
+                if uuid::Uuid::parse_str(id).is_ok()
+                    && self.artifacts.len() < 8
+                    && !self.artifacts.contains_key(id)
+                {
+                    self.artifacts.insert(
+                        id.into(),
+                        ArtifactRequest {
+                            source: value["path"].as_str().unwrap_or("").into(),
+                            target: value["target"].as_str().map(PathBuf::from),
+                        },
+                    );
+                    let _ = self.requests.send(
+                        json!({"op":"file_info","id":id,"path":value["path"],"cwd":value["cwd"]}),
+                    );
+                } else {
+                    self.bus.send(Event::Data{server:self.server.clone(),value:json!({"type":"artifact_status","id":id,"stage":"failed","message":"Уже скачивается несколько файлов. Повтори чуть позже."})});
+                }
+            }
             "_desktop_workspace" => {
                 let workspace = value["path"]
                     .as_str()
@@ -80,7 +115,8 @@ impl Desktop {
                         .for_each(|cancel| cancel.store(true, Ordering::Relaxed));
                     self.commands.clear();
                     self.pending.clear();
-                    self.downloads.clear();
+                    let artifacts = &self.artifacts;
+                    self.downloads.retain(|id, _| artifacts.contains_key(id));
                     self.policies.clear();
                 }
                 self.workspace = workspace;
@@ -250,6 +286,51 @@ impl Desktop {
     pub fn incoming(&mut self, value: &Value) -> bool {
         let id = value["id"].as_str().unwrap_or("");
         match value["type"].as_str().unwrap_or("") {
+            "artifact_status" => true,
+            "artifact_info" => {
+                if !self.artifacts.contains_key(id) || self.downloads.contains_key(id) {
+                    return true;
+                }
+                let result = (|| -> Result<Download> {
+                    anyhow::ensure!(
+                        value["error"].as_str().is_none(),
+                        "{}",
+                        value["error"].as_str().unwrap_or("Ошибка скачивания")
+                    );
+                    anyhow::ensure!(
+                        value["size"]
+                            .as_u64()
+                            .is_some_and(|size| size <= 512 * 1024 * 1024),
+                        "Неверный размер файла"
+                    );
+                    let target = if let Some(target) = self
+                        .artifacts
+                        .get(id)
+                        .and_then(|request| request.target.clone())
+                    {
+                        target
+                    } else {
+                        let folder = dirs::download_dir()
+                            .or_else(dirs::home_dir)
+                            .context("Не найдена папка загрузок")?;
+                        fs::create_dir_all(&folder)?;
+                        folder.join(file_name(
+                            value["name"].as_str().context("Нет имени файла")?,
+                        ))
+                    };
+                    self.begin(target)
+                })();
+                match result {
+                    Ok(download) => {
+                        self.downloads.insert(id.into(), download);
+                        let _ = self.requests.send(json!({"op":"file_stream","id":id}));
+                    }
+                    Err(error) => {
+                        self.complete(id, json!({"ok":false,"message":error.to_string()}))
+                    }
+                }
+                true
+            }
             "desktop_request" => {
                 let valid = uuid::Uuid::parse_str(id).is_ok()
                     && !self.pending.contains_key(id)
@@ -317,7 +398,7 @@ impl Desktop {
                 })();
                 if let Err(error) = result {
                     self.downloads.remove(id);
-                    self.fail(id, error);
+                    self.complete(id, json!({"ok":false,"message":error.to_string()}));
                 }
                 true
             }
@@ -367,10 +448,14 @@ impl Desktop {
                     })();
                     match result {
                         Ok(result) => {
-                            self.bus.send(Event::Data{server:self.server.clone(),value:json!({"type":"desktop_status","message":format!("Скачан файл: {}",download.target.file_name().unwrap_or_default().to_string_lossy())})});
-                            self.result(id, result);
+                            if !self.artifacts.contains_key(id) {
+                                self.bus.send(Event::Data{server:self.server.clone(),value:json!({"type":"desktop_status","message":format!("Скачан файл: {}",download.target.file_name().unwrap_or_default().to_string_lossy())})});
+                            }
+                            self.complete(id, result);
                         }
-                        Err(error) => self.fail(id, error),
+                        Err(error) => {
+                            self.complete(id, json!({"ok":false,"message":error.to_string()}))
+                        }
                     }
                 }
                 true
@@ -582,6 +667,51 @@ mod tests {
         assert_eq!(fs::read(&target).unwrap(), b"jar");
         drop(manager);
         fs::remove_dir_all(folder).unwrap();
+    }
+    #[test]
+    fn card_download_works_without_pc_control_and_reports_saved_only_after_verification() {
+        let (controller, events) =
+            crate::connection::Controller::new(eframe::egui::Context::default());
+        let (sender, mut outgoing) = tokio::sync::mpsc::unbounded_channel();
+        let mut manager = Desktop::new(sender, controller.bus.clone(), "test".into());
+        let folder = std::env::temp_dir().join(format!("relay-card-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&folder).unwrap();
+        let target = folder.join("mod.jar");
+        let id = uuid::Uuid::new_v4().to_string();
+        manager.local(&json!({"op":"_artifact_download","id":id,"path":"/server/mod.jar","cwd":"/server","target":target}));
+        assert!(manager.workspace.is_none());
+        assert!(manager.policies.is_empty());
+        assert_eq!(outgoing.try_recv().unwrap()["op"], "file_info");
+        manager.incoming(&json!({"type":"artifact_info","id":id,"name":"mod.jar","size":3}));
+        assert_eq!(outgoing.try_recv().unwrap()["op"], "file_stream");
+        manager.incoming(
+            &json!({"type":"desktop_chunk","id":id,"sequence":0,"data":STANDARD.encode(b"jar")}),
+        );
+        assert!(!target.exists());
+        assert!(!events.try_iter().any(|e|matches!(e,Event::Data{value,..} if value["type"]=="artifact_status" && value["stage"]=="saved")));
+        manager.incoming(&json!({"type":"desktop_end","id":id,"size":3,"sha256":format!("{:x}",Sha256::digest(b"jar"))}));
+        assert_eq!(fs::read(&target).unwrap(), b"jar");
+        assert!(manager.artifacts.is_empty());
+        assert!(events.try_iter().any(|e|matches!(e,Event::Data{value,..} if value["type"]=="artifact_status" && value["stage"]=="saved" && value["local_path"]==target.to_string_lossy().as_ref())));
+        drop(manager);
+        fs::remove_dir_all(folder).unwrap();
+    }
+    #[test]
+    fn missing_artifact_is_an_error_and_unsolicited_info_is_ignored() {
+        let (controller, events) =
+            crate::connection::Controller::new(eframe::egui::Context::default());
+        let (sender, _) = tokio::sync::mpsc::unbounded_channel();
+        let mut manager = Desktop::new(sender, controller.bus.clone(), "test".into());
+        let id = uuid::Uuid::new_v4().to_string();
+        manager.incoming(&json!({"type":"artifact_info","id":id,"name":"mod.jar","size":3}));
+        assert!(manager.downloads.is_empty());
+        manager.local(
+            &json!({"op":"_artifact_download","id":id,"path":"/missing/mod.jar","cwd":"/server"}),
+        );
+        manager.incoming(&json!({"type":"artifact_info","id":id,"error":"Файл не найден"}));
+        assert!(manager.artifacts.is_empty());
+        assert!(manager.downloads.is_empty());
+        assert!(events.try_iter().any(|e|matches!(e,Event::Data{value,..} if value["stage"]=="failed" && value["message"]=="Файл не найден")));
     }
     #[cfg(windows)]
     #[test]

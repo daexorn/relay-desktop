@@ -113,6 +113,7 @@ pub struct RelayApp {
     capture_requested: bool,
     close_confirm: bool,
     desktop_requests: Vec<(String, Value)>,
+    downloads: crate::artifacts::Downloads,
 }
 fn key(server: &str, sid: &str) -> String {
     format!("{server}/{sid}")
@@ -162,6 +163,7 @@ impl RelayApp {
             capture_requested: false,
             close_confirm: false,
             desktop_requests: vec![],
+            downloads: Default::default(),
         };
         if demo {
             app.seed_demo();
@@ -212,6 +214,11 @@ impl RelayApp {
                         )
                         .store(&cc.egui_ctx);
                     }
+                }
+            }
+            if args.iter().any(|a| a == "--demo-artifact") {
+                if let Some(k) = app.current_key() {
+                    app.chats.get_mut(&k).unwrap().messages=vec![Message{role:"assistant".into(),text:"Собрал мод. Готовый файл:\n\n[sbrp-client-0.7.300.jar](/opt/project/build/libs/sbrp-client-0.7.300.jar)\n\nСкачай его кнопкой ниже.".into(),..Default::default()}];
                 }
             }
             if args.iter().any(|a| a == "--demo-desktop") {
@@ -540,6 +547,7 @@ impl RelayApp {
                     self.remote.entry(server).or_default().connecting = false;
                 }
                 Event::Disconnected { server } => {
+                    self.downloads.disconnected(&server);
                     let r = self.remote.entry(server.clone()).or_default();
                     self.desktop_requests.retain(|(s, _)| s != &server);
                     r.connected = false;
@@ -591,6 +599,7 @@ impl RelayApp {
             return;
         }
         match kind {
+            "artifact_status" => self.downloads.event(&server, &value),
             "desktop_request" => {
                 if self.desktop_requests.len() < 8
                     && !self
@@ -1514,6 +1523,10 @@ impl RelayApp {
                                             );
                                         });
                                         ui.add_space(5.);
+                                        let file_links = crate::artifacts::links(&message.text);
+                                        for (destination, _) in &file_links {
+                                            self.markdown.add_link_hook(destination.clone());
+                                        }
                                         ui.scope(|ui| {
                                             ui.style_mut().wrap_mode =
                                                 Some(egui::TextWrapMode::Wrap);
@@ -1525,6 +1538,39 @@ impl RelayApp {
                                                 &message.text,
                                             );
                                         });
+                                        for (destination, artifact) in &file_links {
+                                            let clicked =
+                                                self.markdown.remove_link_hook(destination)
+                                                    == Some(true);
+                                            if clicked {
+                                                if let Some(server) =
+                                                    self.settings.selected.as_deref()
+                                                {
+                                                    self.downloads.start(
+                                                        &self.controller,
+                                                        server,
+                                                        &chat.cwd,
+                                                        &artifact.path,
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        if let Some(server) = self.settings.selected.as_deref() {
+                                            let connected = self.demo
+                                                || self
+                                                    .remote
+                                                    .get(server)
+                                                    .is_some_and(|r| r.connected);
+                                            self.downloads.show(
+                                                ui,
+                                                &self.controller,
+                                                server,
+                                                &chat.cwd,
+                                                &message.text,
+                                                connected,
+                                                p,
+                                            );
+                                        }
                                         ui.add_space(30.);
                                     }
                                 });

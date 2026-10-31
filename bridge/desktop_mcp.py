@@ -137,7 +137,7 @@ def mcp_main():
             req=json.loads(line);ident=req.get("id");method=req.get("method")
             if ident is None:continue
             if method=="initialize":
-                result={"protocolVersion":req.get("params",{}).get("protocolVersion","2024-11-05"),"capabilities":{"tools":{}},"serverInfo":{"name":"Relay desktop","version":"0.4.0"}}
+                result={"protocolVersion":req.get("params",{}).get("protocolVersion","2024-11-05"),"capabilities":{"tools":{}},"serverInfo":{"name":"Relay desktop","version":"0.4.1"}}
             elif method=="ping":result={}
             elif method=="tools/list":result={"tools":TOOLS}
             elif method=="tools/call":

@@ -4,6 +4,7 @@
 )]
 
 mod app;
+mod artifacts;
 mod connection;
 mod desktop;
 mod images;
