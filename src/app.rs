@@ -244,6 +244,7 @@ impl RelayApp {
                         app.boards.insert("demo".into(), state);
                         app.board_open = true;
                         app.board_view.selected = args.iter().position(|a| a == "--demo-select").and_then(|i| args.get(i + 1)).cloned();
+                        app.board_view.demo(&args);
                     }
                 }
             }
