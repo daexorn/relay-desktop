@@ -45,7 +45,11 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Relay")
-            .with_inner_size([1180.0, 780.0])
+            .with_inner_size(if args.iter().any(|a| a == "--demo-small") {
+                [800., 660.]
+            } else {
+                [1180., 780.]
+            })
             .with_min_inner_size([640.0, 460.0]),
         vsync: true,
         ..Default::default()

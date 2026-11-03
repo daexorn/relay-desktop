@@ -1,6 +1,6 @@
 use eframe::egui::{self, Color32, FontId, Pos2, Rect, Response, Sense, Stroke, Vec2};
 
-pub const ACCENT: Color32 = Color32::from_rgb(217, 119, 87);
+pub const ACCENT: Color32 = Color32::from_rgb(139, 166, 242);
 pub const GREEN: Color32 = Color32::from_rgb(92, 184, 132);
 #[derive(Clone, Copy)]
 pub struct Palette {
@@ -46,23 +46,110 @@ pub fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     )
 }
 pub fn animated_palette(ctx: &egui::Context, light: bool) -> Palette {
-    let t = ctx.animate_bool_with_time_and_easing(
-        egui::Id::new("theme-transition"),
-        light,
-        0.36,
-        egui::emath::easing::cubic_in_out,
-    );
-    let a = palette(false);
-    let b = palette(true);
+    let name = ctx
+        .data(|d| d.get_temp::<String>(egui::Id::new("relay-theme")))
+        .unwrap_or_else(|| if light { "paper" } else { "graphite" }.into());
+    let b = theme_palette(&name);
+    let channels = |id: &str, color: Color32| {
+        let c = color.to_array();
+        Color32::from_rgb(
+            ctx.animate_value_with_time(
+                egui::Id::new(("theme", id, 0)),
+                c[0] as f32,
+                duration(ctx, 0.32),
+            ) as u8,
+            ctx.animate_value_with_time(
+                egui::Id::new(("theme", id, 1)),
+                c[1] as f32,
+                duration(ctx, 0.32),
+            ) as u8,
+            ctx.animate_value_with_time(
+                egui::Id::new(("theme", id, 2)),
+                c[2] as f32,
+                duration(ctx, 0.32),
+            ) as u8,
+        )
+    };
     Palette {
-        base: mix(a.base, b.base, t),
-        side: mix(a.side, b.side, t),
-        rail: mix(a.rail, b.rail, t),
-        surface: mix(a.surface, b.surface, t),
-        line: mix(a.line, b.line, t),
-        text: mix(a.text, b.text, t),
-        muted: mix(a.muted, b.muted, t),
+        base: channels("base", b.base),
+        side: channels("side", b.side),
+        rail: channels("rail", b.rail),
+        surface: channels("surface", b.surface),
+        line: channels("line", b.line),
+        text: channels("text", b.text),
+        muted: channels("muted", b.muted),
     }
+}
+pub const THEMES: [(&str, &str); 5] = [
+    ("graphite", "Графит"),
+    ("midnight", "Полночь"),
+    ("forest", "Хвоя"),
+    ("plum", "Слива"),
+    ("paper", "Бумага"),
+];
+pub fn theme_palette(name: &str) -> Palette {
+    let mut p = palette(name == "paper");
+    let colors = match name {
+        "midnight" => Some([
+            0x111722, 0x0e141f, 0x0b101a, 0x1b2433, 0x2a3547, 0xe5edf9, 0x95a5bd,
+        ]),
+        "forest" => Some([
+            0x141c1a, 0x101714, 0x0d1310, 0x202d27, 0x304139, 0xe4eee8, 0x9aad9f,
+        ]),
+        "plum" => Some([
+            0x1b1721, 0x16121c, 0x120e18, 0x292331, 0x3b3246, 0xeee7f5, 0xab9bb8,
+        ]),
+        _ => None,
+    };
+    if let Some(c) = colors {
+        let rgb = |n: u32| Color32::from_rgb((n >> 16) as u8, (n >> 8) as u8, n as u8);
+        p = Palette {
+            base: rgb(c[0]),
+            side: rgb(c[1]),
+            rail: rgb(c[2]),
+            surface: rgb(c[3]),
+            line: rgb(c[4]),
+            text: rgb(c[5]),
+            muted: rgb(c[6]),
+        };
+    }
+    p
+}
+pub fn duration(ctx: &egui::Context, seconds: f32) -> f32 {
+    if ctx
+        .data(|d| d.get_temp::<bool>(egui::Id::new("relay-animations")))
+        .unwrap_or(true)
+    {
+        seconds
+    } else {
+        0.
+    }
+}
+pub fn chevron(p: &egui::Painter, rect: Rect, open: f32, color: Color32) {
+    let rotation = egui::emath::Rot2::from_angle(open * std::f32::consts::FRAC_PI_2);
+    let pts = [
+        Vec2::new(-2.5, -4.),
+        Vec2::new(1.5, 0.),
+        Vec2::new(-2.5, 4.),
+    ]
+    .map(|v| rect.center() + rotation * v)
+    .to_vec();
+    p.add(egui::Shape::line(pts, Stroke::new(1.5_f32, color)));
+}
+pub fn combo_icon(
+    ui: &egui::Ui,
+    rect: Rect,
+    visuals: &egui::style::WidgetVisuals,
+    open: bool,
+    _: egui::AboveOrBelow,
+) {
+    let t = ui
+        .ctx()
+        .animate_bool_with_time(rect_id(rect), open, duration(ui.ctx(), 0.22));
+    chevron(ui.painter(), rect, 1. + 2. * t, visuals.fg_stroke.color);
+}
+fn rect_id(rect: Rect) -> egui::Id {
+    egui::Id::new(("dropdown-chevron", rect.min.x as i32, rect.min.y as i32))
 }
 #[derive(Clone, Copy)]
 pub enum Icon {
@@ -84,6 +171,7 @@ pub enum Icon {
     Server,
     Computer,
     Board,
+    Cluster,
 }
 pub fn icon(p: &egui::Painter, r: Rect, which: Icon, color: Color32) {
     let c = r.center();
@@ -100,6 +188,12 @@ pub fn icon(p: &egui::Painter, r: Rect, which: Icon, color: Color32) {
         ));
     };
     match which {
+        Icon::Cluster => {
+            for (x, y) in [(0., -6.), (-6., 5.), (6., 5.)] {
+                p.circle_stroke(v(x, y), 3. * z, s);
+                p.line_segment([v(x * 0.55, y * 0.55), v(0., 0.)], s);
+            }
+        }
         Icon::Plus => {
             line((-6., 0.), (6., 0.));
             line((0., -6.), (0., 6.));
@@ -202,8 +296,9 @@ pub fn icon(p: &egui::Painter, r: Rect, which: Icon, color: Color32) {
             }
         }
         Icon::Settings => {
-            for x in [-5., 0., 5.] {
-                p.circle_filled(v(x, 0.), 1.3 * z, color);
+            for (y, x) in [(-5., 2.), (0., -3.), (5., 3.)] {
+                line((-8., y), (8., y));
+                p.circle_filled(v(x, y), 2.6 * z, color);
             }
         }
         Icon::Sun => {
@@ -242,6 +337,54 @@ pub enum Kind {
     Secondary,
     Ghost,
 }
+pub fn action_button(ui: &mut egui::Ui, which: Icon, p: Palette, primary: bool) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(34.), Sense::click());
+    let hover = ui.ctx().animate_bool_with_time(
+        response.id.with("hover"),
+        response.hovered(),
+        duration(ui.ctx(), 0.18),
+    );
+    let enabled = ui.is_enabled();
+    let base = if primary && enabled {
+        ACCENT
+    } else {
+        p.surface
+    };
+    let over = if primary && enabled {
+        mix(ACCENT, Color32::WHITE, 0.14)
+    } else {
+        p.line
+    };
+    ui.painter().rect_filled(rect, 11., mix(base, over, hover));
+    ui.painter().rect_stroke(
+        rect,
+        11.,
+        Stroke::new(1.0_f32, if primary && enabled { ACCENT } else { p.line }),
+        egui::StrokeKind::Inside,
+    );
+    icon(
+        ui.painter(),
+        Rect::from_center_size(rect.center(), Vec2::splat(20.)),
+        which,
+        if primary && enabled {
+            Color32::from_rgb(23, 30, 48)
+        } else {
+            p.text
+        },
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Button,
+            enabled,
+            if primary {
+                "Отправить"
+            } else {
+                "Остановить"
+            },
+        )
+    });
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
 pub fn chip(ui: &mut egui::Ui, text: &str, which: Icon, p: Palette, active: bool) -> Response {
     let font = FontId::proportional(12.5);
     let galley = ui.painter().layout_no_wrap(text.into(), font, p.text);
@@ -268,8 +411,11 @@ pub fn chip(ui: &mut egui::Ui, text: &str, which: Icon, p: Palette, active: bool
         0.10,
     );
     let painted = rect.shrink(press * 0.7);
-    ui.painter()
-        .rect_filled(painted, 14., mix(Color32::TRANSPARENT, p.line, 0.35 + hover * 0.45));
+    ui.painter().rect_filled(
+        painted,
+        14.,
+        mix(Color32::TRANSPARENT, p.line, 0.35 + hover * 0.45),
+    );
     ui.painter().rect_stroke(
         painted,
         14.,
@@ -320,7 +466,11 @@ pub fn button(
     let font = FontId::proportional(13.5);
     let galley = ui.painter().layout_no_wrap(text.into(), font, p.text);
     let icon_size = if text.is_empty() { 17. } else { 15. };
-    let gap = if which.is_some() && !text.is_empty() { 7. } else { 0. };
+    let gap = if which.is_some() && !text.is_empty() {
+        7.
+    } else {
+        0.
+    };
     let inner = galley.size().x + gap + if which.is_some() { icon_size } else { 0. };
     let width = if size.x > 0. { size.x } else { inner + 24. };
     let (r, response) = ui.allocate_exact_size(Vec2::new(width, size.y.max(28.)), Sense::click());
@@ -340,11 +490,15 @@ pub fn button(
         Kind::Primary if active => (ACCENT, mix(ACCENT, Color32::WHITE, 0.14)),
         Kind::Primary => (p.line, p.line),
         Kind::Secondary => (p.surface, mix(p.surface, p.line, 0.8)),
-        Kind::Ghost => (Color32::TRANSPARENT, mix(Color32::TRANSPARENT, p.line, 0.75)),
+        Kind::Ghost => (
+            Color32::TRANSPARENT,
+            mix(Color32::TRANSPARENT, p.line, 0.75),
+        ),
     };
     let painted = r.shrink(pressed * 1.);
     let radius = (r.height() / 2.).min(9.);
-    ui.painter().rect_filled(painted, radius, mix(base, over, hovered));
+    ui.painter()
+        .rect_filled(painted, radius, mix(base, over, hovered));
     if kind == Kind::Secondary {
         ui.painter().rect_stroke(
             painted,
@@ -374,15 +528,21 @@ pub fn button(
     if let Some(which) = which {
         icon(
             ui.painter(),
-            Rect::from_center_size(Pos2::new(x + icon_size / 2., r.center().y), Vec2::splat(icon_size)),
+            Rect::from_center_size(
+                Pos2::new(x + icon_size / 2., r.center().y),
+                Vec2::splat(icon_size),
+            ),
             which,
             color,
         );
         x += icon_size + gap;
     }
     if !text.is_empty() {
-        ui.painter()
-            .galley(Pos2::new(x, r.center().y - galley.size().y / 2.), galley, color);
+        ui.painter().galley(
+            Pos2::new(x, r.center().y - galley.size().y / 2.),
+            galley,
+            color,
+        );
     }
     response
         .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), text));
@@ -476,7 +636,8 @@ pub fn content(ui: &mut egui::Ui, max_width: f32, add: impl FnOnce(&mut egui::Ui
 
 pub fn session_title(ui: &mut egui::Ui, text: &str, color: Color32) {
     let width = ui.available_width();
-    let mut job = egui::text::LayoutJob::simple(text.into(), FontId::proportional(13.5), color, width);
+    let mut job =
+        egui::text::LayoutJob::simple(text.into(), FontId::proportional(13.5), color, width);
     job.wrap.max_rows = 1;
     job.wrap.break_anywhere = true;
     job.wrap.overflow_character = Some('…');

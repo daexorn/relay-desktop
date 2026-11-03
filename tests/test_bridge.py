@@ -158,6 +158,20 @@ class ProtocolTests(unittest.TestCase):
                 with self.assertRaises(OSError):bridge.Run(host,self.sid,str(self.root),'default','manual',False)
             args=popen.call_args[0][0];config=json.loads(args[args.index('--mcp-config')+1])
             self.assertEqual(config['mcpServers']['relay_board']['args'],[str(host.board_file),'mcp'])
+    def test_cluster_role_is_passed_to_the_system_prompt_not_user_text(self):
+        self.host.dispatch({'op':'prompt','sid':self.sid,'cwd':str(self.root),'text':'test','mode':'manual','agent_role':'reviewer'})
+        self.wait('permission')
+        run=self.host.runs[self.sid]
+        self.assertEqual(run.agent_role,'reviewer')
+        args=run.process.args
+        self.assertIn('review agent',args[args.index('--append-system-prompt')+1])
+
+    def test_unknown_cluster_role_does_not_start_a_process(self):
+        self.host.dispatch({'op':'prompt','sid':self.sid,'cwd':str(self.root),'text':'test','agent_role':'unknown'})
+        event=self.wait('error')
+        self.assertIn('роль',event['message'])
+        self.assertNotIn(self.sid,self.host.runs)
+
     def test_duplicate_prompt_does_not_clear_running_flag(self):
         self.prompt();self.wait('permission')
         self.prompt();error=self.wait('error')

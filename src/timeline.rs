@@ -121,149 +121,244 @@ pub fn show(
     messages: &[Message],
     range: Range<usize>,
     busy: bool,
-    palette: Palette,
+    p: Palette,
 ) {
     let rows = actions(messages, range.clone());
     let errors = rows
         .iter()
-        .filter(|row| row.results.iter().any(|index| messages[*index].failed))
+        .filter(|r| r.results.iter().any(|i| messages[*i].failed))
         .count();
-    let title = format!(
-        "{}{}{}",
-        if busy { "Работает · " } else { "" },
+    let id = egui::Id::new(("activity-group", chat, range.start));
+    let auto_errors = ui
+        .ctx()
+        .data(|d| d.get_temp::<bool>(egui::Id::new("relay-open-errors")))
+        .unwrap_or(false);
+    let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
+        ui.ctx(),
+        id,
+        auto_errors && errors > 0,
+    );
+    let error_color = egui::Color32::from_rgb(222, 143, 151);
+    let width = ui.available_width().max(100.);
+    let (r, response) = ui.allocate_exact_size(egui::vec2(width, 38.), egui::Sense::click());
+    let hover = ui.ctx().animate_bool_with_time(
+        response.id.with("hover"),
+        response.hovered(),
+        design::duration(ui.ctx(), 0.2),
+    );
+    ui.painter()
+        .rect_filled(r, 10., design::mix(p.base, p.surface, 0.55 + 0.4 * hover));
+    ui.painter().rect_stroke(
+        r,
+        10.,
+        egui::Stroke::new(1_f32, design::mix(p.line, p.muted, hover * 0.2)),
+        egui::StrokeKind::Inside,
+    );
+    design::icon(
+        ui.painter(),
+        egui::Rect::from_min_size(r.min + egui::vec2(11., 10.), egui::vec2(18., 18.)),
+        design::Icon::Server,
+        if busy { ACCENT } else { p.muted },
+    );
+    let text = format!(
+        "{} · {}{}",
+        if busy {
+            "В работе"
+        } else {
+            "Действия"
+        },
         action_count(rows.len()),
         if errors > 0 {
-            " · есть ошибки"
+            format!(" · ошибок: {errors}")
         } else {
-            ""
+            String::new()
         }
     );
-    let id = egui::Id::new(("activity-group", chat, range.start));
-    let mut state =
-        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
-    let color = if errors > 0 {
-        egui::Color32::from_rgb(204, 133, 138)
-    } else {
-        palette.muted
-    };
-    ui.scope(|ui| {
-        ui.spacing_mut().interact_size.y = 24.;
-        ui.horizontal(|ui| {
-            if busy {
-                design::dots(ui, ACCENT);
-            }
-            let open = state.openness(ui.ctx());
-            let title = ui.add(
-                egui::Button::new(RichText::new(format!("     {title}")).size(12.).color(color))
-                    .fill(design::mix(palette.base, palette.line, 0.45))
-                    .stroke(egui::Stroke::NONE)
-                    .corner_radius(12.)
-                    .min_size(egui::vec2(0., 24.)),
-            );
-            // Chevron painted by hand: the bundled fonts have no triangle glyphs.
-            let c = egui::pos2(title.rect.left() + 13., title.rect.center().y);
-            let turn = egui::emath::Rot2::from_angle(open * std::f32::consts::FRAC_PI_2);
-            let points = [egui::vec2(-1.5, -3.5), egui::vec2(2., 0.), egui::vec2(-1.5, 3.5)]
-                .map(|v| c + turn * v)
-                .to_vec();
-            ui.painter()
-                .add(egui::Shape::line(points, egui::Stroke::new(1.4_f32, color)));
-            let clicked = title
-                .on_hover_text(if state.is_open() { "Скрыть журнал действий" } else { "Открыть журнал действий" })
-                .clicked();
-            if clicked {
-                state.toggle(ui);
-            }
-        });
-    });
+    let clip = ui.painter().with_clip_rect(egui::Rect::from_min_max(
+        r.min + egui::vec2(36., 0.),
+        r.max - egui::vec2(31., 0.),
+    ));
+    clip.text(
+        egui::pos2(r.left() + 38., r.center().y),
+        egui::Align2::LEFT_CENTER,
+        text,
+        egui::FontId::proportional(12.5),
+        if errors > 0 { error_color } else { p.muted },
+    );
+    design::chevron(
+        ui.painter(),
+        egui::Rect::from_center_size(r.right_center() - egui::vec2(17., 0.), egui::vec2(16., 16.)),
+        state.openness(ui.ctx()),
+        p.muted,
+    );
+    if response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Открыть или свернуть команды и результаты")
+        .clicked()
+    {
+        state.toggle(ui);
+    }
     state.show_body_unindented(ui, |ui| {
         egui::Frame::new()
-            .fill(palette.side)
-            .corner_radius(10.)
-            .inner_margin(egui::Margin::symmetric(10, 6))
+            .fill(p.side)
+            .corner_radius(12.)
+            .inner_margin(10)
             .show(ui, |ui| {
+                ui.set_width((width - 20.).max(80.));
                 egui::ScrollArea::vertical()
                     .id_salt(id.with("journal"))
-                    .max_height(320.)
-                    .min_scrolled_height((rows.len() as f32 * 27.).clamp(32., 320.))
+                    .max_height(420.)
+                    .min_scrolled_height((rows.len() as f32 * 54.).clamp(68., 360.))
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
-                        ui.spacing_mut().interact_size.y = 24.;
-                        ui.spacing_mut().item_spacing.y = 3.;
                         for (index, row) in rows.iter().enumerate() {
-                            let failed = row.results.iter().any(|index| messages[*index].failed);
-                            let title = row
-                                .call
-                                .map(|index| action_title(&messages[index]))
-                                .unwrap_or_else(|| "Результат действия".into());
-                            let title = if failed {
-                                format!("{title} · ошибка")
-                            } else {
-                                title
-                            };
+                            let failed = row.results.iter().any(|i| messages[*i].failed);
                             let row_id = id.with(index);
                             let mut detail =
                                 egui::collapsing_header::CollapsingState::load_with_default_open(
                                     ui.ctx(),
                                     row_id,
-                                    false,
+                                    auto_errors && failed,
                                 );
-                            if ui
-                                .selectable_label(
-                                    detail.is_open(),
-                                    RichText::new(title).size(12.).color(if failed {
-                                        color
-                                    } else {
-                                        palette.muted
-                                    }),
-                                )
-                                .on_hover_text("Параметры и результат")
-                                .clicked()
-                            {
-                                detail.toggle(ui);
-                            }
-                            detail.show_body_unindented(ui, |ui| {
-                                if let Some(call) = row.call {
-                                    ui.add(
-                                        egui::Label::new(
-                                            RichText::new(model::summary(&messages[call].input))
-                                                .monospace()
-                                                .size(12.),
-                                        )
-                                        .wrap()
-                                        .selectable(true),
+                            let title = row
+                                .call
+                                .map(|i| action_title(&messages[i]))
+                                .unwrap_or_else(|| "Результат действия".into());
+                            let local = row.call.is_some_and(|i| {
+                                messages[i].tool.starts_with("mcp__relay_desktop__")
+                            });
+                            egui::Frame::new()
+                                .fill(p.base)
+                                .stroke(egui::Stroke::new(1_f32, p.line))
+                                .corner_radius(9.)
+                                .inner_margin(10)
+                                .show(ui, |ui| {
+                                    let (r, res) = ui.allocate_exact_size(
+                                        egui::vec2(ui.available_width(), 26.),
+                                        egui::Sense::click(),
                                     );
-                                }
-                                for result in &row.results {
-                                    egui::ScrollArea::vertical()
-                                        .id_salt((row_id, *result))
-                                        .max_height(160.)
-                                        .show(ui, |ui| {
+                                    design::icon(
+                                        ui.painter(),
+                                        egui::Rect::from_min_size(
+                                            r.min + egui::vec2(0., 5.),
+                                            egui::vec2(16., 16.),
+                                        ),
+                                        if local {
+                                            design::Icon::Computer
+                                        } else {
+                                            design::Icon::File
+                                        },
+                                        if failed { error_color } else { p.muted },
+                                    );
+                                    let text = if failed {
+                                        format!("{title} · ошибка")
+                                    } else {
+                                        title
+                                    };
+                                    ui.painter()
+                                        .with_clip_rect(r.shrink2(egui::vec2(22., 0.)))
+                                        .text(
+                                            r.left_center() + egui::vec2(24., 0.),
+                                            egui::Align2::LEFT_CENTER,
+                                            text,
+                                            egui::FontId::proportional(12.),
+                                            if failed { error_color } else { p.text },
+                                        );
+                                    design::chevron(
+                                        ui.painter(),
+                                        egui::Rect::from_center_size(
+                                            r.right_center() - egui::vec2(5., 0.),
+                                            egui::vec2(12., 12.),
+                                        ),
+                                        detail.openness(ui.ctx()),
+                                        p.muted,
+                                    );
+                                    if res
+                                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                        .clicked()
+                                    {
+                                        detail.toggle(ui);
+                                    }
+                                    detail.show_body_unindented(ui, |ui| {
+                                        if let Some(call) = row.call {
+                                            let text = model::summary(&messages[call].input);
+                                            ui.horizontal(|ui| {
+                                                ui.label(
+                                                    RichText::new(if local {
+                                                        "Этот ПК"
+                                                    } else {
+                                                        "Сервер"
+                                                    })
+                                                    .size(10.5)
+                                                    .color(p.muted),
+                                                );
+                                                if design::button(
+                                                    ui,
+                                                    "Копировать",
+                                                    Some(design::Icon::Copy),
+                                                    design::Kind::Ghost,
+                                                    p,
+                                                    egui::vec2(0., 24.),
+                                                )
+                                                .clicked()
+                                                {
+                                                    ui.ctx().copy_text(text.clone());
+                                                }
+                                            });
                                             ui.add(
                                                 egui::Label::new(
-                                                    RichText::new(&messages[*result].text)
+                                                    RichText::new(text)
                                                         .monospace()
-                                                        .size(12.),
+                                                        .size(12.)
+                                                        .color(p.text),
                                                 )
                                                 .wrap()
                                                 .selectable(true),
                                             );
-                                        });
-                                }
-                                if row.results.is_empty() {
-                                    ui.label(
-                                        RichText::new("Результат ещё не получен")
-                                            .size(11.)
-                                            .color(palette.muted),
-                                    );
-                                }
-                                ui.add_space(6.);
-                            });
+                                        }
+                                        for result in &row.results {
+                                            ui.add_space(7.);
+                                            ui.separator();
+                                            ui.add_space(5.);
+                                            let text = &messages[*result].text;
+                                            let wrap = ui
+                                                .ctx()
+                                                .data(|d| {
+                                                    d.get_temp::<bool>(egui::Id::new(
+                                                        "relay-wrap-output",
+                                                    ))
+                                                })
+                                                .unwrap_or(true);
+                                            egui::ScrollArea::both()
+                                                .id_salt((row_id, *result))
+                                                .max_height(230.)
+                                                .auto_shrink([false, true])
+                                                .show(ui, |ui| {
+                                                    let label = egui::Label::new(
+                                                        RichText::new(text)
+                                                            .monospace()
+                                                            .size(11.5)
+                                                            .color(if messages[*result].failed {
+                                                                error_color
+                                                            } else {
+                                                                p.muted
+                                                            }),
+                                                    )
+                                                    .selectable(true);
+                                                    ui.add(if wrap {
+                                                        label.wrap()
+                                                    } else {
+                                                        label.extend()
+                                                    });
+                                                });
+                                        }
+                                    });
+                                });
+                            ui.add_space(6.);
                         }
                     });
             });
     });
-    ui.add_space(10.);
 }
 
 #[cfg(test)]

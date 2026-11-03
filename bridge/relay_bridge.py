@@ -28,6 +28,12 @@ MAX_REQUEST = 26 * 1024 * 1024
 MAX_HISTORY = 16 * 1024 * 1024
 WRITE_LOCK = threading.Lock()
 
+AGENT_ROLES = {
+    "worker": "You are the development agent for this task. Work in the selected host and directory, respect project instructions and concurrent edits, implement the requested change and report files and actual verification results.",
+    "planner": "You are the planning agent for this task. Inspect the project, identify dependencies and propose concrete implementation steps. Do not change files unless the user explicitly requests it. Report facts and open questions.",
+    "reviewer": "You are the review agent for this task. Inspect relevant changes and run appropriate checks permitted by the user's instructions. Report findings with file references and evidence. Do not claim checks you did not run.",
+}
+
 USAGE_LABELS = {"five_hour": "5 часов", "seven_day": "Неделя", "seven_day_opus": "Неделя · Opus", "seven_day_sonnet": "Неделя · Sonnet", "overage": "Дополнительно"}
 
 
@@ -390,6 +396,7 @@ class Run:
     def __init__(self, owner, sid, cwd, model, mode, resume, effort="default"):
         self.owner, self.sid, self.cwd = owner, sid, cwd
         self.model, self.mode, self.effort = model, mode, effort
+        self.agent_role = getattr(owner, "agent_role", "")
         self.desktop_enabled = False
         self.desktop_context = getattr(owner,"desktop_context", "")
         self.busy = False
@@ -404,6 +411,7 @@ class Run:
         env["CLAUDE_CODE_ENTRYPOINT"] = "relay-desktop"
         args = command(owner.binary, sid, resume, model, mode, effort)
         system_prompt="Relay supports downloadable server files in chat. When the user requests a built mod or other generated artifact, include a Markdown download link [filename](absolute_server_file_path) for the real existing file. Verify it exists before offering it. A bare filename or a statement that the build succeeded is not file delivery. Never claim the file was delivered to the PC unless the transfer tool actually succeeded."
+        system_prompt += " " + AGENT_ROLES.get(self.agent_role, "")
         servers = {}
         if getattr(owner, "board_file", None):
             actor = getattr(owner, "actor", "") or "Relay"
@@ -687,7 +695,11 @@ class Bridge:
                 cwd = str(directory(req.get("cwd")))
                 mode, model = req.get("mode", "manual"), req.get("model", "default")
                 effort = validate_effort(req.get("effort", "default"))
+                agent_role = req.get("agent_role", "")
+                if agent_role not in ("", *AGENT_ROLES):
+                    raise ValueError("Неизвестная роль агента.")
                 with self.run_lock:
+                    self.agent_role = agent_role
                     desktop_enabled=bool(req.get("desktop_enabled",False))
                     if desktop_enabled and self.desktop is None:
                         namespace={"__name__":"relay_desktop_adapter"}
@@ -702,7 +714,7 @@ class Bridge:
                     run = self.runs.get(sid)
                     if run and run.busy:
                         raise ValueError("Дождись ответа Claude или останови его.")
-                    if run and (run.closed or run.process.poll() is not None or (run.cwd, run.model, run.mode, run.effort, getattr(run,"desktop_enabled",False), getattr(run,"desktop_context","")) != (cwd, model, mode, effort, desktop_enabled, self.desktop_context)):
+                    if run and (run.closed or run.process.poll() is not None or (run.cwd, run.model, run.mode, run.effort, getattr(run,"desktop_enabled",False), getattr(run,"desktop_context",""), getattr(run,"agent_role","")) != (cwd, model, mode, effort, desktop_enabled, self.desktop_context, agent_role)):
                         run.close()
                         self.runs.pop(sid, None)
                         run = None

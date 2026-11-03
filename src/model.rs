@@ -104,13 +104,62 @@ pub struct Settings {
     /// Shown on the team board and in agents' names; defaults to the OS user.
     #[serde(default)]
     pub name: String,
+    #[serde(default)]
+    pub appearance: Appearance,
+    #[serde(default)]
+    pub cluster: Vec<AgentNode>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Appearance {
+    pub theme: String,
+    pub scale: f32,
+    pub chat_width: f32,
+    pub compact: bool,
+    pub animations: bool,
+    pub wrap_output: bool,
+    pub open_errors: bool,
+    pub send_on_enter: bool,
+}
+impl Default for Appearance {
+    fn default() -> Self {
+        Self {
+            theme: String::new(),
+            scale: 1.,
+            chat_width: 820.,
+            compact: true,
+            animations: true,
+            wrap_output: true,
+            open_errors: false,
+            send_on_enter: true,
+        }
+    }
+}
+#[derive(Clone, Serialize, Deserialize)]
+pub struct AgentNode {
+    pub server: String,
+    pub role: String,
+    pub enabled: bool,
 }
 impl Settings {
+    pub fn theme(&self) -> &str {
+        if self.appearance.theme.is_empty() {
+            if self.light {
+                "paper"
+            } else {
+                "graphite"
+            }
+        } else {
+            &self.appearance.theme
+        }
+    }
     pub fn actor(&self) -> String {
         if !self.name.trim().is_empty() {
             return self.name.trim().to_owned();
         }
-        std::env::var("USERNAME").or_else(|_| std::env::var("USER")).unwrap_or_else(|_| "Relay".into())
+        std::env::var("USERNAME")
+            .or_else(|_| std::env::var("USER"))
+            .unwrap_or_else(|_| "Relay".into())
     }
 }
 pub fn hostname() -> String {
@@ -187,6 +236,18 @@ pub fn summary(v: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn old_profiles_migrate_without_losing_the_light_theme() {
+        let s: Settings =
+            serde_json::from_str(r#"{"servers":[],"selected":null,"light":true}"#).unwrap();
+        assert_eq!(s.theme(), "paper");
+        assert!(s.appearance.wrap_output);
+        assert!(s.cluster.is_empty());
+        let mut s = s;
+        s.appearance.theme = "forest".into();
+        let restored: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(restored.theme(), "forest");
+    }
     #[test]
     fn unicode_truncation() {
         assert_eq!(shorten("Привет мир", 7), "Привет…");
