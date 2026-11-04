@@ -1,3 +1,5 @@
+mod cluster_runtime;
+mod cluster_view;
 mod workspace;
 
 use crate::{
@@ -48,6 +50,8 @@ struct Chat {
     mode: String,
     effort: String,
     agent_role: String,
+    custom_prompt: String,
+    cluster_context: Value,
     permissions: Vec<Permission>,
     blocks: HashMap<usize, usize>,
     user_at: usize,
@@ -94,6 +98,8 @@ impl Chat {
             mode: "auto".into(),
             effort: "default".into(),
             agent_role: String::new(),
+            custom_prompt: String::new(),
+            cluster_context: Value::Null,
             permissions: vec![],
             blocks: HashMap::new(),
             user_at: 0,
@@ -115,6 +121,8 @@ struct Trust {
     answer: tokio::sync::oneshot::Sender<bool>,
 }
 pub struct RelayApp {
+    #[cfg(test)]
+    test_no_save: bool,
     settings: Settings,
     controller: Controller,
     events: mpsc::Receiver<Event>,
@@ -149,6 +157,10 @@ pub struct RelayApp {
     cluster_prompt: String,
     cluster_target: String,
     cluster_jobs: Vec<(String, String, String)>,
+    cluster_store: crate::cluster::Store,
+    cluster_calls: Vec<cluster_runtime::Pending>,
+    cluster_edit: Option<cluster_view::Editor>,
+    cluster_snapshot: Option<(u64, String, std::sync::Arc<crate::cluster::Run>)>,
     board_view: crate::board::BoardView,
     boards: HashMap<String, Value>,
     board_polled: Option<Instant>,
@@ -175,6 +187,8 @@ impl RelayApp {
             .and_then(|i| args.get(i + 1))
             .cloned();
         let mut app = Self {
+            #[cfg(test)]
+            test_no_save: false,
             settings,
             controller,
             events,
@@ -208,12 +222,21 @@ impl RelayApp {
             cluster_prompt: String::new(),
             cluster_target: String::new(),
             cluster_jobs: vec![],
+            cluster_store: Default::default(),
+            cluster_calls: vec![],
+            cluster_edit: None,
+            cluster_snapshot: None,
             board_view: Default::default(),
             boards: HashMap::new(),
             board_polled: None,
             downloads: Default::default(),
         };
+        if !demo {
+            app.load_cluster_sessions();
+        }
         if demo {
+            app.settings = Settings::default();
+            app.notice.clear();
             app.seed_demo();
             if args.iter().any(|a| a == "--demo-connect") {
                 app.editor = Some(Editor {
@@ -350,6 +373,7 @@ impl RelayApp {
         cc.egui_ctx.set_fonts(fonts);
         if demo {
             app.seed_workspace_demo(&cc.egui_ctx, &args);
+            app.seed_orchestration_preview(&cc.egui_ctx, &args);
         }
         app.theme(&cc.egui_ctx);
         app
@@ -428,6 +452,10 @@ impl RelayApp {
         ctx.set_style(style);
     }
     fn save(&mut self) {
+        #[cfg(test)]
+        if self.test_no_save {
+            return;
+        }
         if !self.demo {
             if let Err(e) = storage::save(&self.settings) {
                 self.notice = e.to_string();
@@ -751,6 +779,15 @@ impl RelayApp {
             return;
         }
         match kind {
+            "cluster_request" => {
+                self.cluster_request(server, value);
+                return;
+            }
+            "cluster_cancelled" => {
+                self.cluster_calls
+                    .retain(|p| p.server != server || p.request != value["id"]);
+                return;
+            }
             "artifact_status" => self.downloads.event(&server, &value),
             "desktop_request" => {
                 if self.desktop_requests.len() < 8
@@ -964,6 +1001,14 @@ impl RelayApp {
         let Some(k) = self.current_key() else {
             return;
         };
+        if let Some(run_id) = self.cluster_for_chat(&server.id, &self.chats[&k].sid) {
+            if let Some(r) = self.cluster_store.runs.iter().find(|r| r.id == run_id) {
+                if r.leader_sid != self.chats[&k].sid {
+                    self.notice = "Отправь уточнение руководителю команды.".into();
+                    return;
+                }
+            }
+        }
         let c = self.chats.get_mut(&k).unwrap();
         if c.busy {
             c.enqueue_draft();
@@ -972,10 +1017,21 @@ impl RelayApp {
         self.send_to_chat(server, k);
     }
     fn send_to_chat(&mut self, server: Server, k: String) {
+        if let Err(error) = self.prepare_cluster_chat(&server, &k) {
+            if let Some(c) = self.chats.get_mut(&k) {
+                c.error = error;
+                c.queue_paused = true;
+            }
+            return;
+        }
         if !self.connected(&server.id) {
             self.connect(server);
             return;
         }
+        let worker = self
+            .cluster_for_chat(&server.id, &self.chats[&k].sid)
+            .and_then(|id| self.cluster_store.runs.iter().find(|r| r.id == id))
+            .is_some_and(|r| r.leader_sid != self.chats[&k].sid);
         let c = self.chats.get_mut(&k).unwrap();
         if c.busy || c.loading || (c.draft.trim().is_empty() && c.images.is_empty()) {
             return;
@@ -998,7 +1054,7 @@ impl RelayApp {
             json!({"op":"_desktop_workspace","path":if server.local_control {server.local_workspace.clone()}else{None}}),
         );
         self.controller.send(&server.id,json!({"op":"_desktop_policy","sid":c.sid,"auto":server.local_control && c.mode=="auto"}));
-        let request = json!({"op":"prompt","sid":c.sid,"cwd":c.cwd,"text":text,"images":images,"files":files,"model":c.model,"mode":c.mode,"effort":c.effort,"agent_role":c.agent_role,"actor":self.settings.actor(),"desktop_enabled":(server.local_control && server.local_workspace.is_some()) || server.tests!="off","desktop_context":{"os":std::env::consts::OS,"workspace":server.local_workspace,"downloads":dirs::download_dir(),"auto":c.mode=="auto","local":server.local_control && server.local_workspace.is_some(),"tests":server.tests}});
+        let request = json!({"op":"prompt","sid":c.sid,"cwd":c.cwd,"text":text,"images":images,"files":files,"model":c.model,"mode":c.mode,"effort":c.effort,"agent_role":c.agent_role,"custom_prompt":c.custom_prompt,"cluster_context":c.cluster_context,"actor":self.settings.actor(),"desktop_enabled":!worker && ((server.local_control && server.local_workspace.is_some()) || server.tests!="off"),"desktop_context":{"os":std::env::consts::OS,"workspace":server.local_workspace,"downloads":dirs::download_dir(),"auto":c.mode=="auto","local":server.local_control && server.local_workspace.is_some(),"tests":server.tests}});
         if self.demo {
             c.error = "Это предпросмотр интерфейса. Добавь свой сервер для работы.".into();
             return;
@@ -1020,6 +1076,9 @@ impl RelayApp {
         c.draft.clear();
         c.blocks.clear();
         c.busy = true;
+        if c.cluster_context["role"] == "leader" {
+            c.queue_paused = false;
+        }
         c.error.clear();
         c.status = "Думает над ответом".into();
         if c.title == "Новая сессия" {
@@ -1417,7 +1476,9 @@ impl RelayApp {
                                     ui.spacing_mut().item_spacing.y = 2.;
                                     design::session_title(
                                         ui,
-                                        &session.title,
+                                        &self
+                                            .cluster_label(&server.id, &session.id)
+                                            .unwrap_or_else(|| session.title.clone()),
                                         if selected {
                                             p.text
                                         } else {
@@ -1529,6 +1590,31 @@ impl RelayApp {
                             .inner_margin(egui::Margin::symmetric(18, 9)),
                     )
                     .show_inside(ui, |ui| {
+                        if let (Some(server), Some(k)) = (self.server(), self.current_key()) {
+                            if let Some(c) = self.chats.get(&k) {
+                                if let Some(run_id) = self.cluster_for_chat(&server.id, &c.sid) {
+                                    let title =
+                                        self.cluster_label(&server.id, &c.sid).unwrap_or_default();
+                                    ui.horizontal_wrapped(|ui| {
+                                        design::chip(ui, &title, Icon::Cluster, p, true);
+                                        if design::button(
+                                            ui,
+                                            "Схема команды",
+                                            Some(Icon::Cluster),
+                                            Kind::Ghost,
+                                            p,
+                                            Vec2::ZERO,
+                                        )
+                                        .clicked()
+                                        {
+                                            self.cluster_store.selected = Some(run_id.clone());
+                                            self.cluster_open = true;
+                                        }
+                                    });
+                                    ui.add_space(5.);
+                                }
+                            }
+                        }
                         ui.horizontal(|ui| {
                             ui.set_min_height(28.);
                             let chat = self.current_key().and_then(|k| self.chats.get(&k));
@@ -1732,6 +1818,7 @@ impl RelayApp {
                                             range,
                                             busy,
                                             p,
+                                            &mut self.markdown,
                                         );
                                         continue;
                                     }
@@ -1741,15 +1828,24 @@ impl RelayApp {
                                 ui.push_id(index, |ui| match message.role.as_str() {
                                     "user" => {
                                         ui.add_space(6.);
-                                        user_message_bubble(
-                                            ui,
-                                            &message.text,
-                                            chat.sent_images
-                                                .get(&index)
-                                                .map(Vec::as_slice)
-                                                .unwrap_or(&[]),
-                                            p,
-                                        );
+                                        if message.text.starts_with("<relay-cluster-results>") {
+                                            crate::timeline::cluster_update_view(
+                                                ui,
+                                                &message.text,
+                                                p,
+                                                &mut self.markdown,
+                                            );
+                                        } else {
+                                            user_message_bubble(
+                                                ui,
+                                                &message.text,
+                                                chat.sent_images
+                                                    .get(&index)
+                                                    .map(Vec::as_slice)
+                                                    .unwrap_or(&[]),
+                                                p,
+                                            );
+                                        }
                                         ui.add_space(14.);
                                     }
                                     _ => {
@@ -1849,6 +1945,44 @@ impl RelayApp {
     }
     fn composer(&mut self, ui: &mut egui::Ui, k: &str, p: Palette) {
         let send_on_enter = self.settings.appearance.send_on_enter;
+        let sid = self.chats.get(k).map(|c| c.sid.clone()).unwrap_or_default();
+        if let Some(server) = self.server() {
+            if let Some(run_id) = self.cluster_for_chat(&server.id, &sid) {
+                if let Some(r) = self
+                    .cluster_store
+                    .runs
+                    .iter()
+                    .find(|r| r.id == run_id && r.leader_sid != sid)
+                {
+                    let target = (r.config.leader.server.clone(), r.leader_sid.clone());
+                    egui::Frame::new()
+                        .fill(p.side)
+                        .corner_radius(12.)
+                        .inner_margin(12)
+                        .show(ui, |ui| {
+                            label(
+                                ui,
+                                "Исполнитель выполняет поручение руководителя",
+                                13.,
+                                p.text,
+                            );
+                            if design::button(
+                                ui,
+                                "Написать руководителю",
+                                Some(Icon::Cluster),
+                                Kind::Secondary,
+                                p,
+                                Vec2::ZERO,
+                            )
+                            .clicked()
+                            {
+                                self.open_cluster_chat(&target.0, &target.1);
+                            }
+                        });
+                    return;
+                }
+            }
+        }
         let server = self.server().unwrap();
         let connected = self.connected(&server.id);
         let mut send = false;
@@ -2113,7 +2247,22 @@ impl RelayApp {
             self.controller.send(&server.id,json!({"op":"_desktop_policy","sid":chat.sid,"auto":server.local_control && current.1=="auto"}));
         }
         if previous != current {
-            if let Some(s) = self.settings.servers.iter_mut().find(|s| s.id == server.id) {
+            if let Some(r) = self
+                .cluster_store
+                .runs
+                .iter_mut()
+                .find(|r| r.config.leader.server == server.id && r.leader_sid == chat.sid)
+            {
+                r.config.leader.model = current.0.clone();
+                r.config.mode = current.1.clone();
+                r.config.leader.effort = current.2.clone();
+                if let Some(p) = &mut r.pending_config {
+                    p.leader.model = current.0;
+                    p.mode = current.1;
+                    p.leader.effort = current.2;
+                }
+                self.cluster_store.dirty = true;
+            } else if let Some(s) = self.settings.servers.iter_mut().find(|s| s.id == server.id) {
                 s.model = current.0;
                 s.mode = current.1;
                 s.effort = current.2;
@@ -3667,9 +3816,19 @@ fn reduce(c: &mut Chat, data: &Value) {
     }
 }
 impl eframe::App for RelayApp {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if !self.demo {
+            for r in &mut self.cluster_store.runs {
+                r.recover();
+            }
+            self.cluster_store.dirty = true;
+            let _ = self.cluster_store.save();
+        }
+    }
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         self.theme(ctx);
         self.poll();
+        self.cluster_tick();
         self.drain_queues();
         if !self.demo {
             if let Some(server) = self.settings.selected.as_ref() {
@@ -3750,6 +3909,7 @@ impl eframe::App for RelayApp {
         }
         self.dialogs(ctx);
         self.settings_panel(ctx);
+        self.cluster_settings(ctx);
         if self.chats.values().any(|c| c.busy) || self.remote.values().any(|r| r.connecting) {
             ctx.request_repaint_after(Duration::from_millis(16));
         }

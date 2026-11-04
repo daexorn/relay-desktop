@@ -6,6 +6,7 @@
 mod app;
 mod artifacts;
 mod board;
+mod cluster;
 mod connection;
 mod desktop;
 mod gametest;
@@ -13,11 +14,16 @@ mod images;
 mod limits;
 mod model;
 mod storage;
+mod templates;
 mod timeline;
 mod ui;
 
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("Relay {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     if let Some(i) = args.iter().position(|a| a == "--game-test") {
         // Debug entry: relay --game-test <scenario> <mods dir> <out dir>; writes <out>/result.json.
         let arg = |n: usize| args.get(i + n).cloned().unwrap_or_default();

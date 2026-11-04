@@ -3,6 +3,8 @@ use crate::{
     ui::{self as design, Palette, ACCENT},
 };
 use eframe::egui::{self, RichText};
+use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
+use serde_json::Value;
 use std::{collections::HashMap, ops::Range};
 
 #[derive(Debug, PartialEq)]
@@ -104,6 +106,12 @@ fn action_title(message: &Message) -> String {
         "WebSearch" | "WebFetch" => "Поиск в интернете",
         "mcp__relay_desktop__download_file" => "Скачивание на этот ПК",
         "mcp__relay_desktop__run_local_command" => "Команда на этом ПК",
+        "mcp__relay_cluster__dispatch_task" => "Назначение исполнителю",
+        "mcp__relay_cluster__wait_for_task" => "Ожидание результата",
+        "mcp__relay_cluster__task_status" => "Результат исполнителя",
+        "mcp__relay_cluster__list_workers" => "Состав команды",
+        "mcp__relay_cluster__cluster_status" => "Состояние команды",
+        "mcp__relay_cluster__cancel_task" => "Отмена задачи",
         _ => "Действие",
     };
     let file = message.input["file_path"]
@@ -122,6 +130,7 @@ pub fn show(
     range: Range<usize>,
     busy: bool,
     p: Palette,
+    cache: &mut CommonMarkCache,
 ) {
     let rows = actions(messages, range.clone());
     let errors = rows
@@ -140,6 +149,19 @@ pub fn show(
     );
     let error_color = egui::Color32::from_rgb(222, 143, 151);
     let width = ui.available_width().max(100.);
+    let detail_openness: f32 = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let failed = row.results.iter().any(|i| messages[*i].failed);
+            egui::collapsing_header::CollapsingState::load_with_default_open(
+                ui.ctx(),
+                id.with(index),
+                auto_errors && failed,
+            )
+            .openness(ui.ctx())
+        })
+        .sum();
     let (r, response) = ui.allocate_exact_size(egui::vec2(width, 38.), egui::Sense::click());
     let hover = ui.ctx().animate_bool_with_time(
         response.id.with("hover"),
@@ -208,7 +230,9 @@ pub fn show(
                 egui::ScrollArea::vertical()
                     .id_salt(id.with("journal"))
                     .max_height(420.)
-                    .min_scrolled_height((rows.len() as f32 * 54.).clamp(68., 360.))
+                    .min_scrolled_height(
+                        (rows.len() as f32 * 54. + detail_openness * 190.).clamp(68., 420.),
+                    )
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
                         for (index, row) in rows.iter().enumerate() {
@@ -281,10 +305,36 @@ pub fn show(
                                     }
                                     detail.show_body_unindented(ui, |ui| {
                                         if let Some(call) = row.call {
-                                            let text = model::summary(&messages[call].input);
+                                            let cluster = messages[call]
+                                                .tool
+                                                .starts_with("mcp__relay_cluster__");
+                                            let text = if cluster {
+                                                messages[call].input["task"]
+                                                    .as_str()
+                                                    .map(str::to_owned)
+                                                    .unwrap_or_else(|| {
+                                                        match messages[call].tool.as_str() {
+                                                            "mcp__relay_cluster__list_workers" => {
+                                                                "Состав и доступность исполнителей"
+                                                            }
+                                                            "mcp__relay_cluster__dispatch_task" => {
+                                                                "Назначение работы исполнителю"
+                                                            }
+                                                            "mcp__relay_cluster__cancel_task" => {
+                                                                "Отмена назначенной задачи"
+                                                            }
+                                                            _ => "Запрос результата исполнителя",
+                                                        }
+                                                        .into()
+                                                    })
+                                            } else {
+                                                model::summary(&messages[call].input)
+                                            };
                                             ui.horizontal(|ui| {
                                                 ui.label(
-                                                    RichText::new(if local {
+                                                    RichText::new(if cluster {
+                                                        "Команда"
+                                                    } else if local {
                                                         "Этот ПК"
                                                     } else {
                                                         "Сервер"
@@ -334,22 +384,14 @@ pub fn show(
                                                 .max_height(230.)
                                                 .auto_shrink([false, true])
                                                 .show(ui, |ui| {
-                                                    let label = egui::Label::new(
-                                                        RichText::new(text)
-                                                            .monospace()
-                                                            .size(11.5)
-                                                            .color(if messages[*result].failed {
-                                                                error_color
-                                                            } else {
-                                                                p.muted
-                                                            }),
-                                                    )
-                                                    .selectable(true);
-                                                    ui.add(if wrap {
-                                                        label.wrap()
-                                                    } else {
-                                                        label.extend()
-                                                    });
+                                                    result_view(
+                                                        ui,
+                                                        text,
+                                                        messages[*result].failed,
+                                                        p,
+                                                        cache,
+                                                        wrap,
+                                                    );
                                                 });
                                         }
                                     });
@@ -361,9 +403,281 @@ pub fn show(
     });
 }
 
+fn decoded(text: &str) -> Option<Value> {
+    fn unwrap(value: Value, depth: usize) -> Value {
+        if depth > 3 {
+            return value;
+        }
+        if let Some(items) = value
+            .as_array()
+            .or_else(|| value.get("content").and_then(Value::as_array))
+        {
+            let text = items
+                .iter()
+                .filter_map(|v| v["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            if let Ok(v) = serde_json::from_str(&text) {
+                return unwrap(v, depth + 1);
+            }
+        }
+        if value.get("result").is_some_and(Value::is_object)
+            && value.get("stdout").is_none()
+            && value.get("job").is_none()
+        {
+            return unwrap(value["result"].clone(), depth + 1);
+        }
+        value
+    }
+    serde_json::from_str(text).ok().map(|v| unwrap(v, 0))
+}
+fn status_label(value: &Value) -> &str {
+    match value.as_str().unwrap_or("") {
+        "queued" => "В очереди",
+        "running" => "В работе",
+        "waiting" => "Нужно подтверждение",
+        "cancelling" => "Останавливается",
+        "done" => "Ответ получен",
+        "failed" => "Ошибка",
+        "cancelled" => "Отменено",
+        "interrupted" => "Прервано",
+        _ => "Результат",
+    }
+}
+fn terminal(ui: &mut egui::Ui, text: &str, ink: egui::Color32, wrap: bool) {
+    let label = egui::Label::new(
+        RichText::new(clean_terminal(text))
+            .monospace()
+            .size(12.)
+            .color(ink),
+    )
+    .selectable(true);
+    ui.add(if wrap { label.wrap() } else { label.extend() });
+}
+fn clean_terminal(text: &str) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            for c in chars.by_ref() {
+                if ('@'..='~').contains(&c) {
+                    break;
+                }
+            }
+        } else if c != '\r' {
+            out.push(c);
+        }
+    }
+    out
+}
+pub fn result_view(
+    ui: &mut egui::Ui,
+    text: &str,
+    failed: bool,
+    p: Palette,
+    cache: &mut CommonMarkCache,
+    wrap: bool,
+) {
+    let error = egui::Color32::from_rgb(222, 143, 151);
+    if let Some(v) = decoded(text) {
+        if v["job"].is_string() {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new(v["worker_name"].as_str().unwrap_or("Исполнитель"))
+                        .size(12.)
+                        .color(p.text),
+                );
+                ui.label(RichText::new(status_label(&v["state"])).size(11.).color(
+                    if v["state"] == "done" {
+                        crate::ui::GREEN
+                    } else if v["state"] == "failed" {
+                        error
+                    } else {
+                        ACCENT
+                    },
+                ));
+            });
+            if let Some(title) = v["title"].as_str() {
+                ui.add(egui::Label::new(RichText::new(title).size(13.)).wrap());
+            }
+            if let Some(message) = v["error"].as_str().filter(|s| !s.is_empty()) {
+                ui.label(RichText::new(message).size(12.).color(error));
+            }
+            if let Some(result) = v["result"].as_str().filter(|s| !s.is_empty()) {
+                ui.add_space(6.);
+                CommonMarkViewer::new().show(ui, cache, result);
+            }
+            return;
+        }
+        if let Some(workers) = v["workers"].as_array() {
+            for w in workers {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new(w["name"].as_str().unwrap_or("Исполнитель"))
+                            .size(12.)
+                            .color(p.text),
+                    );
+                    ui.label(
+                        RichText::new(if w["connected"] == true {
+                            if w["busy"] == true {
+                                "Работает"
+                            } else {
+                                "Готов"
+                            }
+                        } else {
+                            "Не подключён"
+                        })
+                        .size(11.)
+                        .color(p.muted),
+                    );
+                    if let Some(host) = w["host"].as_str() {
+                        ui.label(RichText::new(host).size(11.).color(p.muted));
+                    }
+                });
+            }
+            return;
+        }
+        if let Some(tasks) = v["tasks"].as_array() {
+            for t in tasks {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new(status_label(&t["state"]))
+                            .size(11.)
+                            .color(p.muted),
+                    );
+                    ui.label(RichText::new(t["title"].as_str().unwrap_or("Задача")).size(12.));
+                });
+            }
+            return;
+        }
+        if v.get("stdout").is_some() || v.get("stderr").is_some() {
+            let ok = v["ok"].as_bool().unwrap_or(!failed);
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(if ok {
+                        "Выполнено"
+                    } else {
+                        "Ошибка выполнения"
+                    })
+                    .size(11.5)
+                    .color(if ok { crate::ui::GREEN } else { error }),
+                );
+                if let Some(code) = v["exit_code"].as_i64() {
+                    ui.label(
+                        RichText::new(format!("код {code}"))
+                            .size(10.5)
+                            .color(p.muted),
+                    );
+                }
+                if design::button(
+                    ui,
+                    "Копировать вывод",
+                    Some(design::Icon::Copy),
+                    design::Kind::Ghost,
+                    p,
+                    egui::vec2(0., 24.),
+                )
+                .clicked()
+                {
+                    ui.ctx().copy_text(format!(
+                        "{}{}",
+                        v["stdout"].as_str().unwrap_or(""),
+                        v["stderr"].as_str().unwrap_or("")
+                    ));
+                }
+            });
+            if let Some(stdout) = v["stdout"].as_str().filter(|s| !s.is_empty()) {
+                terminal(ui, stdout, p.text, wrap);
+            }
+            if let Some(stderr) = v["stderr"].as_str().filter(|s| !s.is_empty()) {
+                ui.add_space(6.);
+                egui::Frame::new()
+                    .fill(error.gamma_multiply(0.07))
+                    .corner_radius(7.)
+                    .inner_margin(8)
+                    .show(ui, |ui| {
+                        terminal(ui, stderr, error, wrap);
+                    });
+            }
+            if v["output_truncated"] == true {
+                ui.label(
+                    RichText::new("Показана часть вывода")
+                        .size(10.5)
+                        .color(p.muted),
+                );
+            }
+            return;
+        }
+        if v["ok"] == false {
+            if let Some(message) = v["message"].as_str() {
+                ui.label(RichText::new(message).size(12.).color(error));
+                return;
+            }
+        }
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.label(
+            RichText::new(if failed { "Ошибка" } else { "Вывод" })
+                .size(11.)
+                .color(if failed { error } else { p.muted }),
+        );
+        if design::button(
+            ui,
+            "Копировать вывод",
+            Some(design::Icon::Copy),
+            design::Kind::Ghost,
+            p,
+            egui::vec2(0., 24.),
+        )
+        .clicked()
+        {
+            ui.ctx().copy_text(clean_terminal(text));
+        }
+    });
+    terminal(ui, text, if failed { error } else { p.text }, wrap);
+}
+pub fn cluster_update_view(ui: &mut egui::Ui, text: &str, p: Palette, cache: &mut CommonMarkCache) {
+    let body = text
+        .strip_prefix("<relay-cluster-results>")
+        .and_then(|s| s.split_once("</relay-cluster-results>").map(|(v, _)| v));
+    egui::Frame::new()
+        .fill(p.surface)
+        .stroke(egui::Stroke::new(1.0_f32, ACCENT.gamma_multiply(0.35)))
+        .corner_radius(12.)
+        .inner_margin(14)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                design::chip(
+                    ui,
+                    "Результаты исполнителей",
+                    design::Icon::Cluster,
+                    p,
+                    true,
+                );
+            });
+            if let Some(items) = body.and_then(|s| serde_json::from_str::<Vec<Value>>(s).ok()) {
+                for item in items {
+                    ui.add_space(8.);
+                    result_view(ui, &item.to_string(), false, p, cache, true);
+                }
+            } else {
+                ui.label(RichText::new("Результаты переданы руководителю").color(p.muted));
+            }
+        });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn nested_mcp_results_decode_without_losing_real_exit_status() {
+        let raw=serde_json::json!([{"type":"text","text":serde_json::json!({"ok":false,"exit_code":9,"stdout":"out","stderr":"failure"}).to_string()}]).to_string();
+        let result = decoded(&raw).unwrap();
+        assert_eq!(result["exit_code"], 9);
+        assert_eq!(result["stderr"], "failure");
+        assert_eq!(clean_terminal("\u{1b}[32mГотово\u{1b}[0m\r\n"), "Готово\n");
+    }
     fn message(role: &str, text: &str, id: &str) -> Message {
         Message {
             role: role.into(),

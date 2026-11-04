@@ -397,6 +397,8 @@ class Run:
         self.owner, self.sid, self.cwd = owner, sid, cwd
         self.model, self.mode, self.effort = model, mode, effort
         self.agent_role = getattr(owner, "agent_role", "")
+        self.custom_prompt = getattr(owner, "custom_prompt", "")
+        self.cluster_context = getattr(owner, "cluster_context", {})
         self.desktop_enabled = False
         self.desktop_context = getattr(owner,"desktop_context", "")
         self.busy = False
@@ -413,7 +415,12 @@ class Run:
         system_prompt="Relay supports downloadable server files in chat. When the user requests a built mod or other generated artifact, include a Markdown download link [filename](absolute_server_file_path) for the real existing file. Verify it exists before offering it. A bare filename or a statement that the build succeeded is not file delivery. Never claim the file was delivered to the PC unless the transfer tool actually succeeded."
         system_prompt += " " + AGENT_ROLES.get(self.agent_role, "")
         servers = {}
-        if getattr(owner, "board_file", None):
+        if self.cluster_context.get("role") == "leader":
+            servers["relay_cluster"] = owner.cluster.config(sid, self.cluster_context["run"])
+            system_prompt += " " + owner.cluster_instructions
+        elif self.cluster_context.get("role") == "worker":
+            system_prompt += " You are a worker directed by the lead Claude session of this Relay cluster. Complete only the assigned task and constraints; report concrete changes, artifacts, failures and checks to the lead. If blocked, return the exact blocker and question to the lead rather than asking the user directly. Do not invent progress or delegate tasks to unconfigured agents. Other workers may be editing the same project: preserve concurrent changes. Unless the leader requests another format, finish with a concise handoff: summary, changed files/commits, artifacts, checks actually run or skipped, and unresolved issues."
+        if getattr(owner, "board_file", None) and self.cluster_context.get("role")!="worker":
             actor = getattr(owner, "actor", "") or "Relay"
             servers["relay_board"] = {"type": "stdio", "command": sys.executable, "args": [str(owner.board_file), "mcp"],
                                       "env": {"RELAY_BOARD_ACTOR": f"Claude · {actor}", "RELAY_BOARD_NAME": "sbrp"}}
@@ -434,6 +441,9 @@ class Run:
             env["MCP_TOOL_TIMEOUT"]="2000000"
         if servers:
             args += ["--mcp-config", json.dumps({"mcpServers": servers})]
+        if self.custom_prompt:
+            system_prompt += "\n\nUser's custom instructions for this cluster/session:\n" + self.custom_prompt
+        if len(system_prompt.encode("utf-8"))>120000:raise ValueError("Промпт сессии слишком длинный. Сократи общие инструкции или вставки.")
         args += ["--append-system-prompt",system_prompt]
         self.process = subprocess.Popen(args, cwd=cwd, env=env,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -476,7 +486,10 @@ class Run:
                     req = data.get("request", {})
                     request_id = data.get("request_id", "")
                     if req.get("subtype") == "can_use_tool":
-                        if (self.desktop_enabled and req.get("tool_name") in ("mcp__relay_desktop__download_file","mcp__relay_desktop__run_local_command","mcp__relay_desktop__minecraft_test")) or str(req.get("tool_name","")).startswith("mcp__relay_board__"):
+                        if self.cluster_context.get("role")=="worker" and req.get("tool_name")=="AskUserQuestion":
+                            self.write({"type":"control_response","response":{"subtype":"success","request_id":request_id,"response":{"behavior":"deny","message":"Report the blocker and your question to the lead Claude session in your final handoff. The lead will provide the next assignment or ask the user if needed."}}})
+                            continue
+                        if (self.desktop_enabled and req.get("tool_name") in ("mcp__relay_desktop__download_file","mcp__relay_desktop__run_local_command","mcp__relay_desktop__minecraft_test")) or str(req.get("tool_name","")).startswith("mcp__relay_board__") or (self.mode=="auto" and self.cluster_context.get("role")=="leader" and req.get("tool_name") in tuple("mcp__relay_cluster__"+t for t in ("list_workers","dispatch_task","task_status","wait_for_task","cancel_task","cluster_status"))):
                             # Actual authorization is enforced by the desktop UI
                             # or its locally enabled automatic policy, not here.
                             self.write({"type":"control_response","response":{"subtype":"success","request_id":request_id,"response":{"behavior":"allow","updatedInput":req.get("input",{})}}})
@@ -527,6 +540,7 @@ class Run:
         self.write({"type": "control_response", "response": {"subtype": "success", "request_id": request_id, "response": response}})
 
     def stop(self):
+        if getattr(self.owner,"cluster",None):self.owner.cluster.cancel(self.sid)
         if getattr(self.owner,"desktop",None):self.owner.desktop.cancel(self.sid)
         if not self.busy:
             return
@@ -540,6 +554,7 @@ class Run:
         threading.Thread(target=fallback, daemon=True).start()
 
     def close(self):
+        if getattr(self.owner,"cluster",None):self.owner.cluster.cancel(self.sid,revoke=True)
         if getattr(self.owner,"desktop",None):self.owner.desktop.cancel(self.sid)
         self.closed = True
         if self.process.poll() is None:
@@ -631,6 +646,10 @@ class Bridge:
         self.usage = UsageState()
         self.files = FileTransfers(self.send)
         self.desktop = None
+        self.cluster = None
+        self.cluster_instructions = ""
+        self.cluster_context = {}
+        self.custom_prompt = ""
         self.desktop_requested = False
         self.desktop_context = ""
         self.actor = ""
@@ -698,7 +717,24 @@ class Bridge:
                 agent_role = req.get("agent_role", "")
                 if agent_role not in ("", *AGENT_ROLES):
                     raise ValueError("Неизвестная роль агента.")
+                custom_prompt=req.get("custom_prompt","")
+                if not isinstance(custom_prompt,str) or len(custom_prompt.encode("utf-8"))>96000 or "\x00" in custom_prompt:
+                    raise ValueError("Некорректный промпт сессии.")
+                cluster_context=req.get("cluster_context") or {}
+                if not isinstance(cluster_context,dict) or cluster_context.get("role","") not in ("","leader","worker"):
+                    raise ValueError("Некорректный контекст кластера.")
+                if cluster_context.get("role"):
+                    cluster_context={"run":valid_id(cluster_context.get("run")),"role":cluster_context["role"],"name":str(cluster_context.get("name", ""))[:160]}
                 with self.run_lock:
+                    self.custom_prompt=custom_prompt
+                    self.cluster_context=cluster_context
+                    if cluster_context.get("role")=="leader" and self.cluster is None:
+                        source=globals().get("CLUSTER_SOURCE")
+                        if not source:raise ValueError("Обнови Relay для управления исполнителями.")
+                        namespace={"__name__":"relay_cluster_adapter","SOURCE":source}
+                        exec(source,namespace)
+                        self.cluster=namespace["RelayCluster"](self.send)
+                        self.cluster_instructions=namespace["LEADER_INSTRUCTIONS"]
                     self.agent_role = agent_role
                     desktop_enabled=bool(req.get("desktop_enabled",False))
                     if desktop_enabled and self.desktop is None:
@@ -714,7 +750,7 @@ class Bridge:
                     run = self.runs.get(sid)
                     if run and run.busy:
                         raise ValueError("Дождись ответа Claude или останови его.")
-                    if run and (run.closed or run.process.poll() is not None or (run.cwd, run.model, run.mode, run.effort, getattr(run,"desktop_enabled",False), getattr(run,"desktop_context",""), getattr(run,"agent_role","")) != (cwd, model, mode, effort, desktop_enabled, self.desktop_context, agent_role)):
+                    if run and (run.closed or run.process.poll() is not None or (run.cwd, run.model, run.mode, run.effort, getattr(run,"desktop_enabled",False), getattr(run,"desktop_context",""), getattr(run,"agent_role",""), getattr(run,"custom_prompt",""), getattr(run,"cluster_context",{})) != (cwd, model, mode, effort, desktop_enabled, self.desktop_context, agent_role, custom_prompt, cluster_context)):
                         run.close()
                         self.runs.pop(sid, None)
                         run = None
@@ -736,6 +772,8 @@ class Bridge:
                     saved = store_files(sid, decoded)
                     text += "\n\n<relay-files>\n" + json.dumps(saved, ensure_ascii=False) + "\n</relay-files>"
                 run.prompt(text, images)
+            elif op == "cluster_reply":
+                if self.cluster:self.cluster.result(valid_id(req.get("id")),valid_id(req.get("sid")),valid_id(req.get("run")),req.get("result"))
             elif op == "permission":
                 run = self.runs.get(valid_id(req.get("sid")))
                 if run:
@@ -775,6 +813,7 @@ class Bridge:
     def close(self):
         for run in list(self.runs.values()):
             run.close()
+        if self.cluster:self.cluster.close()
         if self.desktop:self.desktop.close()
         self.files.close()
 

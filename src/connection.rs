@@ -78,6 +78,12 @@ pub struct Controller {
     generations: HashMap<String, u64>,
 }
 impl Controller {
+    #[cfg(test)]
+    pub fn mock_host(&mut self, id: &str) -> async_mpsc::UnboundedReceiver<Value> {
+        let (tx, rx) = async_mpsc::unbounded_channel();
+        self.channels.insert(id.into(), tx);
+        rx
+    }
     pub fn new(ctx: egui::Context) -> (Self, mpsc::Receiver<Event>) {
         let (tx, rx) = mpsc::channel();
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -251,9 +257,10 @@ async fn run(
             format!(
                 "python3 -u -c {}",
                 shell_quote(&format!(
-                    "DESKTOP_SOURCE = {}\nBOARD_SOURCE = {}\n{}",
+                    "DESKTOP_SOURCE = {}\nBOARD_SOURCE = {}\nCLUSTER_SOURCE = {}\n{}",
                     serde_json::to_string(include_str!("../bridge/desktop_mcp.py"))?,
                     serde_json::to_string(include_str!("../bridge/board.py"))?,
+                    serde_json::to_string(include_str!("../bridge/cluster_mcp.py"))?,
                     include_str!("../bridge/relay_bridge.py")
                 ))
             ),

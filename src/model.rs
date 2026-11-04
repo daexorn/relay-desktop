@@ -108,6 +108,10 @@ pub struct Settings {
     pub appearance: Appearance,
     #[serde(default)]
     pub cluster: Vec<AgentNode>,
+    #[serde(default)]
+    pub orchestrators: Vec<crate::cluster::Config>,
+    #[serde(default)]
+    pub prompt_snippets: Vec<crate::templates::Snippet>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -219,6 +223,7 @@ pub fn summary(v: &Value) -> String {
         "file_path",
         "path",
         "pattern",
+        "task",
         "description",
         "query",
     ] {

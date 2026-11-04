@@ -166,6 +166,30 @@ class ProtocolTests(unittest.TestCase):
         args=run.process.args
         self.assertIn('review agent',args[args.index('--append-system-prompt')+1])
 
+    def test_leader_gets_cluster_tools_and_custom_prompt_but_workers_do_not(self):
+        source=(Path(__file__).parents[1]/'bridge/cluster_mcp.py').read_text()
+        run_id=str(uuid.uuid4())
+        with mock.patch.object(bridge,'CLUSTER_SOURCE',source,create=True):
+            self.host.dispatch({'op':'prompt','sid':self.sid,'cwd':str(self.root),'text':'test','mode':'manual','cluster_context':{'run':run_id,'role':'leader'},'custom_prompt':'Follow my project conventions.'})
+            self.wait('permission');leader=self.host.runs[self.sid]
+            self.assertIn('Follow my project conventions.',leader.process.args[leader.process.args.index('--append-system-prompt')+1])
+            configs=json.loads(leader.process.args[leader.process.args.index('--mcp-config')+1])
+            self.assertIn('relay_cluster',configs['mcpServers'])
+            sid=str(uuid.uuid4())
+            self.host.dispatch({'op':'prompt','sid':sid,'cwd':str(self.root),'text':'test','mode':'manual','cluster_context':{'run':run_id,'role':'worker'}})
+            self.wait('permission');worker=self.host.runs[sid]
+            if '--mcp-config' in worker.process.args:
+                self.assertNotIn('relay_cluster',json.loads(worker.process.args[worker.process.args.index('--mcp-config')+1])['mcpServers'])
+            self.assertIn('worker directed by the lead',worker.process.args[worker.process.args.index('--append-system-prompt')+1])
+
+    def test_worker_returns_questions_to_the_leader_instead_of_prompting_the_user(self):
+        question=FAKE.replace("else 'Edit'", "else ('AskUserQuestion' if r.get('message',{}).get('content',[{}])[0].get('text')=='worker-question' else 'Edit')")
+        self.cli.write_text(question)
+        self.host.dispatch({'op':'prompt','sid':self.sid,'cwd':str(self.root),'text':'worker-question','mode':'manual','cluster_context':{'run':str(uuid.uuid4()),'role':'worker'}})
+        event=self.wait('claude')
+        self.assertEqual(event['data']['message']['content'][0]['text'],'deny')
+        self.assertFalse(self.host.runs[self.sid].pending)
+
     def test_unknown_cluster_role_does_not_start_a_process(self):
         self.host.dispatch({'op':'prompt','sid':self.sid,'cwd':str(self.root),'text':'test','agent_role':'unknown'})
         event=self.wait('error')

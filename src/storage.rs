@@ -44,6 +44,36 @@ pub fn save(settings: &Settings) -> Result<()> {
     fs::rename(temp, path)?;
     Ok(())
 }
+pub fn save_private_json(name: &str, value: &impl serde::Serialize) -> Result<()> {
+    anyhow::ensure!(name == "cluster-sessions.json", "Unknown store");
+    let dir = directory();
+    fs::create_dir_all(&dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
+    }
+    let bytes = serde_json::to_vec_pretty(value)?;
+    anyhow::ensure!(
+        bytes.len() <= 64 * 1024 * 1024,
+        "История кластера превышает 64 МБ."
+    );
+    let path = dir.join(name);
+    let temp = dir.join("cluster-sessions.pending");
+    fs::write(&temp, bytes)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&temp, fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(windows)]
+    if path.exists() {
+        fs::copy(&path, dir.join("cluster-sessions.backup.json"))?;
+        fs::remove_file(&path)?;
+    }
+    fs::rename(temp, path)?;
+    Ok(())
+}
 fn entry(id: &str) -> Result<keyring::Entry> {
     Ok(keyring::Entry::new("dev.relay.desktop", id)?)
 }
