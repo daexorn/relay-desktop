@@ -820,6 +820,15 @@ impl RelayApp {
             return;
         }
         let kind = value["type"].as_str().unwrap_or("");
+        // A hover-prefetch can fail after deletion was already acknowledged.
+        // Its late error belongs to the retired conversation, not the new one.
+        if kind == "error"
+            && value["sid"]
+                .as_str()
+                .is_some_and(|sid| self.deleted_sessions.contains(&key(&server, sid)))
+        {
+            return;
+        }
         if matches!(kind, "upload_progress" | "upload_complete") {
             if let Some(c) = value["sid"]
                 .as_str()

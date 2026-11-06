@@ -1019,6 +1019,12 @@ mod tests {
         );
         assert!(!app.chats.contains_key(&key(&a.id, &sid)));
         assert_eq!(app.remote[&b.id].sessions[0].id, sid);
+        app.notice = "Current notification".into();
+        app.data(
+            a.id.clone(),
+            json!({"type":"error","op":"history","sid":sid,"message":"Late prefetch failure"}),
+        );
+        assert_eq!(app.notice, "Current notification");
     }
     #[test]
     fn busy_session_deletion_is_blocked_and_idle_cluster_gets_a_fresh_session() {
