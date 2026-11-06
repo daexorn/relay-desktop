@@ -1,5 +1,6 @@
 mod cluster_runtime;
 mod cluster_view;
+mod session_actions;
 mod workspace;
 
 use crate::{
@@ -42,6 +43,7 @@ struct Chat {
     draft: String,
     images: Vec<Attachment>,
     busy: bool,
+    upload_progress: Option<(u64, u64)>,
     loading: bool,
     loaded: bool,
     status: String,
@@ -64,6 +66,24 @@ struct QueuedPrompt {
     files: Vec<Attachment>,
 }
 impl Chat {
+    fn restore_failed_upload(&mut self) {
+        if self.upload_progress.take().is_none() {
+            return;
+        }
+        if self.user_at + 1 == self.messages.len() && self.messages[self.user_at].role == "user" {
+            let text = self.messages.pop().unwrap().text;
+            let files = self.sent_images.remove(&self.user_at).unwrap_or_default();
+            if self.draft.is_empty() && self.images.is_empty() {
+                self.draft = text;
+                self.images = files;
+            } else {
+                self.queue.push_front(QueuedPrompt { text, files });
+            }
+        }
+        self.busy = false;
+        self.queue_paused = true;
+        self.status.clear();
+    }
     fn enqueue_draft(&mut self) -> bool {
         if self.draft.trim().is_empty() && self.images.is_empty() {
             return false;
@@ -90,6 +110,7 @@ impl Chat {
             draft: String::new(),
             images: vec![],
             busy: false,
+            upload_progress: None,
             loading: false,
             loaded: false,
             status: String::new(),
@@ -129,6 +150,8 @@ pub struct RelayApp {
     remote: HashMap<String, Remote>,
     chats: HashMap<String, Chat>,
     selected_chat: HashMap<String, String>,
+    delete_chat: Option<session_actions::DeleteChat>,
+    deleted_sessions: std::collections::HashSet<String>,
     search: String,
     editor: Option<Editor>,
     trust: Option<Trust>,
@@ -195,6 +218,8 @@ impl RelayApp {
             remote: HashMap::new(),
             chats: HashMap::new(),
             selected_chat: HashMap::new(),
+            delete_chat: None,
+            deleted_sessions: Default::default(),
             search: String::new(),
             editor: None,
             trust: None,
@@ -726,6 +751,11 @@ impl RelayApp {
                     self.remote.entry(server).or_default().connecting = false;
                 }
                 Event::Disconnected { server } => {
+                    if let Some(dialog) = self.delete_chat.as_mut().filter(|d| d.server == server) {
+                        dialog.pending = false;
+                        dialog.error =
+                            "Подключение прервалось. Подключись и повтори удаление.".into();
+                    }
                     self.downloads.disconnected(&server);
                     let r = self.remote.entry(server.clone()).or_default();
                     self.desktop_requests.retain(|(s, _)| s != &server);
@@ -736,6 +766,7 @@ impl RelayApp {
                             if c.busy {
                                 c.error="Подключение прервалось. Подключись снова, чтобы продолжить эту сессию.".into();
                             }
+                            c.restore_failed_upload();
                             c.busy = false;
                             c.queue_paused = true;
                             c.loading = false;
@@ -752,13 +783,27 @@ impl RelayApp {
                 } => {
                     if let Some(c) = self.chats.get_mut(&key(&server, &sid)) {
                         for a in images {
-                            if c.images.len() < 8
+                            let inline = if a.source["type"] == "file" {
+                                0
+                            } else {
+                                a.bytes
+                            };
+                            let inline_total = c
+                                .images
+                                .iter()
+                                .filter(|f| f.source["type"] != "file")
+                                .map(|f| f.bytes)
+                                .sum::<usize>();
+                            if c.images.len() < images::MAX_ATTACHMENTS
                                 && c.images.iter().map(|f| f.bytes).sum::<usize>() + a.bytes
-                                    <= 12 * 1024 * 1024
+                                    <= images::MAX_ATTACHMENT_BYTES
+                                && inline_total + inline <= images::MAX_INLINE_BYTES
                             {
                                 c.images.push(a)
                             } else {
-                                c.error = "До восьми файлов общим размером 12 МБ.".into();
+                                c.error = if inline_total + inline > images::MAX_INLINE_BYTES {
+                                    "Изображения в сообщении — до 16 МБ. Остальные файлы — до 512 МБ."
+                                } else { "До восьми вложений общим размером 512 МБ." }.into();
                             }
                         }
                         if !errors.is_empty() {
@@ -771,7 +816,28 @@ impl RelayApp {
         }
     }
     fn data(&mut self, server: String, value: Value) {
+        if self.deletion_event(&server, &value) {
+            return;
+        }
         let kind = value["type"].as_str().unwrap_or("");
+        if matches!(kind, "upload_progress" | "upload_complete") {
+            if let Some(c) = value["sid"]
+                .as_str()
+                .and_then(|sid| self.chats.get_mut(&key(&server, sid)))
+                .filter(|c| c.upload_progress.is_some())
+            {
+                if kind == "upload_complete" {
+                    c.upload_progress = None;
+                    c.status = "Думает над ответом".into();
+                } else if let (Some(sent), Some(total)) =
+                    (value["sent"].as_u64(), value["total"].as_u64())
+                {
+                    c.upload_progress = Some((sent, total));
+                    c.status = "Отправка файлов".into();
+                }
+            }
+            return;
+        }
         if kind == "error" && value["op"] == "sessions" {
             let remote = self.remote.entry(server).or_default();
             remote.sessions_error = "Не удалось загрузить сессии. Повторяем…".into();
@@ -880,6 +946,7 @@ impl RelayApp {
                     .iter()
                     .filter_map(|row| serde_json::from_value::<Session>(row.clone()).ok())
                     .filter(|s| !s.id.is_empty())
+                    .filter(|s| !self.deleted_sessions.contains(&key(&server, &s.id)))
                     .collect();
                 let remote = self.remote.entry(server.clone()).or_default();
                 remote.sessions = sessions.clone();
@@ -966,6 +1033,9 @@ impl RelayApp {
                             c.permissions.clear();
                         }
                         "error" => {
+                            if value["upload_failed"] == true {
+                                c.restore_failed_upload();
+                            }
                             c.error = value["message"]
                                 .as_str()
                                 .unwrap_or("Не удалось выполнить действие.")
@@ -1017,6 +1087,16 @@ impl RelayApp {
         self.send_to_chat(server, k);
     }
     fn send_to_chat(&mut self, server: Server, k: String) {
+        if self
+            .delete_chat
+            .as_ref()
+            .is_some_and(|d| d.pending && key(&d.server, &d.session.id) == k)
+        {
+            if let Some(c) = self.chats.get_mut(&k) {
+                c.queue_paused = true;
+            }
+            return;
+        }
         if let Err(error) = self.prepare_cluster_chat(&server, &k) {
             if let Some(c) = self.chats.get_mut(&k) {
                 c.error = error;
@@ -1059,6 +1139,7 @@ impl RelayApp {
             c.error = "Это предпросмотр интерфейса. Добавь свой сервер для работы.".into();
             return;
         }
+        let uploading = crate::uploads::needed(&request);
         if !self.controller.send(&server.id, request) {
             c.error = "Подключись к серверу перед отправкой.".into();
             return;
@@ -1076,11 +1157,18 @@ impl RelayApp {
         c.draft.clear();
         c.blocks.clear();
         c.busy = true;
+        c.upload_progress =
+            uploading.then(|| (0, files.iter().filter_map(|f| f["bytes"].as_u64()).sum()));
         if c.cluster_context["role"] == "leader" {
             c.queue_paused = false;
         }
         c.error.clear();
-        c.status = "Думает над ответом".into();
+        c.status = if uploading {
+            "Отправка файлов"
+        } else {
+            "Думает над ответом"
+        }
+        .into();
         if c.title == "Новая сессия" {
             c.title = model::shorten(&c.messages[c.user_at].text, 60);
         }
@@ -1474,15 +1562,21 @@ impl RelayApp {
                                 .show(ui, |ui| {
                                     ui.set_width(ui.available_width().max(120.));
                                     ui.spacing_mut().item_spacing.y = 2.;
-                                    design::session_title(
-                                        ui,
-                                        &self
-                                            .cluster_label(&server.id, &session.id)
-                                            .unwrap_or_else(|| session.title.clone()),
-                                        if selected {
-                                            p.text
-                                        } else {
-                                            design::mix(p.text, p.muted, 0.25)
+                                    ui.allocate_ui_with_layout(
+                                        Vec2::new((ui.available_width() - 28.).max(60.), 0.),
+                                        Layout::top_down(Align::Min),
+                                        |ui| {
+                                            design::session_title(
+                                                ui,
+                                                &self
+                                                    .cluster_label(&server.id, &session.id)
+                                                    .unwrap_or_else(|| session.title.clone()),
+                                                if selected {
+                                                    p.text
+                                                } else {
+                                                    design::mix(p.text, p.muted, 0.25)
+                                                },
+                                            );
                                         },
                                     );
                                     ui.horizontal(|ui| {
@@ -1490,8 +1584,9 @@ impl RelayApp {
                                         let folder = folder_name(&session.cwd);
                                         let meta =
                                             format!("{folder} · {}", relative(session.modified));
-                                        let width =
-                                            ui.available_width() - if busy { 32. } else { 0. };
+                                        let width = ui.available_width()
+                                            - 28.
+                                            - if busy { 32. } else { 0. };
                                         let mut job = egui::text::LayoutJob::simple(
                                             meta,
                                             FontId::proportional(11.5),
@@ -1531,12 +1626,61 @@ impl RelayApp {
                                     design::mix(p.side, p.line, t.max(hover * 0.55)),
                                 ),
                             );
+                            let trash_rect = egui::Rect::from_min_size(
+                                egui::pos2(row.rect.right() - 30., row.rect.top() + 4.),
+                                Vec2::splat(24.),
+                            );
+                            let reason = self.deletion_blocked(&server.id, &session.id);
+                            let trash = ui.interact(
+                                trash_rect,
+                                response.id.with("delete"),
+                                egui::Sense::click(),
+                            );
+                            if trash.hovered() {
+                                ui.painter().rect_filled(
+                                    trash_rect,
+                                    6.,
+                                    design::RED.gamma_multiply(0.12),
+                                );
+                            }
+                            design::icon(
+                                ui.painter(),
+                                trash_rect.shrink(3.),
+                                Icon::Trash,
+                                if trash.hovered() {
+                                    design::RED
+                                } else {
+                                    p.muted.gamma_multiply(0.65)
+                                },
+                            );
+                            let mut delete = trash
+                                .on_hover_text(reason.unwrap_or("Удалить сессию"))
+                                .clicked();
+                            response.context_menu(|ui| {
+                                let button = ui.add_enabled(
+                                    reason.is_none(),
+                                    egui::Button::new("Удалить сессию"),
+                                );
+                                if button
+                                    .on_hover_text(
+                                        reason.unwrap_or("Удалить историю этой сессии с сервера"),
+                                    )
+                                    .clicked()
+                                {
+                                    delete = true;
+                                    ui.close_menu();
+                                }
+                            });
+                            if delete {
+                                self.request_delete(&server.id, session.clone());
+                            }
                             if response.hovered() {
                                 self.prefetch(&server.id, &session);
                             }
                             if response
                                 .on_hover_text(format!("{}\n{}", session.title, session.cwd))
                                 .clicked()
+                                && !delete
                             {
                                 self.select_chat(session);
                             }
@@ -2005,6 +2149,19 @@ impl RelayApp {
         let mut tests = server.tests.clone();
         self.game_test_cards(ui, &server.id, p);
         let chat = self.chats.get_mut(k).unwrap();
+        if let Some((sent, total)) = chat.upload_progress {
+            let progress = sent as f32 / total.max(1) as f32;
+            ui.add(
+                egui::ProgressBar::new(progress.clamp(0., 1.))
+                    .desired_width(ui.available_width())
+                    .text(format!(
+                        "Отправка файлов · {:.1} / {:.1} МБ",
+                        sent as f64 / 1048576.,
+                        total as f64 / 1048576.
+                    )),
+            );
+            ui.add_space(6.);
+        }
         if !chat.queue.is_empty() {
             egui::Frame::new()
                 .fill(p.side)
@@ -2812,14 +2969,18 @@ impl RelayApp {
                 }
             }
         }
-        let visible =
-            self.editor.is_some() || self.trust.is_some() || self.folder_open || self.close_confirm;
+        let visible = self.editor.is_some()
+            || self.trust.is_some()
+            || self.folder_open
+            || self.close_confirm
+            || self.delete_chat.is_some();
         let modal_t = ctx.animate_bool_with_time_and_easing(
             egui::Id::new("modal-fade"),
             visible,
             0.28,
             egui::emath::easing::cubic_in_out,
         );
+        self.deletion_dialog(ctx, p, modal_t);
         if let Some(mut editor) = self.editor.take() {
             let mut open = true;
             let mut submit = false;
@@ -4011,6 +4172,44 @@ mod tests {
             &json!({"type":"result","is_error":true,"result":"failed"}),
         );
         assert!(!c.queued_ready());
+    }
+
+    #[test]
+    fn failed_upload_restores_files_without_overwriting_a_new_draft() {
+        for new_draft in ["", "Следующее сообщение"] {
+            let mut c = Chat::new("sid".into(), "/tmp".into(), "test".into());
+            c.messages.push(Message {
+                role: "user".into(),
+                text: "Отправь мод".into(),
+                ..Default::default()
+            });
+            c.sent_images.insert(
+                0,
+                vec![Attachment {
+                    name: "mod.jar".into(),
+                    texture: None,
+                    bytes: 32 * 1024 * 1024,
+                    source: json!({"type":"file","path":"/tmp/mod.jar"}),
+                }],
+            );
+            c.upload_progress = Some((1024, 32 * 1024 * 1024));
+            c.busy = true;
+            c.draft = new_draft.into();
+            c.restore_failed_upload();
+            assert!(!c.busy);
+            assert!(c.messages.is_empty());
+            assert!(c.queue_paused);
+            if new_draft.is_empty() {
+                assert_eq!(c.draft, "Отправь мод");
+                assert_eq!(c.images[0].name, "mod.jar");
+            } else {
+                assert_eq!(c.draft, new_draft);
+                assert_eq!(c.queue[0].text, "Отправь мод");
+                assert_eq!(c.queue[0].files[0].name, "mod.jar");
+            }
+            c.restore_failed_upload();
+            assert_eq!(c.queue.len(), usize::from(!new_draft.is_empty()));
+        }
     }
     #[test]
     fn a_full_queue_keeps_the_unsent_draft() {

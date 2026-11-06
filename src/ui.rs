@@ -2,6 +2,7 @@ use eframe::egui::{self, Color32, FontId, Pos2, Rect, Response, Sense, Stroke, V
 
 pub const ACCENT: Color32 = Color32::from_rgb(139, 166, 242);
 pub const GREEN: Color32 = Color32::from_rgb(92, 184, 132);
+pub const RED: Color32 = Color32::from_rgb(218, 116, 123);
 #[derive(Clone, Copy)]
 pub struct Palette {
     pub base: Color32,
@@ -166,6 +167,7 @@ pub enum Icon {
     Refresh,
     File,
     Close,
+    Trash,
     Check,
     Arrow,
     Server,
@@ -201,6 +203,13 @@ pub fn icon(p: &egui::Painter, r: Rect, which: Icon, color: Color32) {
         Icon::Close => {
             line((-4., -4.), (4., 4.));
             line((-4., 4.), (4., -4.));
+        }
+        Icon::Trash => {
+            line((-7., -5.), (7., -5.));
+            path(&[(-3., -5.), (-3., -8.), (3., -8.), (3., -5.)]);
+            path(&[(-5., -5.), (-4., 8.), (4., 8.), (5., -5.)]);
+            line((-2., -2.), (-2., 5.));
+            line((2., -2.), (2., 5.));
         }
         Icon::Search => {
             p.circle_stroke(v(-1.5, -1.5), 5.5 * z, s);

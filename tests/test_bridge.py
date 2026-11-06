@@ -94,6 +94,49 @@ class TranscriptTests(unittest.TestCase):
         self.assertIn('notes.md',visible)
         self.assertNotIn('/private/cache',visible)
 
+    def test_delete_removes_one_conversation_and_its_subagents_only(self):
+        self.write([{'type':'user','uuid':'a','message':{'content':'delete me'}}])
+        self.store.sessions()  # Cached metadata must not bring it back.
+        other = self.project / (str(uuid.uuid4()) + '.jsonl')
+        other.write_text('{"type":"user","message":{"content":"keep me"}}\n')
+        children = self.path.with_suffix('') / 'subagents'; children.mkdir(parents=True)
+        (children / 'agent.jsonl').write_text('subagent data')
+        project_file = self.project / 'source.rs'; project_file.write_text('project file')
+        before = self.path.read_bytes()
+        self.store.delete(self.sid)
+        self.assertIsNone(self.store.find(self.sid))
+        self.assertEqual([s['id'] for s in self.store.sessions()], [other.stem])
+        self.assertEqual(other.read_text(), '{"type":"user","message":{"content":"keep me"}}\n')
+        self.assertEqual(project_file.read_text(), 'project file')
+        archives = list((self.project / '.relay-deleted').glob('*/' + self.path.name))
+        self.assertEqual(len(archives), 1)
+        self.assertEqual(archives[0].read_bytes(), before)
+        self.assertEqual((archives[0].parent / self.sid / 'subagents/agent.jsonl').read_text(), 'subagent data')
+        self.store.delete(self.sid)  # Retry after a lost acknowledgement is safe.
+
+    def test_invalid_delete_never_touches_an_unrelated_path(self):
+        self.write([{'type':'user','message':{'content':'keep'}}])
+        original = self.path.read_bytes()
+        for value in ['../../secret', '', None]:
+            with self.assertRaises(ValueError): self.store.delete(value)
+        self.assertEqual(self.path.read_bytes(), original)
+
+    def test_delete_rolls_back_if_subagent_move_fails(self):
+        self.write([{'type':'user','message':{'content':'keep'}}])
+        children = self.path.with_suffix(''); children.mkdir()
+        original = self.path.read_bytes()
+        rename = bridge.os.rename
+        calls = 0
+        def fail_second(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2: raise PermissionError('fixture')
+            return rename(*args, **kwargs)
+        with mock.patch.object(bridge.os, 'rename', side_effect=fail_second):
+            with self.assertRaises(PermissionError): self.store.delete(self.sid)
+        self.assertEqual(self.path.read_bytes(), original)
+        self.assertTrue(children.is_dir())
+
 
 class ProtocolTests(unittest.TestCase):
     def setUp(self):
@@ -290,6 +333,29 @@ class ProtocolTests(unittest.TestCase):
     def test_invalid_files_are_rejected(self):
         for files in [[{}],[{'type':'file','name':'..','data':''}],[{'type':'file','name':'x','data':'%%%'}]]:
             with self.assertRaises(ValueError):bridge.decode_files(files)
+
+    def test_busy_session_cannot_be_deleted(self):
+        self.prompt(); self.wait('permission')
+        run = self.host.runs[self.sid]
+        self.host.dispatch({'op':'delete_session','sid':self.sid})
+        event = self.wait('error')
+        self.assertEqual(event['op'], 'delete_session')
+        self.assertIs(self.host.runs[self.sid], run)
+        self.assertFalse(run.closed)
+
+    def test_idle_session_closes_its_child_before_deletion(self):
+        self.prompt(); permission = self.wait('permission')
+        run = self.host.runs[self.sid]
+        self.addCleanup(lambda: [stream.close() for stream in [run.process.stdin, run.process.stdout, run.process.stderr]])
+        self.host.dispatch({'op':'permission','sid':self.sid,'id':permission['id'],'allow':True})
+        self.wait('claude'); self.wait('claude')
+        project = self.host.transcripts.root / 'project'; project.mkdir(parents=True)
+        path = project / (self.sid + '.jsonl'); path.write_text('{"type":"user","message":{"content":"test"}}\n')
+        self.host.dispatch({'op':'delete_session','sid':self.sid})
+        self.assertEqual(self.wait('session_deleted')['sid'], self.sid)
+        self.assertNotIn(self.sid, self.host.runs)
+        self.assertTrue(run.closed)
+        self.assertFalse(path.exists())
 
     def test_images_are_bounded(self):
         bridge.validate_images([{'type':'base64','media_type':'image/png','data':base64.b64encode(b'png bytes').decode()}])

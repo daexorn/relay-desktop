@@ -11,6 +11,16 @@ impl RelayApp {
         }
         self.settings_open = args.iter().any(|a| a == "--demo-settings");
         self.cluster_open = args.iter().any(|a| a == "--demo-cluster");
+        if args.iter().any(|a| a == "--demo-delete") {
+            if let Some(session) = self
+                .remote
+                .get("demo")
+                .and_then(|r| r.sessions.first())
+                .cloned()
+            {
+                self.request_delete("demo", session);
+            }
+        }
         if args.iter().any(|a| a == "--demo-attachments") {
             let image = egui::ColorImage::new([120, 72], egui::Color32::from_rgb(45, 65, 95));
             let texture =
@@ -45,6 +55,14 @@ impl RelayApp {
                 Message{role:"user".into(),text:"привет".into(),..Default::default()},
                 Message{role:"assistant".into(),text:"Сообщения выровнены по правому краю.".into(),..Default::default()},
                 Message{role:"user".into(),text:"А это длинное сообщение, чтобы проверить выравнивание при переносе текста на несколько строк.".into(),..Default::default()}];
+            }
+        }
+        if args.iter().any(|a| a == "--demo-upload") {
+            if let Some(k) = self.current_key() {
+                let chat = self.chats.get_mut(&k).unwrap();
+                chat.busy = true;
+                chat.status = "Отправка файлов".into();
+                chat.upload_progress = Some((15 * 1024 * 1024, 64 * 1024 * 1024));
             }
         }
         if self.cluster_open {

@@ -17,6 +17,7 @@ mod storage;
 mod templates;
 mod timeline;
 mod ui;
+mod uploads;
 
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().collect();

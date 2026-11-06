@@ -251,23 +251,33 @@ async fn run(
     anyhow::ensure!(auth.success(), "Сервер не принял логин или пароль.");
     drop(password);
     let mut channel = session.channel_open_session().await?;
+    let helper = format!(
+        "DESKTOP_SOURCE = {}\nBOARD_SOURCE = {}\nCLUSTER_SOURCE = {}\nATTACHMENTS_SOURCE = {}\n{}",
+        serde_json::to_string(include_str!("../bridge/desktop_mcp.py"))?,
+        serde_json::to_string(include_str!("../bridge/board.py"))?,
+        serde_json::to_string(include_str!("../bridge/cluster_mcp.py"))?,
+        serde_json::to_string(include_str!("../bridge/attachments.py"))?,
+        include_str!("../bridge/relay_bridge.py")
+    );
     channel
         .exec(
             true,
             format!(
                 "python3 -u -c {}",
                 shell_quote(&format!(
-                    "DESKTOP_SOURCE = {}\nBOARD_SOURCE = {}\nCLUSTER_SOURCE = {}\n{}",
-                    serde_json::to_string(include_str!("../bridge/desktop_mcp.py"))?,
-                    serde_json::to_string(include_str!("../bridge/board.py"))?,
-                    serde_json::to_string(include_str!("../bridge/cluster_mcp.py"))?,
-                    include_str!("../bridge/relay_bridge.py")
+                    "import sys; exec(compile(sys.stdin.buffer.read({}), '<relay>', 'exec'))",
+                    helper.len()
                 ))
             ),
         )
         .await?;
+    // Source travels over stdin: growing the bundled helper cannot exceed the
+    // server shell's per-argument limit. Later bytes are the normal JSON protocol.
+    channel.data(helper.as_bytes()).await?;
     let (local_tx, mut local_rx) = async_mpsc::unbounded_channel::<Value>();
-    let mut desktop = crate::desktop::Desktop::new(local_tx, bus.clone(), server.id.clone());
+    let mut desktop =
+        crate::desktop::Desktop::new(local_tx.clone(), bus.clone(), server.id.clone());
+    let mut uploads: HashMap<String, (String, oneshot::Sender<()>)> = HashMap::new();
     let mut buffer = Vec::new();
     let mut stderr = String::new();
     let mut greeted = false;
@@ -275,10 +285,68 @@ async fn run(
     tokio::pin!(deadline);
     loop {
         tokio::select! {
-            Some(value)=local_rx.recv()=>{if desktop.local(&value){continue;}let mut encoded=serde_json::to_vec(&value)?;encoded.push(b'\n');channel.data(&encoded[..]).await?;},
+            Some(mut value)=local_rx.recv()=>{
+                if matches!(value["op"].as_str(), Some("_attachment_ready" | "_attachment_failed")) {
+                    let sid = value["sid"].as_str().unwrap_or("").to_owned();
+                    if !uploads.get(&sid).is_some_and(|(token, _)| value["token"] == *token) { continue; }
+                    uploads.remove(&sid);
+                    if value["op"] == "_attachment_failed" {
+                        crate::uploads::failure(&bus, &server.id, &sid, value["message"].as_str().unwrap_or("Не удалось передать файлы."));
+                        continue;
+                    }
+                    value = value["request"].take();
+                    if value["op"] == "_upload_probe" {
+                        bus.send(Event::Data {server:server.id.clone(),value:json!({"type":"attachment_probe","sid":sid,"files":value["files"]})});
+                        continue;
+                    }
+                    let mut encoded = serde_json::to_vec(&value)?;
+                    encoded.push(b'\n');
+                    channel.data(&encoded[..]).await?;
+                    bus.send(Event::Data {server:server.id.clone(),value:json!({"type":"upload_complete","sid":sid})});
+                    continue;
+                }
+                if desktop.local(&value){continue;}
+                let mut encoded=serde_json::to_vec(&value)?;encoded.push(b'\n');channel.data(&encoded[..]).await?;
+            },
             _=&mut deadline, if !greeted => anyhow::bail!("Не удалось запустить помощник. На сервере нужны Python 3 и Claude Code."),
             request=requests.recv()=>match request {
-                Some(value)=>{if value["op"]=="_disconnect"{let _=channel.eof().await;break;}if desktop.local(&value){continue;}let mut encoded=serde_json::to_vec(&value)?;encoded.push(b'\n');channel.data(&encoded[..]).await?;},
+                Some(value)=>{
+                    if value["op"]=="_disconnect"{let _=channel.eof().await;break;}
+                    if value["op"] == "stop" {
+                        let sid = value["sid"].as_str().unwrap_or("");
+                        if let Some((_, cancel)) = uploads.remove(sid) {
+                            let _ = cancel.send(());
+                            crate::uploads::failure(&bus, &server.id, sid, "Отправка файлов отменена. Сообщение сохранено.");
+                            continue;
+                        }
+                    }
+                    if crate::uploads::needed(&value) {
+                        let sid = value["sid"].as_str().unwrap_or("").to_owned();
+                        if uploads.contains_key(&sid) || uploads.len() >= 4 {
+                            crate::uploads::failure(&bus, &server.id, &sid, "Дождись завершения текущей передачи файлов.");
+                            continue;
+                        }
+                        let upload_channel = match session.channel_open_session().await {
+                            Ok(channel) => channel,
+                            Err(error) => {crate::uploads::failure(&bus, &server.id, &sid, error); continue;}
+                        };
+                        let (cancel, cancelled) = oneshot::channel();
+                        let token = uuid::Uuid::new_v4().to_string();
+                        uploads.insert(sid.clone(), (token.clone(), cancel));
+                        let tx = local_tx.clone();
+                        let upload_bus = bus.clone();
+                        let host = server.id.clone();
+                        tokio::spawn(async move {
+                            let event = match crate::uploads::run(upload_channel, value, upload_bus, host, cancelled).await {
+                                Ok(request) => json!({"op":"_attachment_ready","sid":sid,"token":token,"request":request}),
+                                Err(error) => json!({"op":"_attachment_failed","sid":sid,"token":token,"message":format!("Не удалось передать файлы: {error:#}")}),
+                            };
+                            let _ = tx.send(event);
+                        });
+                        continue;
+                    }
+                    if desktop.local(&value){continue;}let mut encoded=serde_json::to_vec(&value)?;encoded.push(b'\n');channel.data(&encoded[..]).await?;
+                },
                 None=>{let _=channel.eof().await;break;}
             },
             incoming=channel.wait()=>match incoming {
@@ -333,6 +401,10 @@ pub fn probe() -> Result<()> {
     let desktop_probe = value["desktop_probe"].as_bool().unwrap_or(false);
     let mut desktop_exercised = false;
     let artifact_probe = value["artifact_probe"].as_str().map(str::to_owned);
+    let attachment_probe = value["attachment_probe"].as_str().map(str::to_owned);
+    let attachment_cancel = value["attachment_cancel"] == true;
+    let mut attachment_cancel_sent = false;
+    let mut attachment_upload_id = String::new();
     let artifact_target =
         std::env::temp_dir().join(format!("relay-file-probe-{}.jar", uuid::Uuid::new_v4()));
     let artifact_id = uuid::Uuid::new_v4().to_string();
@@ -361,6 +433,21 @@ pub fn probe() -> Result<()> {
             }
             Ok(Event::Data { value, .. }) if value["type"] == "sessions" => {
                 count = value["sessions"].as_array().map(Vec::len).unwrap_or(0);
+                if let Some(path) = attachment_probe.as_ref() {
+                    let file = crate::images::from_file(
+                        &egui::Context::default(),
+                        std::path::Path::new(path),
+                    )?;
+                    anyhow::ensure!(
+                        file.source["type"] == "file",
+                        "Attachment probe requires an ordinary file"
+                    );
+                    controller.send(
+                        &profile.id,
+                        json!({"op":"_upload_probe","sid":sid,"files":[file.source]}),
+                    );
+                    continue;
+                }
                 if let Some(path) = artifact_probe.as_ref() {
                     controller.send(&profile.id,json!({"op":"_artifact_download","id":artifact_id,"path":path,"cwd":"/tmp","target":artifact_target}));
                     continue;
@@ -383,6 +470,41 @@ pub fn probe() -> Result<()> {
                     );
                 }
                 controller.send(&profile.id,json!({"op":"prompt","sid":sid,"cwd":"/tmp","mode":mode,"model":"default","text":prompt,"images":images,"files":files,"desktop_enabled":desktop_probe,"desktop_context":{"os":std::env::consts::OS,"workspace":std::env::temp_dir()}}));
+            }
+            Ok(Event::Data { value: frame, .. }) if frame["type"] == "upload_progress" => {
+                if attachment_cancel && !attachment_cancel_sent {
+                    attachment_cancel_sent = true;
+                    attachment_upload_id = frame["upload_id"].as_str().unwrap_or("").into();
+                    controller.send(&profile.id, json!({"op":"stop","sid":sid}));
+                }
+            }
+            Ok(Event::Data { value: frame, .. }) if frame["type"] == "attachment_probe" => {
+                let files = frame["files"]
+                    .as_array()
+                    .context("Missing uploaded files")?;
+                anyhow::ensure!(
+                    files.len() == 1 && !attachment_cancel,
+                    "Unexpected attachment probe result"
+                );
+                if let Some(expected) = value["expected_sha256"].as_str() {
+                    anyhow::ensure!(files[0]["sha256"] == expected, "Upload checksum differs");
+                }
+                println!(
+                    "{}",
+                    json!({"ok":true,"sid":sid,"files":files,"paidClaudeTaskStarted":false})
+                );
+                controller.disconnect(&profile.id);
+                return Ok(());
+            }
+            Ok(Event::Data { value: frame, .. })
+                if attachment_cancel_sent && frame["upload_failed"] == true =>
+            {
+                println!(
+                    "{}",
+                    json!({"ok":true,"cancelled":true,"sid":sid,"upload_id":attachment_upload_id,"paidClaudeTaskStarted":false})
+                );
+                controller.disconnect(&profile.id);
+                return Ok(());
             }
             Ok(Event::Data { value: frame, .. })
                 if frame["type"] == "artifact_status" && frame["id"] == artifact_id =>

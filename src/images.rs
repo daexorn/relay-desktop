@@ -5,6 +5,10 @@ use image::{DynamicImage, ImageReader};
 use serde_json::{json, Value};
 use std::{io::Cursor, path::Path};
 
+pub const MAX_ATTACHMENTS: usize = 8;
+pub const MAX_ATTACHMENT_BYTES: usize = 512 * 1024 * 1024;
+pub const MAX_INLINE_BYTES: usize = 16 * 1024 * 1024;
+
 #[derive(Clone)]
 pub struct Attachment {
     pub name: String,
@@ -13,6 +17,12 @@ pub struct Attachment {
     pub source: Value,
 }
 pub fn from_file(ctx: &egui::Context, path: &Path) -> Result<Attachment> {
+    let metadata = path.metadata()?;
+    anyhow::ensure!(metadata.is_file(), "Выбери обычный файл.");
+    anyhow::ensure!(
+        metadata.len() <= MAX_ATTACHMENT_BYTES as u64,
+        "Размер файла — до 512 МБ."
+    );
     let name = path
         .file_name()
         .unwrap_or_default()
@@ -25,24 +35,14 @@ pub fn from_file(ctx: &egui::Context, path: &Path) -> Result<Attachment> {
         let n = f.read(&mut b)?;
         b[..n].to_vec()
     };
-    if image::guess_format(&header).is_err() {
-        anyhow::ensure!(
-            path.metadata()?.is_file() && path.metadata()?.len() <= 12 * 1024 * 1024,
-            "Размер файла — до 12 МБ."
-        );
-        let bytes = std::fs::read(path)?;
-        let size = bytes.len();
+    if image::guess_format(&header).is_err() || metadata.len() > 24 * 1024 * 1024 {
         return Ok(Attachment {
             name: name.clone(),
             texture: None,
-            bytes: size,
-            source: json!({"type":"file","name":name,"data":STANDARD.encode(bytes)}),
+            bytes: metadata.len() as usize,
+            source: json!({"type":"file","name":name,"path":path.canonicalize()?,"bytes":metadata.len()}),
         });
     }
-    anyhow::ensure!(
-        path.metadata()?.len() <= 24 * 1024 * 1024,
-        "Картинка слишком большая: максимум 24 МБ."
-    );
     let mut reader = ImageReader::open(path)?.with_guessed_format()?;
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(12000);
@@ -142,15 +142,30 @@ mod tests {
         let file = from_file(&egui::Context::default(), &p).unwrap();
         assert!(file.texture.is_none());
         assert_eq!(file.source["type"], "file");
+        assert_eq!(file.source["bytes"], "Текстовый документ".len());
         assert_eq!(
-            String::from_utf8(
-                STANDARD
-                    .decode(file.source["data"].as_str().unwrap())
-                    .unwrap()
-            )
-            .unwrap(),
+            std::fs::read_to_string(file.source["path"].as_str().unwrap()).unwrap(),
             "Текстовый документ"
         );
+        assert!(file.source.get("data").is_none());
+        std::fs::remove_file(p).unwrap();
+    }
+    #[test]
+    fn large_files_are_lazy_and_over_limit_is_rejected_before_reading() {
+        let p = std::env::temp_dir().join(format!("relay-{}.zip", uuid::Uuid::new_v4()));
+        let file = std::fs::File::create(&p).unwrap();
+        file.set_len(32 * 1024 * 1024).unwrap();
+        let attachment = from_file(&egui::Context::default(), &p).unwrap();
+        assert_eq!(attachment.bytes, 32 * 1024 * 1024);
+        assert!(attachment.source.to_string().len() < 1024);
+        assert!(attachment.source.get("data").is_none());
+        file.set_len(MAX_ATTACHMENT_BYTES as u64 + 1).unwrap();
+        assert!(from_file(&egui::Context::default(), &p)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("512"));
+        drop(file);
         std::fs::remove_file(p).unwrap();
     }
 }

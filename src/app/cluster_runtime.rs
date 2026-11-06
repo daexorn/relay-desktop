@@ -746,6 +746,8 @@ mod tests {
             ]),
             chats: HashMap::new(),
             selected_chat: HashMap::new(),
+            delete_chat: None,
+            deleted_sessions: Default::default(),
             search: String::new(),
             editor: None,
             trust: None,
@@ -961,5 +963,83 @@ mod tests {
             rx_b.try_recv().is_err(),
             "Cancelling a queued task sent a stop to its shared worker session"
         );
+    }
+    #[test]
+    fn deletion_waits_for_ack_and_never_affects_another_host() {
+        let (mut app, a, b, _, mut rx_a, _) = fixture();
+        let sid = cluster::id();
+        let session = Session {
+            id: sid.clone(),
+            title: "Delete this".into(),
+            cwd: a.cwd.clone(),
+            modified: 1.,
+        };
+        for host in [&a, &b] {
+            app.remote
+                .get_mut(&host.id)
+                .unwrap()
+                .sessions
+                .push(session.clone());
+            app.chats.insert(
+                key(&host.id, &sid),
+                Chat::new(sid.clone(), host.cwd.clone(), "Keep until ack".into()),
+            );
+            app.selected_chat.insert(host.id.clone(), sid.clone());
+            app.settings
+                .servers
+                .iter_mut()
+                .find(|s| s.id == host.id)
+                .unwrap()
+                .last_session = Some(sid.clone());
+        }
+        app.request_delete(&a.id, session.clone());
+        assert!(app.delete_chat.is_some());
+        assert!(app.chats.contains_key(&key(&a.id, &sid)));
+        assert!(
+            rx_a.try_recv().is_err(),
+            "Opening the dialog sent a deletion request"
+        );
+        app.data(
+            a.id.clone(),
+            json!({"type":"error","op":"delete_session","sid":sid,"message":"fixture failure"}),
+        );
+        assert!(app.chats.contains_key(&key(&a.id, &sid)));
+        assert_eq!(app.delete_chat.as_ref().unwrap().error, "fixture failure");
+        app.data(a.id.clone(), json!({"type":"session_deleted","sid":sid}));
+        assert!(!app.chats.contains_key(&key(&a.id, &sid)));
+        assert!(app.chats.contains_key(&key(&b.id, &sid)));
+        assert_ne!(app.selected_chat.get(&a.id), Some(&sid));
+        assert_eq!(app.selected_chat.get(&b.id), Some(&sid));
+        assert!(app.delete_chat.is_none());
+        app.data(a.id.clone(), json!({"type":"sessions","sessions":[{"id":sid,"title":"stale response","cwd":"/project","modified":1.}]}));
+        assert!(app.remote[&a.id].sessions.is_empty());
+        app.data(
+            a.id.clone(),
+            json!({"type":"history","sid":sid,"messages":[{"role":"user","text":"stale history"}]}),
+        );
+        assert!(!app.chats.contains_key(&key(&a.id, &sid)));
+        assert_eq!(app.remote[&b.id].sessions[0].id, sid);
+    }
+    #[test]
+    fn busy_session_deletion_is_blocked_and_idle_cluster_gets_a_fresh_session() {
+        let (mut app, a, _, config, mut rx_a, _) = fixture();
+        app.start_cluster(config, "Goal".into()).unwrap();
+        let prompt = take(&mut rx_a, "prompt");
+        let sid = prompt["sid"].as_str().unwrap().to_owned();
+        let session = Session {
+            id: sid.clone(),
+            title: "Leader".into(),
+            cwd: a.cwd.clone(),
+            modified: 1.,
+        };
+        app.request_delete(&a.id, session.clone());
+        assert!(app.delete_chat.is_none());
+        send_result(&mut app, &a.id, &sid, "Done");
+        app.request_delete(&a.id, session);
+        assert!(app.delete_chat.is_some());
+        app.data(a.id, json!({"type":"session_deleted","sid":sid}));
+        assert_ne!(app.cluster_store.runs[0].leader_sid, sid);
+        assert!(app.cluster_store.runs[0].paused);
+        assert_eq!(app.cluster_store.runs[0].title, "Goal");
     }
 }

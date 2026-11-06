@@ -2,7 +2,8 @@
 
 The desktop passes this file to python3 over an authenticated SSH channel. Only
 children created by this helper are stopped when the channel closes. Existing
-Claude transcripts/settings are read, never rewritten by the helper.
+Claude transcripts are read; explicit session deletion moves only that session
+out of the active history. Project files and Claude settings are never changed.
 """
 import collections
 import base64
@@ -290,6 +291,32 @@ class Transcripts:
                 continue
         result.sort(key=lambda r: r["modified"], reverse=True)
         return result[:2000]
+
+    def delete(self, session):
+        """Remove one session from Claude's index, retaining a private recovery copy."""
+        session = valid_id(session)
+        path = self.find(session)
+        if path is None:
+            return
+        if not stat.S_ISREG(path.lstat().st_mode) or not path.parent.resolve().is_relative_to(self.root.resolve()):
+            raise ValueError("Некорректный файл сессии.")
+        archive = path.parent / '.relay-deleted' / uuid.uuid4().hex
+        archive.mkdir(parents=True, mode=0o700)
+        moved = []
+        try:
+            paths = [path]
+            children = path.with_suffix('')
+            if children.is_dir() and not children.is_symlink():
+                paths.append(children)
+            for source in paths:
+                target = archive / source.name
+                source.rename(target)
+                moved.append((source, target))
+        except OSError:
+            for source, target in reversed(moved):
+                target.rename(source)
+            raise
+        self.cache.pop(str(path), None)
 
     def history(self, session):
         path = self.path(session)
@@ -645,6 +672,12 @@ class Bridge:
         self.run_lock = threading.RLock()
         self.usage = UsageState()
         self.files = FileTransfers(self.send)
+        source = globals().get('ATTACHMENTS_SOURCE')
+        if not source:
+            source = Path(__file__).with_name('attachments.py').read_text(encoding='utf-8')
+        namespace = {'__name__': 'relay_attachments'}
+        exec(source, namespace)
+        self.uploads = namespace['UploadStore']()
         self.desktop = None
         self.cluster = None
         self.cluster_instructions = ""
@@ -661,7 +694,7 @@ class Bridge:
         except (OSError, subprocess.SubprocessError):
             version = "Claude Code"
         self.send({"type": "hello", "home": str(Path.home()), "hostname": os.uname().nodename,
-                   "version": version, "protocol": 2})
+                   "version": version, "protocol": 3})
 
     def dispatch(self, req):
         op = req.get("op")
@@ -669,6 +702,17 @@ class Bridge:
         try:
             if op == "sessions":
                 self.send({"type": "sessions", "sessions": self.transcripts.sessions()})
+            elif op == "delete_session":
+                sid = valid_id(req.get('sid'))
+                with self.run_lock:
+                    run = self.runs.get(sid)
+                    if run and run.busy:
+                        raise ValueError('Сначала останови ответ в этой сессии.')
+                    if run:
+                        run.close()
+                        self.runs.pop(sid, None)
+                    self.transcripts.delete(sid)
+                self.send({'type': 'session_deleted', 'sid': sid})
             elif op == "file_info":
                 self.files.info(req.get("id"),req.get("path"),req.get("cwd"))
             elif op == "file_stream":
@@ -708,9 +752,15 @@ class Bridge:
                 if not isinstance(text, str) or (not text.strip() and not images and not files) or len(text.encode("utf-8")) > 1024 * 1024:
                     raise ValueError("Сообщение пустое или слишком длинное.")
                 validate_images(images)
-                decoded = decode_files(files)
-                if len(images) + len(files) > 8 or sum(len(body) for _,body in decoded) + sum(len(base64.b64decode(i["data"])) for i in images) > 12*1024*1024:
-                    raise ValueError("До восьми файлов общим размером 12 МБ.")
+                if not isinstance(files, list) or any(not isinstance(f, dict) or f.get('type') not in ('file', 'uploaded_file') for f in files):
+                    raise ValueError('Некорректное вложение.')
+                decoded = decode_files([f for f in files if f['type'] == 'file'])
+                uploaded = [self.uploads.resolve(sid, f) for f in files if f['type'] == 'uploaded_file']
+                inline = sum(len(body) for _, body in decoded) + sum(len(base64.b64decode(i['data'])) for i in images)
+                if len(images) + len(files) > 8 or inline + sum(f['bytes'] for f in uploaded) > 512*1024*1024:
+                    raise ValueError('До восьми вложений общим размером 512 МБ.')
+                if inline > 16*1024*1024:
+                    raise ValueError('Изображения в одном сообщении — до 16 МБ. Остальные файлы — до 512 МБ.')
                 cwd = str(directory(req.get("cwd")))
                 mode, model = req.get("mode", "manual"), req.get("model", "default")
                 effort = validate_effort(req.get("effort", "default"))
@@ -768,8 +818,9 @@ class Bridge:
                         self.runs[sid] = run
                     run.busy = True
                     claimed = True
-                if decoded:
-                    saved = store_files(sid, decoded)
+                if decoded or uploaded:
+                    saved = store_files(sid, decoded) if decoded else []
+                    saved.extend(uploaded)
                     text += "\n\n<relay-files>\n" + json.dumps(saved, ensure_ascii=False) + "\n</relay-files>"
                 run.prompt(text, images)
             elif op == "cluster_reply":
@@ -841,7 +892,7 @@ def decode_files(files):
     result = []
     total = 0
     for source in files:
-        if not isinstance(source, dict) or source.get("type") != "file":
+        if not isinstance(source, dict) or source.get("type") != "file" or 'path' in source:
             raise ValueError("Некорректное вложение.")
         name = str(source.get("name", "Файл")).replace("\\", "/").split("/")[-1]
         name = "".join(c for c in name if ord(c) >= 32 and c != "\x7f").encode("utf-8")[:180].decode("utf-8", errors="ignore")
