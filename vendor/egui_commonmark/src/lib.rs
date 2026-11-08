@@ -79,6 +79,7 @@ mod parsers;
 pub use egui_commonmark_backend::alerts::{Alert, AlertBundle};
 pub use egui_commonmark_backend::misc::CommonMarkCache;
 pub use egui_commonmark_backend::RenderMathFn;
+pub use egui_commonmark_backend::{math_line_height, MathExtent, RenderMathExtentFn};
 
 #[cfg(feature = "macros")]
 pub use egui_commonmark_macros::*;
@@ -211,6 +212,13 @@ impl<'f> CommonMarkViewer<'f> {
     /// ```
     pub fn render_math_fn(mut self, func: Option<&'f RenderMathFn>) -> Self {
         self.options.math_fn = func;
+        self
+    }
+
+    /// Relay: tells how much room a formula needs, so that the rows of text around it and
+    /// the columns of a table can make it.
+    pub fn render_math_extent_fn(mut self, func: Option<&'f RenderMathExtentFn>) -> Self {
+        self.options.math_extent_fn = func;
         self
     }
 
@@ -390,6 +398,36 @@ mod relay_list_layout_tests {
     }
     fn text<'a>(shapes:&'a[Shape],prefix:&str)->&'a egui::epaint::TextShape {
         shapes.iter().find_map(|shape|match shape{Shape::Text(t) if t.galley.text().starts_with(prefix)=>Some(t),_=>None}).expect(prefix)
+    }
+    fn render_math(markdown:&str)->Vec<Shape>{
+        let ctx=egui::Context::default();
+        let mut cache=CommonMarkCache::default();
+        let paint=|ui:&mut egui::Ui,_:&str,_:bool|{let (rect,_)=ui.allocate_exact_size(Vec2::new(40.,12.),egui::Sense::hover());ui.painter().rect_filled(rect,0.,egui::Color32::RED);};
+        let extent=|_:&egui::Ui,_:&str|MathExtent{width:40.,above:6.,below:6.,inline:true};
+        let output=ctx.run(egui::RawInput{screen_rect:Some(Rect::from_min_size(egui::Pos2::ZERO,Vec2::new(800.,800.))),..Default::default()},|ctx|{
+            egui::CentralPanel::default().show(ctx,|ui|{CommonMarkViewer::new().render_math_fn(Some(&paint)).render_math_extent_fn(Some(&extent)).show(ui,&mut cache,markdown);});
+        });
+        fn flatten(shape:Shape,out:&mut Vec<Shape>){match shape{Shape::Vec(v)=>{for shape in v{flatten(shape,out);}},shape=>out.push(shape)}}
+        let mut result=Vec::new();for item in output.shapes{flatten(item.shape,&mut result);}result
+    }
+    fn math_count(shapes:&[Shape])->usize{shapes.iter().filter(|shape|matches!(shape,Shape::Rect(r) if r.fill==egui::Color32::RED)).count()}
+    #[test]
+    fn formulas_are_drawn_wherever_markdown_allows_them(){
+        for (markdown,count) in [
+            ("Текст $a$ и $b$",2),("$$a$$",1),("Текст\n$$a$$\nещё",1),
+            ("- $a$\n- слово $b$",2),("1. $a$\n\n2. $b$",2),("> $a$",1),
+            ("**Жирно** $a$ *курсив* $b$",2),("### Заголовок $a$",1),
+            ("| h |\n|---|\n| $a$ |",1),("| $a$ |\n|---|\n| слово $b$ и $c$ |",3),
+        ]{
+            assert_eq!(math_count(&render_math(markdown)),count,"{markdown}");
+        }
+    }
+    #[test]
+    fn paragraphs_keep_their_text_when_formulas_are_enabled(){
+        let shapes=render_math("Первый $a$ абзац\n\nВторой абзац");
+        let first=text(&shapes,"Первый");let tail=text(&shapes," абзац");let second=text(&shapes,"Второй");
+        assert!((first.pos.y-tail.pos.y).abs()<1.);
+        assert!(second.pos.y>first.pos.y+first.galley.size().y-1.);
     }
     #[test]
     fn ordered_loose_and_tight_items_share_the_marker_baseline(){

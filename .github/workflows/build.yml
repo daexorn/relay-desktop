@@ -18,6 +18,7 @@ jobs:
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config libxkbcommon-dev libwayland-dev libgl1-mesa-dev
       - run: cargo test --locked
+      - run: cargo test --locked -p egui_commonmark --lib
       - run: python -m unittest discover -s tests -v
         if: runner.os == 'Linux'
       - run: cargo build --release --locked
