@@ -9,6 +9,7 @@ expected=tomllib.loads((root/'Cargo.toml').read_text())['package']['version']
 assert subprocess.check_output([args.binary,'--version'],text=True).strip()=='Relay '+expected,'Build the current Relay before capturing previews'
 
 cases=[('cluster-editor',['--demo-cluster-editor']),('cluster-prompts',['--demo-cluster-prompts']),('cluster-keys',['--demo-cluster-keys']),('leader',['--demo-leader']),('command-output',['--demo-command-output']),('messages',['--demo-send']),('attachments',['--demo-attachments']),('attachments-small',['--demo-attachments','--demo-small']),
+       ('math',['--demo-math']),('math-2',['--demo-math-2']),('math-light',['--demo-math','--light']),
        ('commands',['--demo-activity-open']),('settings',['--demo-settings']),
        ('cluster',['--demo-cluster','--theme','midnight']),('forest',['--theme','forest']),
        ('paper',['--theme','paper'])]

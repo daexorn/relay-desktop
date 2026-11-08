@@ -412,7 +412,7 @@ class Run:
         env.pop("CLAUDECODE", None)  # The transport is not a nested terminal conversation.
         env["CLAUDE_CODE_ENTRYPOINT"] = "relay-desktop"
         args = command(owner.binary, sid, resume, model, mode, effort)
-        system_prompt="Relay supports downloadable server files in chat. When the user requests a built mod or other generated artifact, include a Markdown download link [filename](absolute_server_file_path) for the real existing file. Verify it exists before offering it. A bare filename or a statement that the build succeeded is not file delivery. Never claim the file was delivered to the PC unless the transfer tool actually succeeded."
+        system_prompt="Relay supports downloadable server files in chat. When the user requests a built mod or other generated artifact, include a Markdown download link [filename](absolute_server_file_path) for the real existing file. Verify it exists before offering it. A bare filename or a statement that the build succeeded is not file delivery. Never claim the file was delivered to the PC unless the transfer tool actually succeeded. Relay chat renders LaTeX math: write formulas as $...$ inline and $$...$$ on their own line, not as Unicode approximations or code blocks."
         system_prompt += " " + AGENT_ROLES.get(self.agent_role, "")
         servers = {}
         if self.cluster_context.get("role") == "leader":

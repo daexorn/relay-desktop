@@ -165,6 +165,7 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(run.agent_role,'reviewer')
         args=run.process.args
         self.assertIn('review agent',args[args.index('--append-system-prompt')+1])
+        self.assertIn('renders LaTeX',args[args.index('--append-system-prompt')+1])
 
     def test_leader_gets_cluster_tools_and_custom_prompt_but_workers_do_not(self):
         source=(Path(__file__).parents[1]/'bridge/cluster_mcp.py').read_text()

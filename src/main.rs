@@ -12,6 +12,7 @@ mod desktop;
 mod gametest;
 mod images;
 mod limits;
+mod math;
 mod model;
 mod storage;
 mod templates;

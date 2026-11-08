@@ -10,7 +10,7 @@ use crate::{
     storage,
 };
 use eframe::egui::{self, Align, Color32, FontId, Layout, RichText, Stroke, Vec2};
-use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
+use egui_commonmark::CommonMarkCache;
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
@@ -330,6 +330,16 @@ impl RelayApp {
             if args.iter().any(|a| a == "--demo-tables") {
                 if let Some(k) = app.current_key() {
                     app.chats.get_mut(&k).unwrap().messages=vec![Message{role:"assistant".into(),text:"Шесть рисков, все взяты из проекта:\n\n| № | Риск | Ранг | Стратегия |\n|---|---|---|---|\n| 1 | Распознавание не справляется с нарезками из коротких видео | 3×3 = 9 | Снижение влияния: добавить обработку аудио |\n| 2 | Потеря файлов при передаче готовой сборки | 2×3 = 6 | Проверять размер и контрольную сумму |\n| 3 | Автоматические проверки занимают много времени | 3×2 = 6 | Разделить запуск и проверку результата |\n\nТекст после таблицы остаётся читаемым.".into(),..Default::default()}];
+                }
+            }
+            if args.iter().any(|a| a == "--demo-math") {
+                if let Some(k) = app.current_key() {
+                    app.chats.get_mut(&k).unwrap().messages=vec![Message{role:"assistant".into(),text:"### Формулы прямо в чате\n\nПусть $f(x) = x^x$ при $x > 0$. Тогда $f'(x) = x^x(\\ln x + 1)$, а минимум достигается в точке $x = \\frac{1}{e}$, где значение равно $e^{-1/e} \\approx 0{,}692$. Следующие строки этого абзаца идут с запасом по высоте, чтобы дробь не задевала соседние строки текста.\n\n$$\\lim_{x \\to 0} \\frac{\\sin x - x}{x^3} = -\\frac{1}{6}$$\n\nЗапись через скобки тоже работает: \\(\\int_0^1 x e^x \\, dx = 1\\), а блок выглядит так:\n\n\\[\n\\sum_{n=1}^{\\infty} \\frac{n}{2^n} = 2, \\qquad\ng(x) = \\begin{cases} x^2, & x \\ge 0 \\\\ -x, & x < 0 \\end{cases}\n\\]\n\nКириллица внутри формулы: $\\text{при } x > 0 \\text{ верно } y = \\text{яблоко, щука, шея}$. Короткие $a$, $b_i$ и $c^2$ не меняют высоту строки.\n\n$$\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix} \\begin{pmatrix} x \\\\ y \\end{pmatrix} = \\begin{pmatrix} ax + by \\\\ cx + dy \\end{pmatrix}, \\quad \\forall \\varepsilon > 0 \\; \\exists \\delta > 0$$".into(),..Default::default()}];
+                }
+            }
+            if args.iter().any(|a| a == "--demo-math-2") {
+                if let Some(k) = app.current_key() {
+                    app.chats.get_mut(&k).unwrap().messages=vec![Message{role:"assistant".into(),text:"1. Ряд $\\sum_{n=1}^{\\infty} \\frac{1}{n^2} = \\frac{\\pi^2}{6}$ сходится, и длинный текст пункта переносится на следующие строки без наложений на формулу.\n2. Матрица $\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix}$ обратима при $ad - bc \\ne 0$.\n- Маркер и $\\sqrt{x}$ на одной линии.\n\n| Что | Формула | Значение |\n|---|---|---|\n| Предел | $\\lim_{x\\to0}\\frac{\\sin x}{x}$ | $1$ |\n| Интеграл | $\\int_0^1 x e^x\\,dx$ и текст рядом | $1$ |\n| Модуль | $|x| \\le 1$ | да |\n\nЦена $5 или $10, путь $HOME/$USER и `$x^2$` в коде остаются как есть. Неверная формула $\\nosuchcommand{x}$ показывается исходником.\n\n```python\ncost = \"$5\"  # $x^2$ здесь просто текст\n```\n\n$$x_1 + x_2 + x_3 + x_4 + x_5 + x_6 + x_7 + x_8 + x_9 + x_{10} + x_{11} + x_{12} + x_{13} + x_{14} + x_{15} + x_{16} + x_{17} + x_{18} + x_{19} + x_{20} + x_{21} + x_{22} + x_{23} + x_{24} + x_{25} + x_{26} + x_{27} + x_{28} + x_{29} + x_{30}$$".into(),..Default::default()}];
                 }
             }
             if args.iter().any(|a| a == "--demo-lists") {
@@ -1859,7 +1869,7 @@ impl RelayApp {
                                                 Some(egui::TextWrapMode::Wrap);
                                             ui.spacing_mut().item_spacing.y = 4.;
                                             ui.spacing_mut().interact_size.y = 20.;
-                                            CommonMarkViewer::new().show(
+                                            crate::math::show(
                                                 ui,
                                                 &mut self.markdown,
                                                 &message.text,

@@ -80,6 +80,8 @@ pub struct CommonMarkViewerInternal {
     is_table: bool,
     is_blockquote: bool,
     checkbox_events: Vec<CheckboxClickEvent>,
+    /// Relay: the text has `$`, so paragraphs may hold formulas.
+    has_math: bool,
 }
 
 pub(crate) struct CheckboxClickEvent {
@@ -103,8 +105,153 @@ impl CommonMarkViewerInternal {
             is_table: false,
             is_blockquote: false,
             checkbox_events: Vec::new(),
+            has_math: false,
         }
     }
+}
+
+/// Relay: row heights of text with inline formulas.
+#[derive(Clone, Copy)]
+struct MathLeading {
+    /// Distance between the rows.
+    line: f32,
+    /// The first row, which also has to make room above itself.
+    first_row: f32,
+}
+
+/// Relay: `None` when the formulas fit into ordinary rows of text.
+fn math_leading<'a>(
+    ui: &Ui,
+    formulas: impl Iterator<Item = &'a str>,
+    options: &CommonMarkOptions,
+    room_above: bool,
+) -> Option<MathLeading> {
+    // A formula may stick out of its row by this much: there is air around the glyphs.
+    const SLACK: f32 = 1.5;
+    let extent = options.math_extent_fn?;
+    let (mut above, mut below) = (0.0f32, 0.0f32);
+    for formula in formulas {
+        let size = extent(ui, formula);
+        if size.inline {
+            above = above.max(size.above);
+            below = below.max(size.below);
+        }
+    }
+    let font = TextStyle::Body.resolve(ui.style());
+    let galley = ui.fonts(|fonts| fonts.layout_no_wrap("x".into(), font, egui::Color32::WHITE));
+    let row = galley.size().y;
+    let ascent = galley.rows[0].glyphs.first().map_or(row * 0.8, |glyph| glyph.pos.y);
+    let descent = row - ascent;
+    if above <= ascent + SLACK && below <= descent + SLACK {
+        return None;
+    }
+    let line = (above.max(ascent) + below.max(descent) + 1.0).ceil();
+    // A taller first row moves the text down by this share of the difference.
+    let share = ui.text_valign().to_factor();
+    let extra = if room_above && share > 0.0 {
+        (above - ascent).max(0.0) / share
+    } else {
+        0.0
+    };
+    Some(MathLeading { line, first_row: (line + extra).ceil() })
+}
+
+/// Relay: the formulas among the events of a paragraph, a list item or a table cell.
+fn math_texts<'a, 'e: 'a, T: Iterator<Item = &'a pulldown_cmark::Event<'e>>>(
+    events: T,
+) -> impl Iterator<Item = &'a str> + use<'a, 'e, T> {
+    events.filter_map(|event| match event {
+        pulldown_cmark::Event::InlineMath(tex) | pulldown_cmark::Event::DisplayMath(tex) => {
+            Some(tex.as_ref())
+        }
+        _ => None,
+    })
+}
+
+/// Relay: the text and formulas of a table cell with formulas. The usual cell is one label,
+/// but a formula is not text, so here they flow one after another like in a paragraph.
+fn table_math_cell(
+    ui: &mut Ui,
+    cell: &[(pulldown_cmark::Event<'_>, Range<usize>)],
+    header: bool,
+    options: &CommonMarkOptions,
+) {
+    ui.spacing_mut().item_spacing.x = 0.0;
+    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+    let leading = math_leading(ui, math_texts(cell.iter().map(|(event, _)| event)), options, false);
+    ui.set_row_height(leading.map_or(ui.text_style_height(&TextStyle::Body), |l| l.first_row));
+    let line = leading.map(|l| l.line);
+    egui_commonmark_backend::set_math_line_height(ui, line);
+    let valign = ui.text_valign();
+    let mut job = egui::text::LayoutJob::default();
+    let flush = |ui: &mut Ui, job: &mut egui::text::LayoutJob| {
+        if !job.sections.is_empty() {
+            ui.add(egui::Label::new(std::mem::take(job)).wrap());
+        }
+    };
+    let (mut strong, mut italics, mut strike) = (header, false, false);
+    for (event, _) in cell {
+        let mut code = false;
+        let text = match event {
+            pulldown_cmark::Event::InlineMath(tex) | pulldown_cmark::Event::DisplayMath(tex) => {
+                flush(ui, &mut job);
+                if let Some(math_fn) = options.math_fn {
+                    math_fn(ui, tex, true);
+                }
+                None
+            }
+            pulldown_cmark::Event::Text(text) => Some(text.as_ref()),
+            pulldown_cmark::Event::Code(text) => {
+                code = true;
+                Some(text.as_ref())
+            }
+            pulldown_cmark::Event::SoftBreak => Some(" "),
+            pulldown_cmark::Event::HardBreak => Some("\n"),
+            pulldown_cmark::Event::Start(pulldown_cmark::Tag::Strong) => {
+                strong = true;
+                None
+            }
+            pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Strong) => {
+                strong = header;
+                None
+            }
+            pulldown_cmark::Event::Start(pulldown_cmark::Tag::Emphasis) => {
+                italics = true;
+                None
+            }
+            pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Emphasis) => {
+                italics = false;
+                None
+            }
+            pulldown_cmark::Event::Start(pulldown_cmark::Tag::Strikethrough) => {
+                strike = true;
+                None
+            }
+            pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Strikethrough) => {
+                strike = false;
+                None
+            }
+            _ => None,
+        };
+        if let Some(text) = text {
+            let mut rich = egui::RichText::new(text).line_height(line);
+            if strong {
+                rich = rich.strong();
+            }
+            if italics {
+                rich = rich.italics();
+            }
+            if strike {
+                rich = rich.strikethrough();
+            }
+            if code {
+                rich = rich.code();
+            }
+            rich.append_to(&mut job, ui.style(), egui::FontSelection::Default, valign);
+        }
+    }
+    flush(ui, &mut job);
+    egui_commonmark_backend::set_math_line_height(ui, None);
 }
 
 fn parser_options_math(is_math_enabled: bool) -> pulldown_cmark::Options {
@@ -136,6 +283,7 @@ impl CommonMarkViewerInternal {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
             let height = ui.text_style_height(&TextStyle::Body);
             ui.set_row_height(height);
+            self.has_math = options.math_extent_fn.is_some() && text.contains('$');
 
             let mut events = pulldown_cmark::Parser::new_ext(
                 text,
@@ -298,12 +446,77 @@ impl CommonMarkViewerInternal {
         options: &CommonMarkOptions,
         max_width: f32,
     ) {
+        if self.has_math
+            && self.text_style.line_height.is_none()
+            && matches!(event, pulldown_cmark::Event::Start(pulldown_cmark::Tag::Paragraph))
+        {
+            self.math_paragraph(ui, events, event, src_span, cache, options, max_width);
+            return;
+        }
+
         self.event(ui, event, src_span, cache, options, max_width);
 
         self.def_list_def_wrapping(events, max_width, cache, options, ui);
         self.item_list_wrapping(events, max_width, cache, options, ui);
         self.table(events, cache, options, ui, max_width);
         self.blockquote(events, max_width, cache, options, ui);
+    }
+
+    /// Relay: a paragraph whose rows may need to be taller than usual to fit its formulas.
+    /// The text has to know that from its first word on, so look at the paragraph first.
+    #[allow(clippy::too_many_arguments)]
+    fn math_paragraph<'e>(
+        &mut self,
+        ui: &mut Ui,
+        events: &mut Peekable<impl Iterator<Item = EventIteratorItem<'e>>>,
+        start: pulldown_cmark::Event,
+        src_span: Range<usize>,
+        cache: &mut CommonMarkCache,
+        options: &CommonMarkOptions,
+        max_width: f32,
+    ) {
+        let items = delayed_events(events, |end| {
+            matches!(end, pulldown_cmark::TagEnd::Paragraph)
+        });
+        // The enclosing loop checks this only for the events it sees itself.
+        let is_last = events.peek().is_none();
+        let room_above = !self.list.is_inside_a_list();
+        let leading = math_leading(
+            ui,
+            math_texts(items.iter().map(|(event, _)| event)),
+            options,
+            room_above,
+        );
+
+        self.event(ui, start, src_span, cache, options, max_width);
+        self.begin_math_rows(ui, leading);
+        let mut items = items.into_iter().enumerate().peekable();
+        while let Some((_, (event, span))) = items.next() {
+            if is_last && items.peek().is_none() {
+                self.line.should_end_newline_forced = false;
+            }
+            self.process_event(ui, &mut items, event, span, cache, options, max_width);
+        }
+        self.end_math_rows(ui, leading);
+    }
+
+    fn begin_math_rows(&mut self, ui: &mut Ui, leading: Option<MathLeading>) {
+        if let Some(leading) = leading {
+            self.text_style.line_height = Some(leading.line);
+            egui_commonmark_backend::set_math_line_height(ui, Some(leading.line));
+            ui.set_row_height(leading.first_row);
+        }
+    }
+
+    fn end_math_rows(&mut self, ui: &mut Ui, leading: Option<MathLeading>) {
+        if leading.is_some() {
+            self.text_style.line_height = None;
+            egui_commonmark_backend::set_math_line_height(ui, None);
+            // If the row is still open, whatever ends it restores the height.
+            if ui.cursor().left() <= ui.max_rect().left() + 0.5 {
+                ui.set_row_height(ui.text_style_height(&TextStyle::Body));
+            }
+        }
     }
 
     fn def_list_def_wrapping<'e>(
@@ -379,6 +592,14 @@ impl CommonMarkViewerInternal {
             self.is_list_item = false;
 
             let item_events = delayed_events_list_item(events);
+            let in_paragraphs = item_events.iter().any(|(event, _)| {
+                matches!(event, pulldown_cmark::Event::Start(pulldown_cmark::Tag::Paragraph))
+            });
+            let leading = if self.has_math && !in_paragraphs {
+                math_leading(ui, math_texts(item_events.iter().map(|(event, _)| event)), options, false)
+            } else {
+                None
+            };
             let mut events_iter = item_events.into_iter().enumerate().peekable();
 
             // A text item must not inherit the minimum height of an interactive
@@ -388,6 +609,7 @@ impl CommonMarkViewerInternal {
             let size = egui::vec2(ui.available_size_before_wrap().x, ui.text_style_height(&TextStyle::Body));
             let layout = egui::Layout::left_to_right(egui::Align::BOTTOM).with_main_wrap(true);
             ui.allocate_ui_with_layout(size, layout, |ui| {
+                self.begin_math_rows(ui, leading);
                 while let Some((_, (e, src_span))) = events_iter.next() {
                     self.process_event(
                         ui,
@@ -399,6 +621,7 @@ impl CommonMarkViewerInternal {
                         max_width,
                     );
                 }
+                self.end_math_rows(ui, leading);
             });
         }
     }
@@ -450,7 +673,7 @@ impl CommonMarkViewerInternal {
         &mut self,
         events: &mut Peekable<impl Iterator<Item = EventIteratorItem<'e>>>,
         _cache: &mut CommonMarkCache,
-        _options: &CommonMarkOptions,
+        options: &CommonMarkOptions,
         ui: &mut Ui,
         max_width: f32,
     ) {
@@ -464,17 +687,24 @@ impl CommonMarkViewerInternal {
             let columns = header.len().max(rows.iter().map(Vec::len).max().unwrap_or(0)).max(1);
             let available = ui.available_width().min(max_width).max(120.);
             let mut weights = vec![5.0f32; columns];
+            // Relay: a formula cannot wrap, so its column has to be at least that wide.
+            let mut formula_widths = vec![0.0f32; columns];
             for row in std::iter::once(&header).chain(rows.iter()) {
                 for (index, col) in row.iter().enumerate() {
                     let length: usize = col.iter().map(|(event,_)| match event {
                         pulldown_cmark::Event::Text(t) | pulldown_cmark::Event::Code(t) => t.chars().count(),
+                        pulldown_cmark::Event::InlineMath(t) | pulldown_cmark::Event::DisplayMath(t) => {
+                            let width = options.math_extent_fn.map_or(0.0, |extent| extent(ui, t).width);
+                            formula_widths[index] = formula_widths[index].max(width);
+                            (width / 7.0).ceil() as usize
+                        }
                         _ => 0,
                     }).sum();
                     weights[index] = weights[index].max((length as f32).min(36.));
                 }
             }
             let total: f32 = weights.iter().sum();
-            let minimums:Vec<f32>=weights.iter().map(|weight|if *weight<=6.{32.}else if *weight<=12.{72.}else{128.}).collect();
+            let minimums:Vec<f32>=weights.iter().zip(&formula_widths).map(|(weight,formula)|(if *weight<=6.{32.0f32}else if *weight<=12.{72.}else{128.}).max(formula+2.)).collect();
             let extra=(available-12.*columns as f32-minimums.iter().sum::<f32>()).max(0.);
             let widths:Vec<f32>=minimums.iter().zip(&weights).map(|(minimum,weight)|minimum+extra*weight/total).collect();
             let table_width=widths.iter().sum::<f32>()+12.*columns as f32;
@@ -513,14 +743,28 @@ impl CommonMarkViewerInternal {
                             }}
                             job.wrap.max_width=widths[index];
                             let galley=ui.painter().layout_job(job.clone());height=height.max(galley.size().y);
-                            cells.push((job,links));
+                            // Relay: measure a cell with formulas by laying it out unseen.
+                            let math_cell=row.get(index).filter(|col|math_texts(col.iter().map(|(event,_)|event)).next().is_some());
+                            if let Some(col)=math_cell {
+                                let area=egui::Rect::from_min_size(ui.cursor().min,egui::vec2(widths[index],0.));
+                                let mut probe=ui.new_child(egui::UiBuilder::new().id_salt(("math-probe",row_index,index)).max_rect(area).layout(egui::Layout::left_to_right(egui::Align::BOTTOM).with_main_wrap(true)).invisible());
+                                table_math_cell(&mut probe,col,row_index==0,options);
+                                height=height.max(probe.min_rect().height());
+                            }
+                            cells.push((job,links,math_cell));
                         }
                         let (rect,_)=ui.allocate_exact_size(egui::vec2(table_width,height+16.),egui::Sense::hover());
                         if row_index==0 || row_index%2==1 {ui.painter().rect_filled(rect,0.,ui.visuals().faint_bg_color);}
                         ui.painter().hline(rect.x_range(),rect.bottom(),ui.visuals().widgets.noninteractive.bg_stroke);
                         let mut x=rect.left()+6.;
-                        for (index,(job,links)) in cells.into_iter().enumerate(){
+                        for (index,(job,links,math_cell)) in cells.into_iter().enumerate(){
                             let cell=egui::Rect::from_min_size(egui::pos2(x,rect.top()+8.),egui::vec2(widths[index],height));
+                            if let Some(col)=math_cell {
+                                let mut child=ui.new_child(egui::UiBuilder::new().id_salt(("math-cell",row_index,index)).max_rect(cell).layout(egui::Layout::left_to_right(egui::Align::BOTTOM).with_main_wrap(true)));
+                                table_math_cell(&mut child,col,row_index==0,options);
+                                x+=widths[index]+12.;
+                                continue;
+                            }
                             let mut child=ui.new_child(egui::UiBuilder::new().max_rect(cell).layout(egui::Layout::top_down(egui::Align::Min)));
                             child.set_width(widths[index]);
                             child.add(egui::Label::new(job).wrap().halign(egui::Align::Min).selectable(true)).on_hover_ui(|ui|{for url in links{ui.hyperlink(&url);}});
@@ -574,7 +818,9 @@ impl CommonMarkViewerInternal {
                 footnote_start(ui, &footnote);
             }
             pulldown_cmark::Event::SoftBreak => {
-                soft_break(ui);
+                if !self.after_math_block(ui) {
+                    soft_break(ui);
+                }
             }
             pulldown_cmark::Event::HardBreak => newline(ui),
             pulldown_cmark::Event::Rule => {
@@ -609,12 +855,28 @@ impl CommonMarkViewerInternal {
         }
     }
 
+    /// Relay: a formula on a row of its own was just drawn, and the next row is still empty.
+    fn after_math_block(&self, ui: &Ui) -> bool {
+        self.has_math
+            && self.code_block.is_none()
+            && !self.text_style.code
+            && ui.cursor().left() <= ui.max_rect().left() + 0.5
+    }
+
     fn event_text(&mut self, text: CowStr, ui: &mut Ui) {
-        let rich_text = self.text_style.to_richtext(ui, &text);
+        let text: &str = if self.after_math_block(ui) {
+            text.trim_start()
+        } else {
+            &text
+        };
+        if text.is_empty() {
+            return;
+        }
+        let rich_text = self.text_style.to_richtext(ui, text);
         if let Some(image) = &mut self.image {
             image.alt_text.push(rich_text);
         } else if let Some(block) = &mut self.code_block {
-            block.content.push_str(&text);
+            block.content.push_str(text);
         } else if let Some(link) = &mut self.link {
             link.text.push(rich_text);
         } else {

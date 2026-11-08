@@ -23,6 +23,12 @@ russh = { version = "=0.65.0", default-features = false, features = ["ring", "rs
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 pulldown-cmark = { version = "=0.12.2", default-features = false }
+ratex-parser = "=0.1.15"
+ratex-layout = "=0.1.15"
+ratex-types = "=0.1.15"
+ratex-render = { version = "=0.1.15", features = ["embed-fonts"] }
+ratex-unicode-font = "=0.1.15"
+ab_glyph = "0.2"
 sha2 = "0.10"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "io-util", "macros", "process"] }
 uuid = { version = "1", features = ["v4", "serde"] }
@@ -51,3 +57,5 @@ debug = 0
 egui-winit = { path = "vendor/egui-winit" }
 egui_commonmark = { path = "vendor/egui_commonmark" }
 egui_commonmark_backend = { path = "vendor/egui_commonmark_backend" }
+ratex-layout = { path = "vendor/ratex-layout" }
+ratex-unicode-font = { path = "vendor/ratex-unicode-font" }

@@ -32,6 +32,7 @@ pub struct CommonMarkOptions<'f> {
     /// Whether to present a mutable ui for things like checkboxes
     pub mutable: bool,
     pub math_fn: Option<&'f crate::RenderMathFn>,
+    pub math_extent_fn: Option<&'f crate::RenderMathExtentFn>,
     pub html_fn: Option<&'f crate::RenderHtmlFn>,
 }
 
@@ -75,6 +76,7 @@ impl Default for CommonMarkOptions<'_> {
             alerts: AlertBundle::gfm(),
             mutable: false,
             math_fn: None,
+            math_extent_fn: None,
             html_fn: None,
         }
     }
@@ -115,11 +117,17 @@ pub struct Style {
     pub strikethrough: bool,
     pub quote: bool,
     pub code: bool,
+    /// Relay: larger line height of a paragraph with tall formulas.
+    pub line_height: Option<f32>,
 }
 
 impl Style {
     pub fn to_richtext(&self, ui: &Ui, text: &str) -> RichText {
         let mut text = RichText::new(text);
+
+        if self.line_height.is_some() {
+            text = text.line_height(self.line_height);
+        }
 
         if let Some(level) = self.heading {
             let max_height = ui

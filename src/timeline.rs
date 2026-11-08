@@ -3,7 +3,7 @@ use crate::{
     ui::{self as design, Palette, ACCENT},
 };
 use eframe::egui::{self, RichText};
-use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
+use egui_commonmark::CommonMarkCache;
 use serde_json::Value;
 use std::{collections::HashMap, ops::Range};
 
@@ -506,7 +506,7 @@ pub fn result_view(
             }
             if let Some(result) = v["result"].as_str().filter(|s| !s.is_empty()) {
                 ui.add_space(6.);
-                CommonMarkViewer::new().show(ui, cache, result);
+                crate::math::show(ui, cache, result);
             }
             return;
         }
