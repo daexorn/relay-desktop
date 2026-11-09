@@ -1,0 +1,7 @@
+<resources>
+    <style name="Theme.Relay" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#19191b</item>
+        <item name="android:statusBarColor">#19191b</item>
+        <item name="android:navigationBarColor">#19191b</item>
+    </style>
+</resources>
