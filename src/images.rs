@@ -90,7 +90,8 @@ fn prepare(ctx: &egui::Context, name: String, img: DynamicImage) -> Result<Attac
     } else {
         img
     };
-    let thumb = img.thumbnail(96, 72).into_rgba8();
+    // Big enough for the preview in a message bubble; tiles scale it down.
+    let thumb = img.thumbnail(440, 320).into_rgba8();
     let size = [thumb.width() as usize, thumb.height() as usize];
     let texture = ctx.load_texture(
         uuid::Uuid::new_v4().to_string(),
@@ -117,6 +118,28 @@ fn prepare(ctx: &egui::Context, name: String, img: DynamicImage) -> Result<Attac
         bytes: bytes.get_ref().len(),
         source: json!({"type":"base64","media_type":mime,"data":STANDARD.encode(bytes.into_inner())}),
     })
+}
+
+/// A picture from a saved conversation: preview only, it is never sent again.
+pub fn from_history(ctx: &egui::Context, image: &Value) -> Attachment {
+    let data = image["data"].as_str().unwrap_or("");
+    let decoded = STANDARD.decode(data).ok().and_then(|bytes| {
+        let img = image::load_from_memory(&bytes).ok()?;
+        Some((bytes.len(), img.thumbnail(440, 320).into_rgba8()))
+    });
+    let (bytes, texture) = match decoded {
+        Some((bytes, thumb)) => {
+            let size = [thumb.width() as usize, thumb.height() as usize];
+            let texture = ctx.load_texture(
+                uuid::Uuid::new_v4().to_string(),
+                egui::ColorImage::from_rgba_unmultiplied(size, thumb.as_raw()),
+                egui::TextureOptions::LINEAR,
+            );
+            (bytes, Some(texture))
+        }
+        None => (0, None),
+    };
+    Attachment { name: "Изображение".into(), texture, bytes, source: Value::Null }
 }
 
 #[cfg(test)]

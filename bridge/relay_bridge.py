@@ -7,6 +7,7 @@ out of the active history. Project files and Claude settings are never changed.
 """
 import collections
 import base64
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -341,18 +342,42 @@ class Transcripts:
         if not chain and nodes:
             chain = list(nodes.values())
         result = []
+        image_budget = MAX_HISTORY_IMAGES
+        for row in reversed(chain):
+            # Images are sent newest first, so a long history keeps its latest pictures.
+            content = (row.get("message") or {}).get("content") if isinstance(row.get("message"), dict) else None
+            if isinstance(content, list):
+                for b in content:
+                    if isinstance(b, dict) and b.get("type") == "image":
+                        data = (b.get("source") or {}).get("data") or ""
+                        if 0 < len(data) <= image_budget:
+                            image_budget -= len(data)
+                            b["_relay_keep"] = True
         for row in chain:
+            # Claude's own bookkeeping (image paths, interrupt markers) is not conversation.
+            if row.get("isMeta"):
+                continue
             message = row.get("message") or {}
             if not isinstance(message,dict):continue
             role = message.get("role", row.get("type"))
             content = message.get("content", "")
             text = visible_text(plain(content)) if role == "user" else plain(content)
-            if text:
-                result.append({"role": role, "text": text, "uuid": row.get("uuid", "")})
+            if role == "user" and INTERRUPTED.fullmatch(text.strip()):
+                continue
+            if role == "assistant" and text.strip() == "No response requested.":
+                continue
+            images = []
             if role == "user" and isinstance(content, list):
-                count = sum(1 for b in content if isinstance(b, dict) and b.get("type") == "image")
-                if count:
-                    result.append({"role": "user", "text": "Прикреплены изображения: " + str(count)})
+                for b in content:
+                    if isinstance(b, dict) and b.get("type") == "image":
+                        source = b.get("source") or {}
+                        images.append({"media_type": source.get("media_type", "image/png"),
+                                       "data": source.get("data", "") if b.pop("_relay_keep", False) else ""})
+            if text or images:
+                entry = {"role": role, "text": text, "uuid": row.get("uuid", "")}
+                if images:
+                    entry["images"] = images
+                result.append(entry)
             if isinstance(content, list):
                 for b in content:
                     if not isinstance(b, dict):
@@ -387,6 +412,130 @@ def load_board():
         except OSError:
             continue
     return namespace, None
+
+
+INTERRUPTED = re.compile(r"\[Request interrupted by user(?: for tool use)?\]")
+# Total base64 of pictures sent with one history; older ones become placeholders.
+MAX_HISTORY_IMAGES = 12 * 1024 * 1024
+
+
+class SessionMeta:
+    """Session names, pins and folders shared by everyone who connects to this server.
+    Stored next to the team board; Claude's own transcripts are never rewritten."""
+
+    def __init__(self, path=None):
+        if path:
+            self.path = Path(path)
+        else:
+            shared = Path(os.environ.get("RELAY_BOARD_DIR", "/opt/relay-board"))
+            self.path = shared / "sessions.json"
+            if not (shared.is_dir() and os.access(shared, os.W_OK)):
+                self.path = Path.home() / ".config/relay-desktop/sessions.json"
+
+    def read(self):
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        data.setdefault("folders", [])
+        data.setdefault("sessions", {})
+        return data
+
+    def update(self, change):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.path.with_suffix(".lock"), "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            data = self.read()
+            change(data)
+            temp = self.path.with_suffix(".tmp")
+            temp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+            os.chmod(temp, 0o664)
+            temp.replace(self.path)
+
+    def session(self, sid, title=None, pinned=None, folder=None, actor=""):
+        def change(data):
+            folders = {f["id"] for f in data["folders"]}
+            meta = data["sessions"].setdefault(sid, {})
+            if title is not None:
+                clean = " ".join(str(title).split())[:120]
+                if clean:
+                    meta["title"] = clean
+                else:
+                    meta.pop("title", None)
+            if pinned is not None:
+                if pinned:
+                    meta["pinned"] = time.time()
+                else:
+                    meta.pop("pinned", None)
+            if folder is not None:
+                if folder and folder not in folders:
+                    raise ValueError("Такой папки нет. Обнови список сессий.")
+                if folder:
+                    meta["folder"] = folder
+                else:
+                    meta.pop("folder", None)
+            meta["changed_by"] = str(actor)[:80]
+            if set(meta) <= {"changed_by"}:
+                data["sessions"].pop(sid, None)
+        self.update(change)
+
+    def folder(self, ident=None, name=None, delete=False, order=None):
+        created = []
+        def change(data):
+            folders = data["folders"]
+            if not ident:
+                clean = " ".join(str(name or "").split())[:60]
+                if not clean:
+                    raise ValueError("Назови папку.")
+                if any(f["name"].lower() == clean.lower() for f in folders):
+                    raise ValueError(f"Папка «{clean}» уже есть.")
+                new = "f-" + uuid.uuid4().hex[:8]
+                folders.append({"id": new, "name": clean, "order": len(folders)})
+                created.append(new)
+                return
+            target = next((f for f in folders if f["id"] == ident), None)
+            if target is None:
+                raise ValueError("Такой папки нет. Обнови список сессий.")
+            if delete:
+                folders.remove(target)
+                for meta in data["sessions"].values():
+                    if meta.get("folder") == ident:
+                        meta.pop("folder", None)
+                return
+            if name is not None:
+                clean = " ".join(str(name).split())[:60]
+                if not clean:
+                    raise ValueError("Назови папку.")
+                target["name"] = clean
+            if order is not None:
+                folders.remove(target)
+                folders.insert(max(0, min(int(order), len(folders))), target)
+                for i, f in enumerate(folders):
+                    f["order"] = i
+        self.update(change)
+        return created[0] if created else ident
+
+    def apply(self, sessions):
+        """Adds shared names, pins and folders to the transcript list."""
+        data = self.read()
+        folders = sorted(data["folders"], key=lambda f: f.get("order", 0))
+        known = {f["id"] for f in folders}
+        rows = []
+        for row in sessions:
+            meta = data["sessions"].get(row["id"], {})
+            row = dict(row)
+            if meta.get("title"):
+                row["auto_title"] = row["title"]
+                row["title"] = meta["title"]
+            row["pinned"] = float(meta.get("pinned") or 0)
+            row["folder"] = meta.get("folder") if meta.get("folder") in known else ""
+            rows.append(row)
+        return rows, folders
+
+    def forget(self, sid):
+        self.update(lambda data: data["sessions"].pop(sid, None))
 
 
 def claude_binary():
@@ -687,6 +836,15 @@ class Bridge:
         self.desktop_context = ""
         self.actor = ""
         self.board, self.board_file = load_board()
+        self.meta = SessionMeta()
+
+    def send_sessions(self):
+        sessions = self.transcripts.sessions()
+        try:
+            sessions, folders = self.meta.apply(sessions)
+        except OSError:
+            folders = []
+        self.send({"type": "sessions", "sessions": sessions, "folders": folders})
 
     def hello(self):
         try:
@@ -701,7 +859,18 @@ class Bridge:
         claimed = False
         try:
             if op == "sessions":
-                self.send({"type": "sessions", "sessions": self.transcripts.sessions()})
+                self.send_sessions()
+            elif op == "session_meta":
+                sid = valid_id(req.get("sid"))
+                self.meta.session(sid, title=req.get("title"), pinned=req.get("pinned"),
+                                  folder=req.get("folder"), actor=req.get("actor") or "")
+                self.send_sessions()
+            elif op == "session_folder":
+                created = self.meta.folder(req.get("id"), name=req.get("name"), delete=bool(req.get("delete")),
+                                           order=req.get("order"))
+                if req.get("sid") and created:
+                    self.meta.session(valid_id(req.get("sid")), folder=created, actor=req.get("actor") or "")
+                self.send_sessions()
             elif op == "delete_session":
                 sid = valid_id(req.get('sid'))
                 with self.run_lock:
@@ -712,6 +881,10 @@ class Bridge:
                         run.close()
                         self.runs.pop(sid, None)
                     self.transcripts.delete(sid)
+                try:
+                    self.meta.forget(sid)
+                except OSError:
+                    pass
                 self.send({'type': 'session_deleted', 'sid': sid})
             elif op == "file_info":
                 self.files.info(req.get("id"),req.get("path"),req.get("cwd"))

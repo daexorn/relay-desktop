@@ -168,6 +168,8 @@ pub enum Icon {
     File,
     Close,
     Trash,
+    Pin,
+    Dots,
     Check,
     Arrow,
     Server,
@@ -203,6 +205,18 @@ pub fn icon(p: &egui::Painter, r: Rect, which: Icon, color: Color32) {
         Icon::Close => {
             line((-4., -4.), (4., 4.));
             line((-4., 4.), (4., -4.));
+        }
+        Icon::Pin => {
+            // A pushpin: head, collar and needle, tilted like a pinned note.
+            path(&[(-1., -8.), (6., -1.)]);
+            path(&[(-3., -4.), (2., 1.)]);
+            path(&[(-1., -8.), (-4., -3.), (-1., 0.), (2., 3.), (6., -1.)]);
+            line((0., 2.), (-6., 8.));
+        }
+        Icon::Dots => {
+            for x in [-5.5, 0., 5.5] {
+                p.circle_filled(v(x, 0.), 1.5 * z, color);
+            }
         }
         Icon::Trash => {
             line((-7., -5.), (7., -5.));

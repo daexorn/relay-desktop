@@ -748,6 +748,9 @@ mod tests {
             selected_chat: HashMap::new(),
             delete_chat: None,
             deleted_sessions: Default::default(),
+            renaming: None,
+            folder_renaming: None,
+            folder_creating: None,
             search: String::new(),
             editor: None,
             trust: None,
@@ -973,6 +976,7 @@ mod tests {
             title: "Delete this".into(),
             cwd: a.cwd.clone(),
             modified: 1.,
+            ..Default::default()
         };
         for host in [&a, &b] {
             app.remote
@@ -1037,6 +1041,7 @@ mod tests {
             title: "Leader".into(),
             cwd: a.cwd.clone(),
             modified: 1.,
+            ..Default::default()
         };
         app.request_delete(&a.id, session.clone());
         assert!(app.delete_chat.is_none());

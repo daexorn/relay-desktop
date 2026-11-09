@@ -64,6 +64,7 @@ impl RelayApp {
                             title: "Команда Relay".into(),
                             cwd: "/opt/atlas".into(),
                             modified: crate::cluster::now(),
+                            ..Default::default()
                         },
                     );
                 }

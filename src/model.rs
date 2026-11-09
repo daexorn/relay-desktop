@@ -112,6 +112,9 @@ pub struct Settings {
     pub orchestrators: Vec<crate::cluster::Config>,
     #[serde(default)]
     pub prompt_snippets: Vec<crate::templates::Snippet>,
+    /// Session folders folded in the sidebar (this computer only).
+    #[serde(default)]
+    pub collapsed_folders: Vec<String>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -179,6 +182,20 @@ pub struct Session {
     pub title: String,
     pub cwd: String,
     pub modified: f64,
+    /// Claude's own title when the team renamed the session.
+    #[serde(default)]
+    pub auto_title: String,
+    /// When it was pinned (0 = not pinned); shared by everyone on the server.
+    #[serde(default)]
+    pub pinned: f64,
+    #[serde(default)]
+    pub folder: String,
+}
+/// A named group of sessions, shared by everyone who connects to the server.
+#[derive(Clone, Default, Deserialize, Debug)]
+pub struct SessionFolder {
+    pub id: String,
+    pub name: String,
 }
 #[derive(Clone, Default, Deserialize)]
 pub struct Folder {
@@ -199,6 +216,10 @@ pub struct Message {
     pub failed: bool,
     #[serde(default)]
     pub tool_id: String,
+    /// Pictures of a user message from history: {media_type, data}; data is empty when the
+    /// server left it out to keep the history small.
+    #[serde(default)]
+    pub images: Vec<Value>,
 }
 
 #[derive(Clone)]

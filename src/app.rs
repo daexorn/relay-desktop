@@ -27,6 +27,7 @@ struct Remote {
     connecting: bool,
     version: String,
     sessions: Vec<Session>,
+    folders: Vec<crate::model::SessionFolder>,
     home: String,
     usage: Usage,
     usage_requested: Option<Instant>,
@@ -34,6 +35,8 @@ struct Remote {
     sessions_loaded: bool,
     sessions_retries: u8,
     sessions_error: String,
+    /// Names, pins and folders change on other computers too; the list is polled.
+    sessions_polled: Option<Instant>,
 }
 struct Chat {
     sid: String,
@@ -152,6 +155,11 @@ pub struct RelayApp {
     selected_chat: HashMap<String, String>,
     delete_chat: Option<session_actions::DeleteChat>,
     deleted_sessions: std::collections::HashSet<String>,
+    /// Session being renamed in the sidebar, with the text typed so far.
+    renaming: Option<(String, String)>,
+    folder_renaming: Option<(String, String)>,
+    /// New folder being named; Some(sid) moves that session into it once created.
+    folder_creating: Option<(String, Option<String>)>,
     search: String,
     editor: Option<Editor>,
     trust: Option<Trust>,
@@ -220,6 +228,9 @@ impl RelayApp {
             selected_chat: HashMap::new(),
             delete_chat: None,
             deleted_sessions: Default::default(),
+            renaming: None,
+            folder_renaming: None,
+            folder_creating: None,
             search: String::new(),
             editor: None,
             trust: None,
@@ -969,6 +980,12 @@ impl RelayApp {
                     .collect();
                 let remote = self.remote.entry(server.clone()).or_default();
                 remote.sessions = sessions.clone();
+                if let Some(folders) = value["folders"].as_array() {
+                    remote.folders = folders
+                        .iter()
+                        .filter_map(|f| serde_json::from_value(f.clone()).ok())
+                        .collect();
+                }
                 remote.sessions_loaded = true;
                 remote.sessions_requested = None;
                 remote.sessions_error.clear();
@@ -1008,7 +1025,7 @@ impl RelayApp {
                 let sid = value["sid"].as_str().unwrap_or("");
                 if let Some(c) = self.chats.get_mut(&key(&server, sid)) {
                     if !c.busy {
-                        c.messages = value["messages"]
+                        let mut messages: Vec<Message> = value["messages"]
                             .as_array()
                             .map(|rows| {
                                 rows.iter()
@@ -1016,6 +1033,19 @@ impl RelayApp {
                                     .collect()
                             })
                             .unwrap_or_default();
+                        // Pictures from history become previews in their message bubble.
+                        let ctx = self.controller.bus.ctx.clone();
+                        for (index, message) in messages.iter_mut().enumerate() {
+                            if !message.images.is_empty() {
+                                let previews = message
+                                    .images
+                                    .drain(..)
+                                    .map(|image| crate::images::from_history(&ctx, &image))
+                                    .collect();
+                                c.sent_images.insert(index, previews);
+                            }
+                        }
+                        c.messages = messages;
                         c.loading = false;
                         c.loaded = true;
                     }
@@ -1512,10 +1542,15 @@ impl RelayApp {
                                 }
                             });
                     });
-                let sessions = self
+                let sessions: Vec<Session> = self
                     .remote
                     .get(&server.id)
                     .map(|r| r.sessions.clone())
+                    .unwrap_or_default();
+                let folders = self
+                    .remote
+                    .get(&server.id)
+                    .map(|r| r.folders.clone())
                     .unwrap_or_default();
                 let query = self.search.to_lowercase();
                 let refreshing = self
@@ -1523,188 +1558,146 @@ impl RelayApp {
                     .get(&server.id)
                     .is_some_and(|r| connected && !r.sessions_loaded);
                 ui.add_space(4.);
+                ui.horizontal(|ui| {
+                    ui.add_space(8.);
+                    label(ui, "Сессии", 12., p.muted);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if refreshing {
+                            design::dots(ui, p.muted);
+                        } else if design::button(ui, "", Some(Icon::Refresh), Kind::Ghost, p, Vec2::splat(24.))
+                            .on_hover_text("Обновить список и открытый разговор")
+                            .clicked()
+                        {
+                            self.refresh(&server.id);
+                        }
+                        if connected
+                            && design::button(ui, "", Some(Icon::Folder), Kind::Ghost, p, Vec2::splat(24.))
+                                .on_hover_text("Новая папка для сессий — её увидят все, кто подключается к серверу")
+                                .clicked()
+                        {
+                            self.folder_creating = Some((String::new(), None));
+                        }
+                    });
+                });
+                let matches = |s: &Session| {
+                    query.is_empty()
+                        || s.title.to_lowercase().contains(&query)
+                        || s.auto_title.to_lowercase().contains(&query)
+                        || s.cwd.to_lowercase().contains(&query)
+                };
+                let known: std::collections::HashSet<&str> = folders.iter().map(|f| f.id.as_str()).collect();
+                let mut pinned: Vec<&Session> = sessions.iter().filter(|s| s.pinned > 0. && matches(s)).collect();
+                pinned.sort_by(|a, b| b.pinned.total_cmp(&a.pinned));
+                let loose: Vec<&Session> = sessions
+                    .iter()
+                    .filter(|s| s.pinned == 0. && !known.contains(s.folder.as_str()) && matches(s))
+                    .collect();
+                let mut actions: Vec<(Session, RowAction)> = vec![];
                 egui::ScrollArea::vertical()
                     .id_salt("session-list")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         ui.spacing_mut().item_spacing.y = 1.;
-                        let mut count = 0;
-                        let mut group = "";
-                        for session in sessions {
-                            if !query.is_empty()
-                                && !session.title.to_lowercase().contains(&query)
-                                && !session.cwd.to_lowercase().contains(&query)
-                            {
-                                continue;
-                            }
-                            let heading = day_group(session.modified);
-                            if heading != group {
-                                ui.add_space(if count == 0 { 6. } else { 12. });
-                                ui.horizontal(|ui| {
-                                    ui.add_space(8.);
-                                    label(ui, heading, 11.5, p.muted);
-                                    if count == 0 {
-                                        ui.with_layout(
-                                            Layout::right_to_left(Align::Center),
-                                            |ui| {
-                                                if refreshing {
-                                                    design::dots(ui, p.muted);
-                                                } else if design::button(
-                                                    ui,
-                                                    "",
-                                                    Some(Icon::Refresh),
-                                                    Kind::Ghost,
-                                                    p,
-                                                    Vec2::splat(24.),
-                                                )
-                                                .on_hover_text(
-                                                    "Обновить список и открытый разговор",
-                                                )
-                                                .clicked()
-                                                {
-                                                    self.refresh(&server.id);
-                                                }
-                                            },
-                                        );
-                                    }
-                                });
-                                ui.add_space(3.);
-                                group = heading;
-                            }
-                            count += 1;
-                            let k = key(&server.id, &session.id);
-                            let selected = self.selected_chat.get(&server.id) == Some(&session.id);
-                            let busy = self.chats.get(&k).is_some_and(|c| c.busy);
-                            let background = ui.painter().add(egui::Shape::Noop);
-                            let row = egui::Frame::new()
-                                .inner_margin(egui::Margin::symmetric(10, 7))
-                                .show(ui, |ui| {
-                                    ui.set_width(ui.available_width().max(120.));
-                                    ui.spacing_mut().item_spacing.y = 2.;
-                                    ui.allocate_ui_with_layout(
-                                        Vec2::new((ui.available_width() - 28.).max(60.), 0.),
-                                        Layout::top_down(Align::Min),
-                                        |ui| {
-                                            design::session_title(
-                                                ui,
-                                                &self
-                                                    .cluster_label(&server.id, &session.id)
-                                                    .unwrap_or_else(|| session.title.clone()),
-                                                if selected {
-                                                    p.text
-                                                } else {
-                                                    design::mix(p.text, p.muted, 0.25)
-                                                },
-                                            );
-                                        },
-                                    );
-                                    ui.horizontal(|ui| {
-                                        ui.spacing_mut().interact_size.y = 14.;
-                                        let folder = folder_name(&session.cwd);
-                                        let meta =
-                                            format!("{folder} · {}", relative(session.modified));
-                                        let width = ui.available_width()
-                                            - 28.
-                                            - if busy { 32. } else { 0. };
-                                        let mut job = egui::text::LayoutJob::simple(
-                                            meta,
-                                            FontId::proportional(11.5),
-                                            p.muted,
-                                            width,
-                                        );
-                                        job.wrap.max_rows = 1;
-                                        job.wrap.break_anywhere = true;
-                                        job.wrap.overflow_character = Some('…');
-                                        ui.label(job);
-                                        if busy {
-                                            design::dots(ui, ACCENT);
-                                        }
-                                    });
-                                })
-                                .response;
-                            let response = ui.interact(
-                                row.rect,
-                                ui.id().with(&session.id),
-                                egui::Sense::click(),
-                            );
-                            let t = ctx.animate_bool_with_time(
-                                response.id.with("active"),
-                                selected,
-                                0.18,
-                            );
-                            let hover = ctx.animate_bool_with_time(
-                                response.id.with("hover"),
-                                response.hovered(),
-                                0.12,
-                            );
-                            ui.painter().set(
-                                background,
-                                egui::Shape::rect_filled(
-                                    row.rect,
-                                    8.,
-                                    design::mix(p.side, p.line, t.max(hover * 0.55)),
-                                ),
-                            );
-                            let trash_rect = egui::Rect::from_min_size(
-                                egui::pos2(row.rect.right() - 30., row.rect.top() + 4.),
-                                Vec2::splat(24.),
-                            );
-                            let reason = self.deletion_blocked(&server.id, &session.id);
-                            let trash = ui.interact(
-                                trash_rect,
-                                response.id.with("delete"),
-                                egui::Sense::click(),
-                            );
-                            if trash.hovered() {
-                                ui.painter().rect_filled(
-                                    trash_rect,
-                                    6.,
-                                    design::RED.gamma_multiply(0.12),
-                                );
-                            }
-                            design::icon(
-                                ui.painter(),
-                                trash_rect.shrink(3.),
-                                Icon::Trash,
-                                if trash.hovered() {
-                                    design::RED
-                                } else {
-                                    p.muted.gamma_multiply(0.65)
-                                },
-                            );
-                            let mut delete = trash
-                                .on_hover_text(reason.unwrap_or("Удалить сессию"))
-                                .clicked();
-                            response.context_menu(|ui| {
-                                let button = ui.add_enabled(
-                                    reason.is_none(),
-                                    egui::Button::new("Удалить сессию"),
-                                );
-                                if button
-                                    .on_hover_text(
-                                        reason.unwrap_or("Удалить историю этой сессии с сервера"),
-                                    )
-                                    .clicked()
-                                {
-                                    delete = true;
-                                    ui.close_menu();
+                        if let Some((name, moving)) = self.folder_creating.clone() {
+                            let mut name = name;
+                            ui.add_space(6.);
+                            let submit = folder_name_field(ui, &mut name, "Название папки · Enter", p);
+                            match submit {
+                                Some(true) if !name.trim().is_empty() => {
+                                    self.controller.send(&server.id, json!({"op":"session_folder","name":name.trim(),"sid":moving,"actor":self.settings.actor()}));
+                                    self.folder_creating = None;
                                 }
-                            });
-                            if delete {
-                                self.request_delete(&server.id, session.clone());
-                            }
-                            if response.hovered() {
-                                self.prefetch(&server.id, &session);
-                            }
-                            if response
-                                .on_hover_text(format!("{}\n{}", session.title, session.cwd))
-                                .clicked()
-                                && !delete
-                            {
-                                self.select_chat(session);
+                                Some(_) => self.folder_creating = None,
+                                None => self.folder_creating = Some((name, moving)),
                             }
                         }
-                        if count == 0 {
+                        let mut shown = 0;
+                        if !pinned.is_empty() {
+                            section_heading(ui, Some(Icon::Pin), "Закреплённые", pinned.len(), None, p);
+                            for session in &pinned {
+                                if let Some(action) = self.session_row(ui, ctx, &server.id, session, &folders, connected, p) {
+                                    actions.push(((*session).clone(), action));
+                                }
+                                shown += 1;
+                            }
+                        }
+                        for folder in &folders {
+                            let inside: Vec<&Session> = sessions
+                                .iter()
+                                .filter(|s| s.pinned == 0. && s.folder == folder.id && matches(s))
+                                .collect();
+                            if !query.is_empty() && inside.is_empty() {
+                                continue;
+                            }
+                            let collapsed = self.settings.collapsed_folders.contains(&folder.id) && query.is_empty();
+                            if let Some((id, text)) = self.folder_renaming.clone().filter(|(id, _)| *id == folder.id) {
+                                let mut text = text;
+                                ui.add_space(10.);
+                                match folder_name_field(ui, &mut text, "Новое название · Enter", p) {
+                                    Some(true) if !text.trim().is_empty() => {
+                                        self.controller.send(&server.id, json!({"op":"session_folder","id":id,"name":text.trim()}));
+                                        self.folder_renaming = None;
+                                    }
+                                    Some(_) => self.folder_renaming = None,
+                                    None => self.folder_renaming = Some((id, text)),
+                                }
+                            } else {
+                                let header = section_heading(ui, Some(Icon::Folder), &folder.name, inside.len(), Some(collapsed), p);
+                                if header.clicked() {
+                                    if collapsed {
+                                        self.settings.collapsed_folders.retain(|f| f != &folder.id);
+                                    } else {
+                                        self.settings.collapsed_folders.push(folder.id.clone());
+                                    }
+                                    self.save();
+                                }
+                                if header.double_clicked() {
+                                    self.folder_renaming = Some((folder.id.clone(), folder.name.clone()));
+                                }
+                                header.context_menu(|ui| {
+                                    if ui.button("Переименовать папку").clicked() {
+                                        self.folder_renaming = Some((folder.id.clone(), folder.name.clone()));
+                                        ui.close_menu();
+                                    }
+                                    if ui
+                                        .button(RichText::new("Удалить папку").color(design::RED))
+                                        .on_hover_text("Сессии останутся, просто без папки")
+                                        .clicked()
+                                    {
+                                        self.controller.send(&server.id, json!({"op":"session_folder","id":folder.id,"delete":true}));
+                                        ui.close_menu();
+                                    }
+                                });
+                            }
+                            if collapsed {
+                                continue;
+                            }
+                            if inside.is_empty() {
+                                ui.horizontal(|ui| {
+                                    ui.add_space(30.);
+                                    label(ui, "Пусто — перенеси сюда сессию через «⋯»", 11.5, p.muted.gamma_multiply(0.8));
+                                });
+                            }
+                            for session in inside {
+                                if let Some(action) = self.session_row(ui, ctx, &server.id, session, &folders, connected, p) {
+                                    actions.push((session.clone(), action));
+                                }
+                                shown += 1;
+                            }
+                        }
+                        let mut group = "";
+                        for session in &loose {
+                            let heading = day_group(session.modified);
+                            if heading != group {
+                                section_heading(ui, None, heading, 0, None, p);
+                                group = heading;
+                            }
+                            if let Some(action) = self.session_row(ui, ctx, &server.id, session, &folders, connected, p) {
+                                actions.push(((*session).clone(), action));
+                            }
+                            shown += 1;
+                        }
+                        if shown == 0 && folders.is_empty() {
                             ui.add_space(14.);
                             ui.horizontal_wrapped(|ui| {
                                 ui.add_space(8.);
@@ -1721,11 +1714,7 @@ impl RelayApp {
                                     if !connected && !connecting {
                                         "Подключись, чтобы увидеть сессии"
                                     } else if refreshing || connecting {
-                                        if error.is_empty() {
-                                            "Загружаем сессии…"
-                                        } else {
-                                            &error
-                                        }
+                                        if error.is_empty() { "Загружаем сессии…" } else { &error }
                                     } else if query.is_empty() {
                                         "Пока нет ни одной сессии"
                                     } else {
@@ -1736,8 +1725,146 @@ impl RelayApp {
                                 );
                             });
                         }
+                        ui.add_space(8.);
                     });
+                for (session, action) in actions {
+                    self.row_action(&server.id, session, action);
+                }
             });
+    }
+    /// One session in the sidebar; returns what the user asked for.
+    #[allow(clippy::too_many_arguments)]
+    fn session_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        server: &str,
+        session: &Session,
+        folders: &[crate::model::SessionFolder],
+        connected: bool,
+        p: Palette,
+    ) -> Option<RowAction> {
+        let mut action = None;
+        let k = key(server, &session.id);
+        let selected = self.selected_chat.get(server) == Some(&session.id);
+        let busy = self.chats.get(&k).is_some_and(|c| c.busy);
+        let title = self.cluster_label(server, &session.id).unwrap_or_else(|| session.title.clone());
+        if let Some((sid, text)) = self.renaming.clone().filter(|(sid, _)| *sid == session.id) {
+            let mut text = text;
+            match folder_name_field(ui, &mut text, "Название сессии · Enter, пусто — авто", p) {
+                Some(true) => {
+                    action = Some(RowAction::Rename(text.trim().to_owned()));
+                    self.renaming = None;
+                }
+                Some(false) => self.renaming = None,
+                None => self.renaming = Some((sid, text)),
+            }
+            return action;
+        }
+        let background = ui.painter().add(egui::Shape::Noop);
+        let row = egui::Frame::new()
+            .inner_margin(egui::Margin { left: 12, right: 10, top: 7, bottom: 7 })
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width().max(120.));
+                ui.spacing_mut().item_spacing.y = 2.;
+                ui.allocate_ui_with_layout(
+                    Vec2::new((ui.available_width() - 30.).max(60.), 0.),
+                    Layout::top_down(Align::Min),
+                    |ui| {
+                        design::session_title(
+                            ui,
+                            &title,
+                            if selected { p.text } else { design::mix(p.text, p.muted, 0.22) },
+                        );
+                    },
+                );
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().interact_size.y = 14.;
+                    let place = folder_name(&session.cwd);
+                    let meta = format!("{place} · {}", relative(session.modified));
+                    let width = ui.available_width() - 30. - if busy { 32. } else { 0. };
+                    let mut job = egui::text::LayoutJob::simple(meta, FontId::proportional(11.5), p.muted, width);
+                    job.wrap.max_rows = 1;
+                    job.wrap.break_anywhere = true;
+                    job.wrap.overflow_character = Some('…');
+                    ui.label(job);
+                    if busy {
+                        design::dots(ui, ACCENT);
+                    }
+                });
+            })
+            .response;
+        let response = ui.interact(row.rect, ui.id().with(&session.id), egui::Sense::click());
+        let t = ctx.animate_bool_with_time(response.id.with("active"), selected, 0.18);
+        let hover = ctx.animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.12);
+        let mut shapes = vec![egui::Shape::rect_filled(row.rect, 9., design::mix(p.side, p.line, t.max(hover * 0.55)))];
+        if selected {
+            shapes.push(egui::Shape::rect_filled(
+                egui::Rect::from_min_size(row.rect.left_top() + Vec2::new(3., 9.), Vec2::new(3., row.rect.height() - 18.)),
+                2.,
+                ACCENT,
+            ));
+        }
+        ui.painter().set(background, egui::Shape::Vec(shapes));
+        let dots_rect = egui::Rect::from_min_size(egui::pos2(row.rect.right() - 32., row.rect.top() + 5.), Vec2::splat(26.));
+        let menu_id = response.id.with("menu");
+        let open = ui.memory(|m| m.is_popup_open(menu_id));
+        let dots = ui.interact(dots_rect, response.id.with("dots"), egui::Sense::click());
+        if response.hovered() || dots.hovered() || open || selected {
+            if dots.hovered() || open {
+                ui.painter().rect_filled(dots_rect, 7., p.line);
+            }
+            design::icon(ui.painter(), dots_rect.shrink(5.), Icon::Dots, if dots.hovered() { p.text } else { p.muted });
+        }
+        if dots.clicked() {
+            ui.memory_mut(|m| m.toggle_popup(menu_id));
+        }
+        let reason = self.deletion_blocked(server, &session.id);
+        egui::popup::popup_below_widget(ui, menu_id, &dots, egui::PopupCloseBehavior::CloseOnClick, |ui| {
+            ui.set_min_width(210.);
+            if let Some(a) = session_menu(ui, session, folders, connected, reason, p) {
+                action = Some(a);
+            }
+        });
+        response.context_menu(|ui| {
+            ui.set_min_width(210.);
+            if let Some(a) = session_menu(ui, session, folders, connected, reason, p) {
+                action = Some(a);
+                ui.close_menu();
+            }
+        });
+        if response.double_clicked() && connected {
+            self.renaming = Some((session.id.clone(), session.title.clone()));
+        } else if response.hovered() {
+            self.prefetch(server, session);
+        }
+        let hint = if session.auto_title.is_empty() {
+            format!("{}\n{}", session.title, session.cwd)
+        } else {
+            format!("{}\nClaude назвал: {}\n{}", session.title, session.auto_title, session.cwd)
+        };
+        if response.on_hover_text(hint).clicked() && action.is_none() && !dots.clicked() {
+            action = Some(RowAction::Open);
+        }
+        action
+    }
+    fn row_action(&mut self, server: &str, session: Session, action: RowAction) {
+        let actor = self.settings.actor();
+        match action {
+            RowAction::Open => self.select_chat(session),
+            RowAction::Delete => self.request_delete(server, session),
+            RowAction::Pin(on) => {
+                self.controller.send(server, json!({"op":"session_meta","sid":session.id,"pinned":on,"actor":actor}));
+            }
+            RowAction::StartRename => self.renaming = Some((session.id.clone(), session.title.clone())),
+            RowAction::Rename(title) => {
+                self.controller.send(server, json!({"op":"session_meta","sid":session.id,"title":title,"actor":actor}));
+            }
+            RowAction::Folder(folder) => {
+                self.controller.send(server, json!({"op":"session_meta","sid":session.id,"folder":folder,"actor":actor}));
+            }
+            RowAction::NewFolder => self.folder_creating = Some((String::new(), Some(session.id.clone()))),
+        }
     }
     fn main_panel(&mut self, ctx: &egui::Context) {
         let chat_width = self.settings.appearance.chat_width.clamp(560., 1160.);
@@ -3513,24 +3640,57 @@ impl RelayApp {
                 sessions_loaded: true,
                 sessions_retries: 0,
                 sessions_error: String::new(),
+                sessions_polled: None,
+                folders: vec![
+                    crate::model::SessionFolder { id: "f-ships".into(), name: "Корабли".into() },
+                    crate::model::SessionFolder { id: "f-site".into(), name: "Сайт и лаунчер".into() },
+                ],
                 sessions: vec![
                     Session {
                         id: "demo-chat".into(),
                         title: "Упрощаем управление заказами".into(),
                         cwd: s.cwd.clone(),
                         modified: chrono::Local::now().timestamp() as f64,
+                        pinned: 1.,
+                        ..Default::default()
                     },
                     Session {
                         id: "d2".into(),
                         title: "Новый интерфейс мастерской".into(),
                         cwd: s.cwd.clone(),
                         modified: chrono::Local::now().timestamp() as f64 - 4000.0,
+                        ..Default::default()
+                    },
+                    Session {
+                        id: "d4".into(),
+                        title: "Якорь и цепь у штурвала".into(),
+                        cwd: "/opt/sbrp-client".into(),
+                        modified: chrono::Local::now().timestamp() as f64 - 7000.0,
+                        folder: "f-ships".into(),
+                        ..Default::default()
+                    },
+                    Session {
+                        id: "d5".into(),
+                        title: "Паруса и ветер".into(),
+                        cwd: "/opt/sbrp-client".into(),
+                        modified: chrono::Local::now().timestamp() as f64 - 200000.0,
+                        folder: "f-ships".into(),
+                        ..Default::default()
+                    },
+                    Session {
+                        id: "d6".into(),
+                        title: "Подпись лаунчера".into(),
+                        cwd: "/opt/sb-launcher".into(),
+                        modified: chrono::Local::now().timestamp() as f64 - 30000.0,
+                        folder: "f-site".into(),
+                        ..Default::default()
                     },
                     Session {
                         id: "d3".into(),
                         title: "Проверка обновления сервера".into(),
                         cwd: s.cwd.clone(),
                         modified: chrono::Local::now().timestamp() as f64 - 90000.0,
+                        ..Default::default()
                     },
                 ],
             },
@@ -3678,11 +3838,8 @@ fn user_message_bubble(
         .layout(text.into(), FontId::proportional(14.), p.text, max)
         .size()
         .x;
-    let width = if files.is_empty() {
-        measured.ceil().max(1.)
-    } else {
-        max
-    };
+    let items: f32 = files.iter().map(|f| preview_size(f).x + 6.).sum::<f32>() - 6.;
+    let width = measured.max(items).ceil().clamp(1., max);
     let target =
         egui::Rect::from_min_max(egui::pos2(row.right() - width - 28., row.top()), row.max);
     let mut child = ui.new_child(
@@ -3703,8 +3860,18 @@ fn user_message_bubble(
             if !files.is_empty() {
                 ui.add_space(5.);
                 ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::splat(6.);
                     for file in files {
-                        attachment_view(ui, file, p, false);
+                        match &file.texture {
+                            Some(texture) => {
+                                let size = preview_size(file);
+                                ui.add(egui::Image::new(texture).fit_to_exact_size(size).corner_radius(10))
+                                    .on_hover_text(format!("{} · {}", file.name, file_size(file.bytes)));
+                            }
+                            None => {
+                                attachment_view(ui, file, p, false);
+                            }
+                        }
                     }
                 });
             }
@@ -3718,6 +3885,25 @@ fn user_message_bubble(
     bubble
 }
 
+/// Pictures show as pictures (up to 240×170), other files as a tile.
+fn preview_size(file: &Attachment) -> Vec2 {
+    match &file.texture {
+        Some(texture) => {
+            let size = texture.size_vec2().max(Vec2::splat(1.));
+            size * (240. / size.x).min(170. / size.y).min(1.)
+        }
+        None => Vec2::new(216., 64.),
+    }
+}
+fn file_size(bytes: usize) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} МБ", bytes as f32 / 1048576.)
+    } else if bytes == 0 {
+        "не сохранено в истории".into()
+    } else {
+        format!("{} КБ", (bytes / 1024).max(1))
+    }
+}
 fn attachment_view(ui: &mut egui::Ui, file: &Attachment, p: Palette, removable: bool) -> bool {
     // Allocate the whole tile before drawing; siblings never steal its text width.
     let width = 216_f32.min(ui.max_rect().width().max(120.));
@@ -3788,6 +3974,128 @@ fn attachment_view(ui: &mut egui::Ui, file: &Attachment, p: Palette, removable: 
         return r.on_hover_text("Убрать файл").clicked();
     }
     false
+}
+
+enum RowAction {
+    Open,
+    Delete,
+    Pin(bool),
+    StartRename,
+    Rename(String),
+    Folder(String),
+    NewFolder,
+}
+
+fn session_menu(
+    ui: &mut egui::Ui,
+    session: &Session,
+    folders: &[crate::model::SessionFolder],
+    connected: bool,
+    blocked: Option<&str>,
+    p: Palette,
+) -> Option<RowAction> {
+    let mut action = None;
+    ui.add_enabled_ui(connected, |ui| {
+        let pinned = session.pinned > 0.;
+        if ui.button(if pinned { "Открепить" } else { "Закрепить сверху" }).clicked() {
+            action = Some(RowAction::Pin(!pinned));
+        }
+        if ui.button("Переименовать").on_hover_text("Название увидят все, кто подключается к серверу").clicked() {
+            action = Some(RowAction::StartRename);
+        }
+        ui.menu_button("Переместить в папку", |ui| {
+            ui.set_min_width(180.);
+            for folder in folders {
+                let here = session.folder == folder.id;
+                if ui.add_enabled(!here, egui::Button::new(&folder.name)).clicked() {
+                    action = Some(RowAction::Folder(folder.id.clone()));
+                    ui.close_menu();
+                }
+            }
+            if !session.folder.is_empty() && ui.button("Без папки").clicked() {
+                action = Some(RowAction::Folder(String::new()));
+                ui.close_menu();
+            }
+            ui.separator();
+            if ui.button("Новая папка…").clicked() {
+                action = Some(RowAction::NewFolder);
+                ui.close_menu();
+            }
+        });
+    });
+    ui.separator();
+    let delete = ui.add_enabled(blocked.is_none(), egui::Button::new(RichText::new("Удалить сессию").color(design::RED)));
+    if delete.on_hover_text(blocked.unwrap_or("Удалить историю этой сессии с сервера")).clicked() {
+        action = Some(RowAction::Delete);
+    }
+    let _ = p;
+    action
+}
+
+/// A sidebar section title; folders get a chevron and fold on click.
+fn section_heading(ui: &mut egui::Ui, icon: Option<Icon>, text: &str, count: usize, collapsed: Option<bool>, p: Palette) -> egui::Response {
+    ui.add_space(10.);
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 24.), egui::Sense::click());
+    let painter = ui.painter();
+    if collapsed.is_some() && response.hovered() {
+        painter.rect_filled(rect, 7., design::mix(p.side, p.line, 0.5));
+    }
+    let mut x = rect.left() + 8.;
+    if let Some(folded) = collapsed {
+        let chevron = egui::Rect::from_center_size(egui::pos2(x + 5., rect.center().y), Vec2::splat(12.));
+        let open = ui.ctx().animate_bool_with_time(response.id.with("open"), !folded, 0.15);
+        let c = chevron.center();
+        let turn = egui::emath::Rot2::from_angle(open * std::f32::consts::FRAC_PI_2);
+        let points = [Vec2::new(-1.5, -3.5), Vec2::new(2., 0.), Vec2::new(-1.5, 3.5)].map(|v| c + turn * v).to_vec();
+        painter.add(egui::Shape::line(points, Stroke::new(1.4_f32, p.muted)));
+        x += 14.;
+    }
+    if let Some(icon) = icon {
+        design::icon(painter, egui::Rect::from_center_size(egui::pos2(x + 6., rect.center().y), Vec2::splat(13.)), icon, if collapsed.is_some() { ACCENT.gamma_multiply(0.85) } else { p.muted });
+        x += 18.;
+    }
+    let galley = painter.layout_no_wrap(
+        if collapsed.is_some() { text.to_owned() } else { text.to_uppercase() },
+        FontId::proportional(if collapsed.is_some() { 12.5 } else { 10.5 }),
+        if collapsed.is_some() { p.text } else { p.muted },
+    );
+    let width = galley.size().x;
+    painter.galley(egui::pos2(x, rect.center().y - galley.size().y / 2.), galley, p.text);
+    if count > 0 {
+        painter.text(egui::pos2(x + width + 7., rect.center().y), egui::Align2::LEFT_CENTER, count.to_string(), FontId::proportional(11.), p.muted.gamma_multiply(0.8));
+    }
+    ui.add_space(2.);
+    if collapsed.is_some() {
+        response.on_hover_text("Щелчок — свернуть · двойной — переименовать · правый — меню")
+    } else {
+        response
+    }
+}
+
+/// Inline name editor: Some(true) on Enter, Some(false) on Esc or focus loss.
+fn folder_name_field(ui: &mut egui::Ui, text: &mut String, hint: &str, p: Palette) -> Option<bool> {
+    let mut result = None;
+    egui::Frame::new()
+        .fill(p.surface)
+        .stroke(Stroke::new(1.0_f32, ACCENT.gamma_multiply(0.7)))
+        .corner_radius(8.)
+        .inner_margin(egui::Margin::symmetric(10, 6))
+        .show(ui, |ui| {
+            let response = ui.add(
+                egui::TextEdit::singleline(text)
+                    .frame(false)
+                    .desired_width(f32::INFINITY)
+                    .font(FontId::proportional(13.5))
+                    .hint_text(RichText::new(hint).color(p.muted).size(12.)),
+            );
+            if !response.has_focus() && !response.lost_focus() {
+                response.request_focus();
+            }
+            if response.lost_focus() {
+                result = Some(ui.input(|i| i.key_pressed(egui::Key::Enter)));
+            }
+        });
+    result
 }
 
 fn day_group(time: f64) -> &'static str {
@@ -3900,7 +4208,7 @@ fn reduce(c: &mut Chat, data: &Value) {
                         if let Some((index, at)) = streamed {
                             c.blocks.remove(&index);
                             c.messages[at].text = text.into();
-                        } else if !text.is_empty() {
+                        } else if !text.is_empty() && text.trim() != "No response requested." {
                             c.messages.push(Message {
                                 role: "assistant".into(),
                                 text: text.into(),
@@ -4020,7 +4328,17 @@ impl eframe::App for RelayApp {
                         remote.usage_requested = Some(Instant::now());
                         self.controller.send(server, json!({"op":"usage"}));
                     }
-                    ctx.request_repaint_after(Duration::from_secs(60));
+                    if remote.sessions_loaded
+                        && remote
+                            .sessions_polled
+                            .is_none_or(|at| at.elapsed() >= Duration::from_secs(20))
+                    {
+                        if remote.sessions_polled.is_some() {
+                            self.controller.send(server, json!({"op":"sessions"}));
+                        }
+                        remote.sessions_polled = Some(Instant::now());
+                    }
+                    ctx.request_repaint_after(Duration::from_secs(20));
                 }
             }
         }

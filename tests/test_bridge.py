@@ -70,11 +70,44 @@ class TranscriptTests(unittest.TestCase):
         for value in ['../../secret','x; echo no','',str(uuid.uuid4())]:
             with self.assertRaises(ValueError):self.store.path(value)
 
-    def test_user_images_do_not_leak_base64_into_history(self):
-        self.write([{'type':'user','uuid':'a','parentUuid':None,'message':{'role':'user','content':[{'type':'image','source':{'data':'private-blob'}}]}}])
+    def test_user_images_arrive_as_attachments_not_text(self):
+        self.write([{'type':'user','uuid':'a','parentUuid':None,'message':{'role':'user','content':[{'type':'text','text':'смотри'},{'type':'image','source':{'media_type':'image/png','data':'aW1n'}}]}}])
         history=self.store.history(self.sid)
-        self.assertIn('изображения',history[0]['text'])
-        self.assertNotIn('private-blob',json.dumps(history))
+        self.assertEqual(history[0]['text'],'смотри')
+        self.assertEqual(history[0]['images'],[{'media_type':'image/png','data':'aW1n'}])
+
+    def test_images_beyond_the_budget_become_placeholders(self):
+        with mock.patch.object(bridge,'MAX_HISTORY_IMAGES',6):
+            self.write([{'type':'user','uuid':'a','parentUuid':None,'message':{'role':'user','content':[{'type':'image','source':{'data':'old-old-old'}}]}},
+                        {'type':'user','uuid':'b','parentUuid':'a','message':{'role':'user','content':[{'type':'image','source':{'data':'new'}}]}}])
+            history=self.store.history(self.sid)
+        self.assertEqual([h['images'][0]['data'] for h in history],['','new'])
+
+    def test_interrupts_and_meta_rows_are_hidden(self):
+        self.write([{'type':'user','uuid':'a','parentUuid':None,'message':{'role':'user','content':'вопрос'}},
+                    {'type':'user','uuid':'b','parentUuid':'a','message':{'role':'user','content':[{'type':'text','text':'[Request interrupted by user]'}]}},
+                    {'type':'assistant','uuid':'c','parentUuid':'b','message':{'role':'assistant','content':[{'type':'text','text':'No response requested.'}]}},
+                    {'type':'user','uuid':'d','parentUuid':'c','isMeta':True,'message':{'role':'user','content':[{'type':'text','text':'[Image: source: /tmp/x.png]'}]}},
+                    {'type':'user','uuid':'e','parentUuid':'d','message':{'role':'user','content':'[Request interrupted by user for tool use]'}},
+                    {'type':'assistant','uuid':'f','parentUuid':'e','message':{'role':'assistant','content':[{'type':'text','text':'ответ'}]}}])
+        self.assertEqual([h['text'] for h in self.store.history(self.sid)],['вопрос','ответ'])
+
+    def test_session_meta_is_shared_and_survives_bad_input(self):
+        meta=bridge.SessionMeta(self.root/'shared/sessions.json')
+        folder=meta.folder(name='Корабли')
+        meta.session(self.sid,title='  Якорь   и цепь ',pinned=True,folder=folder,actor='champ')
+        with self.assertRaises(ValueError):meta.folder(name='корабли')
+        with self.assertRaises(ValueError):meta.session(self.sid,folder='f-missing')
+        rows,folders=bridge.SessionMeta(self.root/'shared/sessions.json').apply([{'id':self.sid,'title':'auto','cwd':'/','modified':1}])
+        self.assertEqual((rows[0]['title'],rows[0]['auto_title'],rows[0]['folder']),('Якорь и цепь','auto',folder))
+        self.assertGreater(rows[0]['pinned'],0)
+        self.assertEqual(folders[0]['name'],'Корабли')
+        meta.folder(folder,name='Флот');meta.session(self.sid,title='',pinned=False)
+        rows,folders=meta.apply([{'id':self.sid,'title':'auto','cwd':'/','modified':1}])
+        self.assertEqual((rows[0]['title'],rows[0]['pinned'],rows[0]['folder'],folders[0]['name']),('auto',0.0,folder,'Флот'))
+        meta.folder(folder,delete=True)
+        rows,folders=meta.apply([{'id':self.sid,'title':'auto','cwd':'/','modified':1}])
+        self.assertEqual((rows[0]['folder'],folders),('',[]))
 
     def test_existing_sessions_are_never_rewritten(self):
         self.write([{'type':'user','uuid':'a','message':{'content':'x'}}])
