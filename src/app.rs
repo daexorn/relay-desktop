@@ -20,7 +20,7 @@ use std::{
 };
 use zeroize::Zeroize;
 
-use crate::ui::{self as design, Icon, Kind, Palette, ACCENT, GREEN};
+use crate::ui::{self as design, Icon, Kind, Palette, accent, GREEN};
 #[derive(Default)]
 struct Remote {
     connected: bool,
@@ -404,19 +404,7 @@ impl RelayApp {
                 }
             }
         }
-        let mut fonts = egui::FontDefinitions::default();
-        fonts.font_data.insert(
-            "inter".into(),
-            std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
-                "../assets/InterVariable.ttf"
-            ))),
-        );
-        fonts
-            .families
-            .get_mut(&egui::FontFamily::Proportional)
-            .unwrap()
-            .insert(0, "inter".into());
-        cc.egui_ctx.set_fonts(fonts);
+        cc.egui_ctx.set_fonts(design::fonts());
         if demo {
             app.seed_workspace_demo(&cc.egui_ctx, &args);
             app.seed_orchestration_preview(&cc.egui_ctx, &args);
@@ -440,7 +428,7 @@ impl RelayApp {
             ctx.set_zoom_factor(scale);
         }
         let p = design::animated_palette(ctx, self.settings.light);
-        let mut v = if self.settings.theme() == "paper" {
+        let mut v = if design::is_light(self.settings.theme()) {
             egui::Visuals::light()
         } else {
             egui::Visuals::dark()
@@ -467,17 +455,19 @@ impl RelayApp {
         v.faint_bg_color = p.side;
         v.extreme_bg_color = p.side;
         v.override_text_color = Some(p.text);
-        v.selection.bg_fill = ACCENT.gamma_multiply(0.3);
-        v.hyperlink_color = ACCENT;
+        v.selection.bg_fill = accent().gamma_multiply(0.3);
+        v.hyperlink_color = accent();
         v.selection.stroke = Stroke::new(1.0_f32, p.text);
         v.widgets.inactive.bg_fill = p.surface;
         v.widgets.inactive.weak_bg_fill = p.surface;
         v.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, p.line);
         v.widgets.hovered.bg_fill = p.line;
         v.widgets.hovered.weak_bg_fill = p.line;
-        v.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, design::mix(p.line, ACCENT, 0.5));
-        v.widgets.active.bg_fill = ACCENT.gamma_multiply(0.35);
+        v.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, design::mix(p.line, accent(), 0.5));
+        v.widgets.active.bg_fill = accent().gamma_multiply(0.35);
         v.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, p.line);
+        // Bold Markdown uses the "active" text colour: keep it the theme's own text colour.
+        v.widgets.active.fg_stroke.color = p.text;
         ctx.set_visuals(v);
         let mut style = (*ctx.style()).clone();
         style.spacing.item_spacing = Vec2::new(6.0, if a.compact { 4.0 } else { 8.0 });
@@ -1257,7 +1247,7 @@ impl RelayApp {
                         10.,
                         design::mix(
                             design::mix(p.rail, p.surface, hover),
-                            ACCENT.gamma_multiply(0.22),
+                            accent().gamma_multiply(0.22),
                             t,
                         ),
                     );
@@ -1300,7 +1290,7 @@ impl RelayApp {
                     ui.painter().rect_filled(
                         egui::Rect::from_center_size(egui::pos2(x, y), Vec2::new(3., 18.)),
                         2.,
-                        ACCENT,
+                        accent(),
                     );
                 }
                 if design::button(ui, "", Some(Icon::Plus), Kind::Ghost, p, Vec2::splat(36.))
@@ -1496,7 +1486,7 @@ impl RelayApp {
                                         if connected {
                                             GREEN
                                         } else if connecting {
-                                            ACCENT
+                                            accent()
                                         } else {
                                             p.muted
                                         },
@@ -1571,7 +1561,7 @@ impl RelayApp {
                             self.refresh(&server.id);
                         }
                         if connected
-                            && design::button(ui, "", Some(Icon::Folder), Kind::Ghost, p, Vec2::splat(24.))
+                            && design::button(ui, "+ Папка", None, Kind::Ghost, p, Vec2::new(0., 24.))
                                 .on_hover_text("Новая папка для сессий — её увидят все, кто подключается к серверу")
                                 .clicked()
                         {
@@ -1613,7 +1603,7 @@ impl RelayApp {
                         }
                         let mut shown = 0;
                         if !pinned.is_empty() {
-                            section_heading(ui, Some(Icon::Pin), "Закреплённые", pinned.len(), None, p);
+                            section_heading(ui, Some("📌"), "Закреплённые", pinned.len(), None, p);
                             for session in &pinned {
                                 if let Some(action) = self.session_row(ui, ctx, &server.id, session, &folders, connected, p) {
                                     actions.push(((*session).clone(), action));
@@ -1642,7 +1632,7 @@ impl RelayApp {
                                     None => self.folder_renaming = Some((id, text)),
                                 }
                             } else {
-                                let header = section_heading(ui, Some(Icon::Folder), &folder.name, inside.len(), Some(collapsed), p);
+                                let header = section_heading(ui, Some(if collapsed { "📁" } else { "📂" }), &folder.name, inside.len(), Some(collapsed), p);
                                 if header.clicked() {
                                     if collapsed {
                                         self.settings.collapsed_folders.retain(|f| f != &folder.id);
@@ -1789,7 +1779,7 @@ impl RelayApp {
                     job.wrap.overflow_character = Some('…');
                     ui.label(job);
                     if busy {
-                        design::dots(ui, ACCENT);
+                        design::dots(ui, accent());
                     }
                 });
             })
@@ -1802,7 +1792,7 @@ impl RelayApp {
             shapes.push(egui::Shape::rect_filled(
                 egui::Rect::from_min_size(row.rect.left_top() + Vec2::new(3., 9.), Vec2::new(3., row.rect.height() - 18.)),
                 2.,
-                ACCENT,
+                accent(),
             ));
         }
         ui.painter().set(background, egui::Shape::Vec(shapes));
@@ -1814,7 +1804,13 @@ impl RelayApp {
             if dots.hovered() || open {
                 ui.painter().rect_filled(dots_rect, 7., p.line);
             }
-            design::icon(ui.painter(), dots_rect.shrink(5.), Icon::Dots, if dots.hovered() { p.text } else { p.muted });
+            ui.painter().text(
+                dots_rect.center() - Vec2::new(0., 1.),
+                egui::Align2::CENTER_CENTER,
+                "•••",
+                FontId::proportional(9.),
+                if dots.hovered() || open { p.text } else { p.muted },
+            );
         }
         if dots.clicked() {
             ui.memory_mut(|m| m.toggle_popup(menu_id));
@@ -1947,12 +1943,12 @@ impl RelayApp {
                         .show_separator_line(false)
                         .frame(
                             egui::Frame::new()
-                                .fill(ACCENT.gamma_multiply(0.12))
+                                .fill(accent().gamma_multiply(0.12))
                                 .inner_margin(egui::Margin::symmetric(18, 6)),
                         )
                         .show_inside(ui, |ui| {
                             ui.horizontal_wrapped(|ui| {
-                                label(ui, self.notice.clone(), 13., ACCENT);
+                                label(ui, self.notice.clone(), 13., accent());
                                 if design::button(
                                     ui,
                                     "",
@@ -2087,7 +2083,7 @@ impl RelayApp {
                             ui.set_opacity(fade);
                             if chat.loading {
                                 ui.horizontal(|ui| {
-                                    design::dots(ui, ACCENT);
+                                    design::dots(ui, accent());
                                     label(ui, "Открываем разговор", 13., p.muted);
                                 });
                             }
@@ -2115,7 +2111,16 @@ impl RelayApp {
                                     crate::timeline::Item::Message(index) => index,
                                 };
                                 let message = &chat.messages[index];
-                                ui.push_id(index, |ui| match message.role.as_str() {
+                                // Each message fades in once, when it first appears.
+                                let appear = ui.ctx().animate_bool_with_time_and_easing(
+                                    egui::Id::new(("message-in", &k, index)),
+                                    true,
+                                    design::duration(ui.ctx(), 0.28),
+                                    egui::emath::easing::cubic_out,
+                                );
+                                ui.push_id(index, |ui| {
+                                ui.set_opacity(appear);
+                                match message.role.as_str() {
                                     "user" => {
                                         ui.add_space(6.);
                                         if message.text.starts_with("<relay-cluster-results>") {
@@ -2220,11 +2225,12 @@ impl RelayApp {
                                         }
                                         ui.add_space(8.);
                                     }
+                                }
                                 });
                             }
                             if chat.busy && !grouped_busy {
                                 ui.horizontal(|ui| {
-                                    design::dots(ui, ACCENT);
+                                    design::dots(ui, accent());
                                     label(ui, &chat.status, 13., p.muted);
                                 });
                                 ui.add_space(18.);
@@ -2400,12 +2406,12 @@ impl RelayApp {
         let previous = (chat.model.clone(), chat.mode.clone(), chat.effort.clone());
         if !chat.error.is_empty() {
             egui::Frame::new()
-                .fill(ACCENT.gamma_multiply(0.1))
+                .fill(accent().gamma_multiply(0.1))
                 .corner_radius(10.)
                 .inner_margin(egui::Margin::symmetric(12, 6))
                 .show(ui, |ui| {
                     ui.horizontal_wrapped(|ui| {
-                        label(ui, chat.error.clone(), 12., ACCENT);
+                        label(ui, chat.error.clone(), 12., accent());
                         if design::button(
                             ui,
                             "",
@@ -2430,7 +2436,7 @@ impl RelayApp {
             .fill(p.surface)
             .stroke(Stroke::new(
                 1.0_f32,
-                design::mix(p.line, ACCENT, focus * 0.65),
+                design::mix(p.line, accent(), focus * 0.65),
             ))
             .corner_radius(14.)
             .inner_margin(egui::Margin {
@@ -2633,7 +2639,7 @@ impl RelayApp {
                         .show_separator_line(false)
                         .frame(
                             egui::Frame::new()
-                                .fill(ACCENT.gamma_multiply(0.12))
+                                .fill(accent().gamma_multiply(0.12))
                                 .inner_margin(egui::Margin::symmetric(20, 6)),
                         )
                         .show_inside(ui, |ui| {
@@ -2681,7 +2687,7 @@ impl RelayApp {
             egui::Frame::new()
                 .fill(design::mix(
                     p.surface,
-                    if ok { GREEN } else { ACCENT },
+                    if ok { GREEN } else { accent() },
                     if done { 0.08 } else { 0.05 },
                 ))
                 .stroke(Stroke::new(1.0_f32, p.line))
@@ -2697,10 +2703,10 @@ impl RelayApp {
                                 ui.painter(),
                                 r,
                                 if ok { Icon::Check } else { Icon::Close },
-                                if ok { GREEN } else { ACCENT },
+                                if ok { GREEN } else { accent() },
                             );
                         } else {
-                            design::dots(ui, ACCENT);
+                            design::dots(ui, accent());
                         }
                         let headline = if !done {
                             format!(
@@ -2798,7 +2804,7 @@ impl RelayApp {
         let mut decision = None;
         egui::Frame::new()
             .fill(p.surface)
-            .stroke(Stroke::new(1.0_f32, ACCENT.gamma_multiply(0.6)))
+            .stroke(Stroke::new(1.0_f32, accent().gamma_multiply(0.6)))
             .corner_radius(10.0)
             .inner_margin(16.0)
             .show(ui, |ui| {
@@ -2883,7 +2889,7 @@ impl RelayApp {
                             } else {
                                 "Разрешить"
                             })
-                            .fill(ACCENT),
+                            .fill(accent()),
                         )
                         .clicked()
                     {
@@ -3230,7 +3236,7 @@ impl RelayApp {
                         .on_hover_text("Пароль сохраняется в хранилище системы");
                     if !editor.error.is_empty() {
                         ui.add_space(5.);
-                        label(ui, &editor.error, 12., ACCENT);
+                        label(ui, &editor.error, 12., accent());
                     }
                     ui.add_space(18.);
                     ui.horizontal(|ui| {
@@ -3752,7 +3758,7 @@ fn composer_selectors(ui: &mut egui::Ui, chat: &mut Chat, tests: &mut String, p:
                     _ => "С подтверждением",
                 })
                 .size(12.5)
-                .color(if chat.mode == "auto" { ACCENT } else { p.muted }),
+                .color(if chat.mode == "auto" { accent() } else { p.muted }),
             )
             .width(0.)
             .icon(design::combo_icon)
@@ -3848,8 +3854,8 @@ fn user_message_bubble(
             .layout(Layout::top_down(Align::Min)),
     );
     let bubble = egui::Frame::new()
-        .fill(design::mix(p.surface, ACCENT, 0.07))
-        .stroke(Stroke::new(1.0_f32, design::mix(p.line, ACCENT, 0.12)))
+        .fill(design::mix(p.surface, accent(), 0.07))
+        .stroke(Stroke::new(1.0_f32, design::mix(p.line, accent(), 0.12)))
         .corner_radius(14.)
         .inner_margin(egui::Margin::symmetric(14, 9))
         .show(&mut child, |ui| {
@@ -3928,7 +3934,7 @@ fn attachment_view(ui: &mut egui::Ui, file: &Attachment, p: Palette, removable: 
             Color32::WHITE,
         );
     } else {
-        design::icon(&painter, thumb.shrink(11.), Icon::File, ACCENT);
+        design::icon(&painter, thumb.shrink(11.), Icon::File, accent());
     }
     let left = rect.left() + 64.;
     let right = rect.right() - if removable { 30. } else { 9. };
@@ -4033,7 +4039,7 @@ fn session_menu(
 }
 
 /// A sidebar section title; folders get a chevron and fold on click.
-fn section_heading(ui: &mut egui::Ui, icon: Option<Icon>, text: &str, count: usize, collapsed: Option<bool>, p: Palette) -> egui::Response {
+fn section_heading(ui: &mut egui::Ui, icon: Option<&str>, text: &str, count: usize, collapsed: Option<bool>, p: Palette) -> egui::Response {
     ui.add_space(10.);
     let (rect, response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 24.), egui::Sense::click());
     let painter = ui.painter();
@@ -4051,8 +4057,14 @@ fn section_heading(ui: &mut egui::Ui, icon: Option<Icon>, text: &str, count: usi
         x += 14.;
     }
     if let Some(icon) = icon {
-        design::icon(painter, egui::Rect::from_center_size(egui::pos2(x + 6., rect.center().y), Vec2::splat(13.)), icon, if collapsed.is_some() { ACCENT.gamma_multiply(0.85) } else { p.muted });
-        x += 18.;
+        painter.text(
+            egui::pos2(x + 6., rect.center().y),
+            egui::Align2::CENTER_CENTER,
+            icon,
+            FontId::proportional(if collapsed.is_some() { 13. } else { 11. }),
+            if collapsed.is_some() { accent() } else { p.muted },
+        );
+        x += 19.;
     }
     let galley = painter.layout_no_wrap(
         if collapsed.is_some() { text.to_owned() } else { text.to_uppercase() },
@@ -4077,7 +4089,7 @@ fn folder_name_field(ui: &mut egui::Ui, text: &mut String, hint: &str, p: Palett
     let mut result = None;
     egui::Frame::new()
         .fill(p.surface)
-        .stroke(Stroke::new(1.0_f32, ACCENT.gamma_multiply(0.7)))
+        .stroke(Stroke::new(1.0_f32, accent().gamma_multiply(0.7)))
         .corner_radius(8.)
         .inner_margin(egui::Margin::symmetric(10, 6))
         .show(ui, |ui| {

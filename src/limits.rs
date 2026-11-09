@@ -1,4 +1,4 @@
-use crate::ui::{Palette, ACCENT};
+use crate::ui::{accent, Palette};
 use eframe::egui::{self, Color32, RichText, Vec2};
 use serde::Deserialize;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -52,7 +52,7 @@ fn tint(value: f32) -> Color32 {
     } else if value >= 80. {
         Color32::from_rgb(194, 164, 109)
     } else {
-        ACCENT
+        accent()
     }
 }
 

@@ -69,7 +69,47 @@ fn prepared(ctx: &egui::Context, text: &str) -> Arc<str> {
 }
 
 fn has_math_markers(text: &str) -> bool {
-    text.contains('$') || text.contains("\\(") || text.contains("\\[")
+    text.contains('$') || text.contains("\\(") || text.contains("\\[") || text.contains("\\begin{")
+}
+
+/// Environments Claude writes without any `$`: they are formulas when they start a line.
+const BARE_ENVIRONMENTS: [&str; 22] = [
+    "equation", "equation*", "align", "align*", "aligned", "gather", "gather*", "gathered", "multline",
+    "multline*", "eqnarray", "eqnarray*", "split", "cases", "matrix", "pmatrix", "bmatrix", "Bmatrix",
+    "vmatrix", "Vmatrix", "array", "alignat",
+];
+
+fn bare_environment(text: &str, start: usize, limit: usize) -> Option<(usize, String)> {
+    let line_start = text[..start].rfind('\n').map_or(0, |n| n + 1);
+    if !text[line_start..start].trim().is_empty() {
+        return None;
+    }
+    let rest = &text[start + "\\begin{".len()..limit];
+    let name = &rest[..rest.find('}')?];
+    if !BARE_ENVIRONMENTS.contains(&name) {
+        return None;
+    }
+    let end_tag = format!("\\end{{{name}}}");
+    let end = start + text[start..limit].find(&end_tag)? + end_tag.len();
+    let body_start = start + "\\begin{".len() + name.len() + 1;
+    let body = &text[body_start..end - end_tag.len()];
+    // Numbered display environments become their unnumbered inline forms.
+    let wrapped = match name.trim_end_matches('*') {
+        "equation" => body.to_owned(),
+        "align" | "eqnarray" | "split" => format!("\\begin{{aligned}}{}\\end{{aligned}}", body.replace("&=&", "&=")),
+        "gather" | "multline" => format!("\\begin{{gathered}}{body}\\end{{gathered}}"),
+        _ => text[start..end].to_owned(),
+    };
+    let mut content = wrapped.replace("\\nonumber", "").replace("\\notag", "");
+    while let Some(at) = content.find("\\label{") {
+        let close = content[at..].find('}').map_or(content.len(), |c| at + c + 1);
+        content.replace_range(at..close, "");
+    }
+    let content = one_line(&content, is_quoted(text, start));
+    if content.is_empty() || !braces_balanced(&content) {
+        return None;
+    }
+    Some((end, format!("$${}$$", for_row(text, start, &content))))
 }
 
 /// Rewrite Markdown so that every formula is `$...$` or `$$...$$` on one line and every other `$`
@@ -100,6 +140,13 @@ pub fn prepare(text: &str) -> Cow<'_, str> {
             b'\\' => match bytes.get(i + 1) {
                 Some(b'(') => paren_formula(text, i, limit),
                 Some(b'[') => bracket_formula(text, i, limit),
+                Some(b'b') if text[i..limit].starts_with("\\begin{") => match bare_environment(text, i, limit) {
+                    Some(found) => Some(found),
+                    None => {
+                        i += 2;
+                        continue;
+                    }
+                },
                 Some(c) if c.is_ascii() => {
                     i += 2;
                     continue;
@@ -1314,4 +1361,58 @@ mod tests {
         assert!(before.pos.y + before.galley.size().y <= rect.top() + padding + 1.);
         assert!(after.pos.y >= rect.bottom() - padding - 1.);
     }
+}
+
+#[cfg(test)]
+mod coverage {
+    use super::*;
+    #[test]
+    fn common_formulas_all_typeset() {
+        let cases = [
+            r"E = mc^2", r"\frac{-b \pm \sqrt{b^2-4ac}}{2a}", r"\sum_{i=1}^{n} i = \frac{n(n+1)}{2}",
+            r"\int_0^\infty e^{-x^2}\,dx = \frac{\sqrt{\pi}}{2}", r"\begin{pmatrix} a & b \\ c & d \end{pmatrix}",
+            r"\begin{bmatrix} 1 & 0 \\ 0 & 1 \end{bmatrix}", r"\begin{cases} x & x>0 \\ -x & x \le 0 \end{cases}",
+            r"\begin{aligned} a &= b + c \\ d &= e \end{aligned}", r"\begin{align} a &= b \end{align}",
+            r"\mathbb{R}^n", r"\mathcal{O}(n \log n)", r"\operatorname{argmax}_x f(x)", r"\text{скорость} = \frac{s}{t}",
+            r"\lim_{x \to 0} \frac{\sin x}{x} = 1", r"\vec{v} \cdot \hat{n}", r"\overline{AB}", r"\underbrace{a+b}_{c}",
+            r"\binom{n}{k}", r"\left( \frac{a}{b} \right)", r"x \in \{1,2,3\}", r"\forall \epsilon > 0\ \exists \delta",
+            r"\nabla \times \mathbf{B} = \mu_0 \mathbf{J}", r"\partial_t u = \Delta u", r"a \equiv b \pmod{n}",
+            r"\boxed{x=1}", r"\color{red} x", r"\textbf{bold}", r"\mathrm{d}x", r"\ce{H2O}", r"\tag{1} x",
+            r"\begin{array}{cc} 1 & 2 \\ 3 & 4 \end{array}", r"\dfrac{1}{2}", r"\tfrac{1}{2}", r"\sqrt[3]{x}",
+            r"\langle x, y \rangle", r"\lVert x \rVert", r"\iint_D f\,dA", r"\oint", r"x \mapsto x^2", r"\xrightarrow{f}",
+            r"\begin{matrix} a \end{matrix}", r"\begin{vmatrix} a & b \\ c & d \end{vmatrix}", r"\displaystyle\sum_n",
+            r"\stackrel{?}{=}", r"\overset{def}{=}", r"\underset{x}{\min}", r"\not\subset", r"\cancel{x}", r"\hbar",
+        ];
+        let mut failed = vec![];
+        for tex in cases {
+            if let Err(e) = typeset(tex, true, 17., Color32::WHITE) {
+                failed.push(format!("{tex}  →  {e}"));
+            }
+        }
+        assert!(failed.is_empty(), "{} of {} failed:\n{}", failed.len(), cases.len(), failed.join("\n"));
+    }
+
+    #[test]
+    fn bare_environments_become_display_formulas() {
+        let math = |m: &str| -> Vec<String> {
+            let prepared = prepare(m);
+            Parser::new_ext(&prepared, Options::all())
+                .filter_map(|e| match e {
+                    Event::DisplayMath(t) => Some(t.to_string()),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(math("\\begin{equation}\nE = mc^2 \\label{eq:1}\n\\end{equation}"), vec!["E = mc^2"]);
+        let aligned = math("Итак:\n\\begin{align}\nx &= 1 \\nonumber \\\\\ny &= 2\n\\end{align}\nконец");
+        assert_eq!(aligned.len(), 1);
+        assert!(aligned[0].starts_with("\\begin{aligned}") && !aligned[0].contains("nonumber"), "{aligned:?}");
+        assert!(typeset(&aligned[0], true, 17., Color32::WHITE).is_ok());
+        // Mid-sentence or inside code it stays text.
+        assert!(math("слово \\begin{equation}x\\end{equation}").is_empty());
+        assert!(math("```\n\\begin{equation}x\n\\end{equation}\n```").is_empty());
+        // Unknown environments are not formulas.
+        assert!(math("\\begin{itemize}\n\\item x\n\\end{itemize}").is_empty());
+    }
+
 }

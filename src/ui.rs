@@ -1,6 +1,11 @@
 use eframe::egui::{self, Color32, FontId, Pos2, Rect, Response, Sense, Stroke, Vec2};
 
-pub const ACCENT: Color32 = Color32::from_rgb(139, 166, 242);
+/// The accent belongs to the theme and glides with it; read it with [`accent`].
+static ACCENT_RGB: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x8ba6f2);
+pub fn accent() -> Color32 {
+    let n = ACCENT_RGB.load(std::sync::atomic::Ordering::Relaxed);
+    Color32::from_rgb((n >> 16) as u8, (n >> 8) as u8, n as u8)
+}
 pub const GREEN: Color32 = Color32::from_rgb(92, 184, 132);
 pub const RED: Color32 = Color32::from_rgb(218, 116, 123);
 #[derive(Clone, Copy)]
@@ -13,28 +18,9 @@ pub struct Palette {
     pub text: Color32,
     pub muted: Color32,
 }
+#[cfg(test)]
 pub fn palette(light: bool) -> Palette {
-    if light {
-        Palette {
-            base: Color32::from_rgb(252, 252, 251),
-            side: Color32::from_rgb(245, 244, 242),
-            rail: Color32::from_rgb(237, 236, 233),
-            surface: Color32::WHITE,
-            line: Color32::from_rgb(228, 226, 222),
-            text: Color32::from_rgb(30, 30, 33),
-            muted: Color32::from_rgb(120, 119, 126),
-        }
-    } else {
-        Palette {
-            base: Color32::from_rgb(25, 25, 27),
-            side: Color32::from_rgb(19, 19, 21),
-            rail: Color32::from_rgb(14, 14, 16),
-            surface: Color32::from_rgb(34, 34, 37),
-            line: Color32::from_rgb(46, 46, 50),
-            text: Color32::from_rgb(236, 236, 238),
-            muted: Color32::from_rgb(142, 142, 150),
-        }
-    }
+    theme_palette(if light { "paper" } else { "graphite" })
 }
 pub fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     let a = a.to_array();
@@ -71,6 +57,11 @@ pub fn animated_palette(ctx: &egui::Context, light: bool) -> Palette {
             ) as u8,
         )
     };
+    let a = channels("accent", theme_accent(&name));
+    ACCENT_RGB.store(
+        u32::from_be_bytes([0, a.r(), a.g(), a.b()]),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     Palette {
         base: channels("base", b.base),
         side: channels("side", b.side),
@@ -81,40 +72,55 @@ pub fn animated_palette(ctx: &egui::Context, light: bool) -> Palette {
         muted: channels("muted", b.muted),
     }
 }
-pub const THEMES: [(&str, &str); 5] = [
-    ("graphite", "Графит"),
-    ("midnight", "Полночь"),
-    ("forest", "Хвоя"),
-    ("plum", "Слива"),
-    ("paper", "Бумага"),
+/// Theme id, name, light or dark, and colours: base, side, rail, surface, line, text,
+/// muted, accent.
+pub const THEME_TABLE: [(&str, &str, bool, [u32; 8]); 13] = [
+    ("graphite", "Графит", false, [0x19191b, 0x131315, 0x0e0e10, 0x222225, 0x2e2e32, 0xececee, 0x8e8e96, 0x8ba6f2]),
+    ("midnight", "Полночь", false, [0x111722, 0x0e141f, 0x0b101a, 0x1b2433, 0x2a3547, 0xe5edf9, 0x95a5bd, 0x6ea8ff]),
+    ("forest", "Хвоя", false, [0x141c1a, 0x101714, 0x0d1310, 0x202d27, 0x304139, 0xe4eee8, 0x9aad9f, 0x6fcf97]),
+    ("plum", "Слива", false, [0x1b1721, 0x16121c, 0x120e18, 0x292331, 0x3b3246, 0xeee7f5, 0xab9bb8, 0xc39bff]),
+    ("ember", "Угли", false, [0x1d1816, 0x171311, 0x120f0d, 0x2a2320, 0x3d322d, 0xf3e9e4, 0xb0a097, 0xff8a5b]),
+    ("ocean", "Океан", false, [0x0f1b1e, 0x0c1619, 0x091214, 0x172a2e, 0x24393e, 0xe2f2f2, 0x8fadaf, 0x4fd1c5]),
+    ("nord", "Север", false, [0x2e3440, 0x292e39, 0x242933, 0x3b4252, 0x434c5e, 0xeceff4, 0x9aa5b8, 0x88c0d0]),
+    ("rose", "Роза", false, [0x1e1619, 0x181114, 0x130d10, 0x2c2024, 0x402e34, 0xf6e8ec, 0xb79aa3, 0xf28ba8]),
+    ("dracula", "Дракула", false, [0x282a36, 0x21222c, 0x1b1c24, 0x343746, 0x44475a, 0xf8f8f2, 0xa4a9c6, 0xbd93f9]),
+    ("oled", "OLED", false, [0x000000, 0x050506, 0x000000, 0x121214, 0x232327, 0xf2f2f4, 0x8a8a93, 0xa78bfa]),
+    ("paper", "Бумага", true, [0xfcfcfb, 0xf5f4f2, 0xedece9, 0xffffff, 0xe4e2de, 0x1e1e21, 0x78777e, 0x4a6fe3]),
+    ("sand", "Песок", true, [0xfbf7f0, 0xf4eee3, 0xece4d6, 0xfffdf9, 0xe3d8c6, 0x2b241c, 0x857865, 0xc2703d]),
+    ("mint", "Мята", true, [0xf6fbf8, 0xedf6f1, 0xe2efe8, 0xffffff, 0xd5e7dc, 0x17261e, 0x6c8478, 0x2f9e77]),
 ];
-pub fn theme_palette(name: &str) -> Palette {
-    let mut p = palette(name == "paper");
-    let colors = match name {
-        "midnight" => Some([
-            0x111722, 0x0e141f, 0x0b101a, 0x1b2433, 0x2a3547, 0xe5edf9, 0x95a5bd,
-        ]),
-        "forest" => Some([
-            0x141c1a, 0x101714, 0x0d1310, 0x202d27, 0x304139, 0xe4eee8, 0x9aad9f,
-        ]),
-        "plum" => Some([
-            0x1b1721, 0x16121c, 0x120e18, 0x292331, 0x3b3246, 0xeee7f5, 0xab9bb8,
-        ]),
-        _ => None,
-    };
-    if let Some(c) = colors {
-        let rgb = |n: u32| Color32::from_rgb((n >> 16) as u8, (n >> 8) as u8, n as u8);
-        p = Palette {
-            base: rgb(c[0]),
-            side: rgb(c[1]),
-            rail: rgb(c[2]),
-            surface: rgb(c[3]),
-            line: rgb(c[4]),
-            text: rgb(c[5]),
-            muted: rgb(c[6]),
-        };
+pub const THEMES: [(&str, &str); 13] = {
+    let mut out = [("", ""); 13];
+    let mut i = 0;
+    while i < 13 {
+        out[i] = (THEME_TABLE[i].0, THEME_TABLE[i].1);
+        i += 1;
     }
-    p
+    out
+};
+fn theme_row(name: &str) -> &'static (&'static str, &'static str, bool, [u32; 8]) {
+    THEME_TABLE.iter().find(|t| t.0 == name).unwrap_or(&THEME_TABLE[0])
+}
+fn rgb(n: u32) -> Color32 {
+    Color32::from_rgb((n >> 16) as u8, (n >> 8) as u8, n as u8)
+}
+pub fn is_light(name: &str) -> bool {
+    theme_row(name).2
+}
+pub fn theme_accent(name: &str) -> Color32 {
+    rgb(theme_row(name).3[7])
+}
+pub fn theme_palette(name: &str) -> Palette {
+    let c = theme_row(name).3;
+    Palette {
+        base: rgb(c[0]),
+        side: rgb(c[1]),
+        rail: rgb(c[2]),
+        surface: rgb(c[3]),
+        line: rgb(c[4]),
+        text: rgb(c[5]),
+        muted: rgb(c[6]),
+    }
 }
 pub fn duration(ctx: &egui::Context, seconds: f32) -> f32 {
     if ctx
@@ -168,8 +174,6 @@ pub enum Icon {
     File,
     Close,
     Trash,
-    Pin,
-    Dots,
     Check,
     Arrow,
     Server,
@@ -205,18 +209,6 @@ pub fn icon(p: &egui::Painter, r: Rect, which: Icon, color: Color32) {
         Icon::Close => {
             line((-4., -4.), (4., 4.));
             line((-4., 4.), (4., -4.));
-        }
-        Icon::Pin => {
-            // A pushpin: head, collar and needle, tilted like a pinned note.
-            path(&[(-1., -8.), (6., -1.)]);
-            path(&[(-3., -4.), (2., 1.)]);
-            path(&[(-1., -8.), (-4., -3.), (-1., 0.), (2., 3.), (6., -1.)]);
-            line((0., 2.), (-6., 8.));
-        }
-        Icon::Dots => {
-            for x in [-5.5, 0., 5.5] {
-                p.circle_filled(v(x, 0.), 1.5 * z, color);
-            }
         }
         Icon::Trash => {
             line((-7., -5.), (7., -5.));
@@ -369,12 +361,12 @@ pub fn action_button(ui: &mut egui::Ui, which: Icon, p: Palette, primary: bool) 
     );
     let enabled = ui.is_enabled();
     let base = if primary && enabled {
-        ACCENT
+        accent()
     } else {
         p.surface
     };
     let over = if primary && enabled {
-        mix(ACCENT, Color32::WHITE, 0.14)
+        mix(accent(), Color32::WHITE, 0.14)
     } else {
         p.line
     };
@@ -382,7 +374,7 @@ pub fn action_button(ui: &mut egui::Ui, which: Icon, p: Palette, primary: bool) 
     ui.painter().rect_stroke(
         rect,
         11.,
-        Stroke::new(1.0_f32, if primary && enabled { ACCENT } else { p.line }),
+        Stroke::new(1.0_f32, if primary && enabled { accent() } else { p.line }),
         egui::StrokeKind::Inside,
     );
     icon(
@@ -442,7 +434,7 @@ pub fn chip(ui: &mut egui::Ui, text: &str, which: Icon, p: Palette, active: bool
     ui.painter().rect_stroke(
         painted,
         14.,
-        Stroke::new(1.0_f32, mix(p.line, ACCENT, hover * 0.4)),
+        Stroke::new(1.0_f32, mix(p.line, accent(), hover * 0.4)),
         egui::StrokeKind::Inside,
     );
     let icon_color = if active {
@@ -472,7 +464,7 @@ pub fn chip(ui: &mut egui::Ui, text: &str, which: Icon, p: Palette, active: bool
         ui.painter().rect_stroke(
             painted.expand(2.),
             16.,
-            Stroke::new(1.0_f32, ACCENT),
+            Stroke::new(1.0_f32, accent()),
             egui::StrokeKind::Outside,
         );
     }
@@ -510,7 +502,7 @@ pub fn button(
     );
     let active = ui.is_enabled();
     let (base, over) = match kind {
-        Kind::Primary if active => (ACCENT, mix(ACCENT, Color32::WHITE, 0.14)),
+        Kind::Primary if active => (accent(), mix(accent(), Color32::WHITE, 0.14)),
         Kind::Primary => (p.line, p.line),
         Kind::Secondary => (p.surface, mix(p.surface, p.line, 0.8)),
         Kind::Ghost => (
@@ -534,7 +526,7 @@ pub fn button(
         ui.painter().rect_stroke(
             painted.expand(1.5),
             radius + 1.5,
-            Stroke::new(1.2_f32, ACCENT.gamma_multiply(0.7)),
+            Stroke::new(1.2_f32, accent().gamma_multiply(0.7)),
             egui::StrokeKind::Outside,
         );
     }
@@ -573,7 +565,7 @@ pub fn button(
 }
 pub fn mark(ui: &mut egui::Ui, size: f32) {
     let (r, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
-    icon(ui.painter(), r, Icon::Server, ACCENT);
+    icon(ui.painter(), r, Icon::Server, accent());
 }
 pub fn field(ui: &mut egui::Ui, value: &mut String, hint: &str, password: bool) -> Response {
     let p = animated_palette(ui.ctx(), !ui.visuals().dark_mode);
@@ -585,7 +577,7 @@ pub fn field(ui: &mut egui::Ui, value: &mut String, hint: &str, password: bool) 
     egui::Frame::new()
         .fill(p.base)
         .corner_radius(8.)
-        .stroke(Stroke::new(1.0_f32, mix(p.line, ACCENT, t)))
+        .stroke(Stroke::new(1.0_f32, mix(p.line, accent(), t)))
         .inner_margin(egui::Margin::symmetric(11, 7))
         .show(ui, |ui| {
             ui.add(
@@ -630,7 +622,7 @@ pub fn toggle(ui: &mut egui::Ui, value: &mut bool, text: &str, p: Palette) -> Re
         egui::pos2(r.left() + 16., r.center().y),
         Vec2::new(32., 19.),
     );
-    ui.painter().rect_filled(track, 10., mix(p.line, ACCENT, t));
+    ui.painter().rect_filled(track, 10., mix(p.line, accent(), t));
     ui.painter().circle_filled(
         egui::pos2(track.left() + 9.5 + t * 13., track.center().y),
         6.5,
@@ -702,4 +694,46 @@ pub fn glide(ctx: &egui::Context, id: egui::Id, target: f32) -> f32 {
     }
     ctx.data_mut(|d| d.insert_temp(id, motion));
     current
+}
+
+/// Inter for text, the full Noto Emoji set behind it: egui's bundled emoji font stops at
+/// older Unicode versions, so newer emoji used to come out as boxes.
+pub fn fonts() -> egui::FontDefinitions {
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "inter".into(),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!("../assets/InterVariable.ttf"))),
+    );
+    fonts.font_data.insert(
+        "noto-emoji".into(),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!("../assets/NotoEmoji.ttf"))),
+    );
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        let list = fonts.families.entry(family.clone()).or_default();
+        if family == egui::FontFamily::Proportional {
+            list.insert(0, "inter".into());
+        }
+        // Before egui's own, older emoji font, after the text fonts.
+        let at = list.iter().position(|f| f.contains("Emoji") || f.contains("emoji")).unwrap_or(list.len());
+        list.insert(at, "noto-emoji".into());
+    }
+    fonts
+}
+
+#[cfg(test)]
+mod font_tests {
+    use super::*;
+
+    #[test]
+    fn modern_emoji_have_glyphs() {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(fonts());
+        let _ = ctx.run(Default::default(), |_| {});
+        let font = egui::FontId::proportional(14.);
+        // Unicode 6 to 15: classics, skin tones are separate, newer faces and objects.
+        for emoji in ["😀", "🚀", "🔥", "✅", "❤", "🤖", "🥲", "🫠", "🫡", "🪄", "🧪", "🦀", "🛠", "📌", "🗂", "⚓", "🐉"] {
+            assert!(ctx.fonts(|f| f.has_glyphs(&font, emoji)), "no glyph for {emoji}");
+        }
+        assert!(ctx.fonts(|f| f.has_glyphs(&egui::FontId::monospace(13.), "🦀✅")));
+    }
 }

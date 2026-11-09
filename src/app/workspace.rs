@@ -6,7 +6,7 @@ impl RelayApp {
         if let Some(i) = args.iter().position(|a| a == "--theme") {
             if let Some(name) = args.get(i + 1) {
                 self.settings.appearance.theme = name.clone();
-                self.settings.light = name == "paper";
+                self.settings.light = design::is_light(name);
             }
         }
         self.settings_open = args.iter().any(|a| a == "--demo-settings");
@@ -123,9 +123,10 @@ impl RelayApp {
                         ui.painter().rect_filled(egui::Rect::from_min_size(r.min+Vec2::new(7.,7.),Vec2::new(18.,34.)),5.,colors.rail);
                         ui.painter().rect_filled(egui::Rect::from_min_size(r.min+Vec2::new(31.,7.),Vec2::new(65.,18.)),4.,colors.surface);
                         ui.painter().line_segment([r.min+Vec2::new(32.,32.),r.min+Vec2::new(82.,32.)],Stroke::new(2_f32,colors.muted));
+                        ui.painter().rect_filled(egui::Rect::from_min_size(r.min+Vec2::new(31.,38.),Vec2::new(30.,6.)),3.,design::theme_accent(id));
                         ui.painter().text(r.center_bottom()-Vec2::new(0.,15.),egui::Align2::CENTER_CENTER,name,FontId::proportional(12.),colors.text);
-                        ui.painter().rect_stroke(r,10.,Stroke::new(if selected{2_f32}else{1_f32},if selected{ACCENT}else{p.line}),egui::StrokeKind::Inside);
-                        if response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked(){self.settings.appearance.theme=id.into();self.settings.light=id=="paper";}
+                        ui.painter().rect_stroke(r,10.,Stroke::new(if selected{2_f32}else{1_f32},if selected{accent()}else{p.line}),egui::StrokeKind::Inside);
+                        if response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked(){self.settings.appearance.theme=id.into();self.settings.light=design::is_light(id);}
                     }
                 });
                 ui.add_space(16.);

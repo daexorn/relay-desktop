@@ -1,7 +1,7 @@
 //! Team board tab: a canvas you pan with the mouse, with kanban columns or category lanes,
 //! links between tasks and the activity of people and agents. The board itself lives on the
 //! server (bridge/board.py); this view only sends operations.
-use crate::ui::{self as design, Icon, Kind, Palette, ACCENT, GREEN};
+use crate::ui::{self as design, Icon, Kind, Palette, accent, GREEN};
 use eframe::egui::{
     self, epaint::Shadow, text::LayoutJob, Align, Color32, FontId, Galley, Layout, Pos2, Rect,
     RichText, Sense, Shape, Stroke, Vec2,
@@ -227,7 +227,7 @@ fn initials(name: &str) -> String {
 /// A stable colour per person, so the same teammate looks the same everywhere.
 fn person(name: &str) -> Color32 {
     if agent(name) {
-        return ACCENT;
+        return accent();
     }
     let hash = name.bytes().fold(7u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32));
     color(SWATCHES[1 + hash as usize % (SWATCHES.len() - 1)])
@@ -256,7 +256,7 @@ fn status_name(state: &Value, status: &str) -> String {
 
 fn status_color(status: &str, p: Palette) -> Color32 {
     match status {
-        "doing" => ACCENT,
+        "doing" => accent(),
         "review" => color("#e5b84b"),
         "done" => GREEN,
         "todo" => color("#5b8def"),
@@ -552,8 +552,8 @@ fn chips(ui: &mut egui::Ui, board: &Board, view: &mut BoardView, p: Palette) {
                 }
                 Chip::Links => {
                     let active = view.links;
-                    painter.rect_filled(rect, 12., if active { ACCENT.gamma_multiply(0.25) } else { idle });
-                    painter.text(rect.center(), egui::Align2::CENTER_CENTER, "Все связи", font.clone(), if active { ACCENT } else { p.muted });
+                    painter.rect_filled(rect, 12., if active { accent().gamma_multiply(0.25) } else { idle });
+                    painter.text(rect.center(), egui::Align2::CENTER_CENTER, "Все связи", font.clone(), if active { accent() } else { p.muted });
                     if response.clicked() {
                         view.links = !view.links;
                     }
@@ -634,7 +634,7 @@ fn chips(ui: &mut egui::Ui, board: &Board, view: &mut BoardView, p: Palette) {
             .next_back()
             .map_or(Rect::NOTHING, |(_, r)| Rect::from_min_size(Pos2::new(r.right() + 2., r.top()), Vec2::new(2.5, r.height()))),
     };
-    painter.rect_filled(mark, 1., ACCENT);
+    painter.rect_filled(mark, 1., accent());
     let name = board.names.get(&dragged).cloned().unwrap_or_default();
     let galley = painter.layout_no_wrap(name, FontId::proportional(12.), p.text);
     let ghost = Rect::from_min_size(pointer + Vec2::new(8., -12.), galley.size() + Vec2::new(30., 10.));
@@ -1007,7 +1007,7 @@ fn lanes(ui: &egui::Ui, board: &Board, view: &mut BoardView, p: Palette) -> Plan
             Some((_, r)) => r.top() - 5.,
             None => lane_rects.iter().filter(|(id, _)| *id != dragged).map(|(_, r)| r.bottom() + 5.).fold(40., f32::max),
         };
-        painter.line_segment([Pos2::new(0., line_y), Pos2::new(width, line_y)], Stroke::new(3.0_f32, ACCENT));
+        painter.line_segment([Pos2::new(0., line_y), Pos2::new(width, line_y)], Stroke::new(3.0_f32, accent()));
         let name = board.names.get(&dragged).cloned().unwrap_or_default();
         let galley = painter.layout_no_wrap(name, FontId::proportional(14.), p.text);
         let ghost = Rect::from_min_size(pos + Vec2::new(10., -16.), galley.size() + Vec2::new(32., 14.));
@@ -1337,7 +1337,7 @@ fn cards(ui: &egui::Ui, board: &Board, view: &mut BoardView, p: Palette, plan: &
             }
             let (Some(a), Some(b)) = (rect_of(&from), rect_of(&to)) else { continue };
             let tint = match kind {
-                "blocks" => ACCENT,
+                "blocks" => accent(),
                 "duplicates" => color("#c58af9"),
                 _ => design::mix(p.muted, p.text, 0.25),
             };
@@ -1388,7 +1388,7 @@ fn cards(ui: &egui::Ui, board: &Board, view: &mut BoardView, p: Palette, plan: &
     if let Some(kind) = drag.link {
         // Shift-drag: draw a link to the card under the pointer.
         let target = plan.cards.iter().find(|c| c.id != drag.id && c.rect.contains(pos));
-        let tint = if kind == "blocks" { ACCENT } else { p.text };
+        let tint = if kind == "blocks" { accent() } else { p.text };
         let mut shapes = vec![];
         match target {
             Some(t) => connector(&mut shapes, source.rect, t.rect, tint, 2., kind == "blocks"),
@@ -1428,15 +1428,15 @@ fn cards(ui: &egui::Ui, board: &Board, view: &mut BoardView, p: Palette, plan: &
             None => peers.iter().map(|c| c.rect.bottom() + CARD_GAP / 2.).fold(zone.top, f32::max),
         };
         let (left, right) = if keep {
-            painter.rect_stroke(zone.rect, 16., Stroke::new(2.0_f32, ACCENT.gamma_multiply(0.6)), egui::StrokeKind::Outside);
+            painter.rect_stroke(zone.rect, 16., Stroke::new(2.0_f32, accent().gamma_multiply(0.6)), egui::StrokeKind::Outside);
             (zone.rect.left() + INNER, zone.rect.right() - INNER)
         } else {
             let x = zone.rect.left() + GAP / 2.;
             let w = zone.rect.width() - GAP;
             if zone.category.is_some() { (x, x + w) } else { (x + INNER, x + w - INNER) }
         };
-        painter.line_segment([Pos2::new(left, y), Pos2::new(right, y)], Stroke::new(3.0_f32, ACCENT));
-        painter.circle_filled(Pos2::new(left, y), 4., ACCENT);
+        painter.line_segment([Pos2::new(left, y), Pos2::new(right, y)], Stroke::new(3.0_f32, accent()));
+        painter.circle_filled(Pos2::new(left, y), 4., accent());
         target = Some((zone, before.map(|c| c.id.clone())));
     }
     let ghost = Rect::from_min_size(pos - drag.grab, source.rect.size());
@@ -1540,7 +1540,7 @@ fn paint_card(painter: &egui::Painter, card: &CardBox, task: &Value, board: &Boa
     }
     painter.rect_filled(rect, 10., p.surface.gamma_multiply(alpha));
     let border = if look.selected {
-        Stroke::new(1.5_f32, ACCENT)
+        Stroke::new(1.5_f32, accent())
     } else if let Some(c) = look.related {
         Stroke::new(1.5_f32, c)
     } else if look.hovered {
@@ -1584,10 +1584,10 @@ fn paint_card(painter: &egui::Painter, card: &CardBox, task: &Value, board: &Boa
         _ => None,
     };
     if let Some(label) = priority {
-        let galley = painter.layout_no_wrap(label.into(), small.clone(), ACCENT);
+        let galley = painter.layout_no_wrap(label.into(), small.clone(), accent());
         let pill = Rect::from_min_size(Pos2::new(x, cy - 8.), Vec2::new(galley.size().x + 12., 16.));
-        painter.rect_filled(pill, 8., ACCENT.gamma_multiply(0.16));
-        painter.galley(pill.min + Vec2::new(6., 8. - galley.size().y / 2.), galley, ACCENT);
+        painter.rect_filled(pill, 8., accent().gamma_multiply(0.16));
+        painter.galley(pill.min + Vec2::new(6., 8. - galley.size().y / 2.), galley, accent());
         x = pill.right() + 8.;
     }
     let links = task["links"].as_array().map_or(0, Vec::len);
@@ -1908,7 +1908,7 @@ fn category_editor(ctx: &egui::Context, board: &Board, view: &mut BoardView, p: 
                             if let Some((target, move_to)) = manager.deleting.as_mut().filter(|(target, _)| *target == id) {
                                 ui.add_space(4.);
                                 egui::Frame::new()
-                                    .fill(ACCENT.gamma_multiply(0.1))
+                                    .fill(accent().gamma_multiply(0.1))
                                     .corner_radius(8.)
                                     .inner_margin(egui::Margin::symmetric(10, 8))
                                     .show(ui, |ui| {
@@ -1956,7 +1956,7 @@ fn category_editor(ctx: &egui::Context, board: &Board, view: &mut BoardView, p: 
                     None => rows.iter().filter(|(id, _)| *id != dragged).map(|(_, r)| r.bottom() + 3.).fold(f32::MIN, f32::max),
                 };
                 if let Some((_, first)) = rows.first() {
-                    ui.painter().line_segment([Pos2::new(first.left(), y), Pos2::new(first.right(), y)], Stroke::new(3.0_f32, ACCENT));
+                    ui.painter().line_segment([Pos2::new(first.left(), y), Pos2::new(first.right(), y)], Stroke::new(3.0_f32, accent()));
                 }
                 ui.ctx().request_repaint();
                 if dropped || !ui.input(|i| i.pointer.any_down()) {
@@ -1997,7 +1997,7 @@ fn category_editor(ctx: &egui::Context, board: &Board, view: &mut BoardView, p: 
                     add = design::button(ui, "Добавить", Some(Icon::Plus), Kind::Primary, p, Vec2::new(0., 30.)).clicked();
                 });
                 if exists {
-                    small(ui, "уже есть", 11.5, ACCENT);
+                    small(ui, "уже есть", 11.5, accent());
                 }
                 if ready && (add || enter) {
                     ops.push(json!({"op":"category","new":true,"name":name,"color":manager.new_color}));
@@ -2170,7 +2170,7 @@ fn detail(ui: &mut egui::Ui, task: &Value, board: &Board, view: &mut BoardView, 
                 ("duplicates", _) => "дубль",
                 _ => "связана",
             };
-            let tint = if kind == "blocks" { ACCENT } else { p.muted };
+            let tint = if kind == "blocks" { accent() } else { p.muted };
             ui.horizontal(|ui| {
                 small(ui, label, 11.5, tint);
                 if ui.link(RichText::new(format!("{other} · {}", crate::model::shorten(&title, 34))).size(12.5)).clicked() {
@@ -2240,7 +2240,7 @@ fn detail(ui: &mut egui::Ui, task: &Value, board: &Board, view: &mut BoardView, 
             small(ui, format!("Готово: {} · {}", text(&task["done_by"]), ago(done)), 11., p.muted);
         }
         ui.add_space(10.);
-        if ui.button(RichText::new("Удалить задачу").color(ACCENT).size(12.)).on_hover_text("Двойной щелчок").double_clicked() {
+        if ui.button(RichText::new("Удалить задачу").color(accent()).size(12.)).on_hover_text("Двойной щелчок").double_clicked() {
             ops.push(json!({"op":"delete","id":id}));
             close = true;
         }

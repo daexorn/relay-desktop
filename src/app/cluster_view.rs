@@ -563,7 +563,7 @@ fn agent_editor(ui: &mut egui::Ui, a: &mut Agent, servers: &[Server], leader: bo
                     "Исполнитель"
                 },
                 14.,
-                if leader { ACCENT } else { p.text },
+                if leader { accent() } else { p.text },
             );
             ui.horizontal_wrapped(|ui| {
                 if !leader {
@@ -677,7 +677,7 @@ fn node_status(app: &RelayApp, run: Option<&Run>, agent: &Agent) -> String {
 fn state_color(state: TaskState, p: Palette) -> Color32 {
     match state {
         TaskState::Done => GREEN,
-        TaskState::Running | TaskState::Waiting => ACCENT,
+        TaskState::Running | TaskState::Waiting => accent(),
         TaskState::Failed | TaskState::Interrupted => Color32::from_rgb(222, 143, 151),
         _ => p.muted,
     }
@@ -766,7 +766,7 @@ fn draw_graph(
                 Color32::TRANSPARENT,
                 Stroke::new(
                     if active { 2.0_f32 } else { 1.0_f32 },
-                    if active { ACCENT } else { p.line },
+                    if active { accent() } else { p.line },
                 ),
             ));
         if active {
@@ -776,7 +776,7 @@ fn draw_graph(
                 + (start + d).to_vec2() * (3. * q * q * t)
                 + (end - d).to_vec2() * (3. * q * t * t)
                 + end.to_vec2() * (t * t * t);
-            ui.painter().circle_filled(pos.to_pos2(), 3., ACCENT);
+            ui.painter().circle_filled(pos.to_pos2(), 3., accent());
         }
 
         if graph_node(
@@ -820,7 +820,7 @@ fn graph_node(
         12.,
         Stroke::new(
             if leader { 1.5_f32 } else { 1.0_f32 },
-            if leader { ACCENT } else { p.line },
+            if leader { accent() } else { p.line },
         ),
         egui::StrokeKind::Inside,
     );
@@ -834,7 +834,7 @@ fn graph_node(
             "ИСПОЛНИТЕЛЬ"
         },
         FontId::proportional(9.5),
-        if leader { ACCENT } else { p.muted },
+        if leader { accent() } else { p.muted },
     );
     painter.text(
         r.left_top() + Vec2::new(12., 29.),

@@ -1,6 +1,6 @@
 use crate::{
     model::{self, Message},
-    ui::{self as design, Palette, ACCENT},
+    ui::{self as design, Palette, accent},
 };
 use eframe::egui::{self, RichText};
 use egui_commonmark::CommonMarkCache;
@@ -180,7 +180,7 @@ pub fn show(
         ui.painter(),
         egui::Rect::from_min_size(r.min + egui::vec2(11., 10.), egui::vec2(18., 18.)),
         design::Icon::Server,
-        if busy { ACCENT } else { p.muted },
+        if busy { accent() } else { p.muted },
     );
     let text = format!(
         "{} · {}{}",
@@ -494,7 +494,7 @@ pub fn result_view(
                     } else if v["state"] == "failed" {
                         error
                     } else {
-                        ACCENT
+                        accent()
                     },
                 ));
             });
@@ -643,7 +643,7 @@ pub fn cluster_update_view(ui: &mut egui::Ui, text: &str, p: Palette, cache: &mu
         .and_then(|s| s.split_once("</relay-cluster-results>").map(|(v, _)| v));
     egui::Frame::new()
         .fill(p.surface)
-        .stroke(egui::Stroke::new(1.0_f32, ACCENT.gamma_multiply(0.35)))
+        .stroke(egui::Stroke::new(1.0_f32, accent().gamma_multiply(0.35)))
         .corner_radius(12.)
         .inner_margin(14)
         .show(ui, |ui| {
