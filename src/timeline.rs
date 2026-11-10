@@ -318,14 +318,7 @@ pub fn show(
                                         detail.toggle(ui);
                                     }
                                     if !line.is_empty() {
-                                        ui.horizontal(|ui| {
-                                            ui.add_space(44.);
-                                            let mut job = egui::text::LayoutJob::simple(line.clone(), egui::FontId::monospace(11.5), design::mix(p.text, p.muted, 0.45), ui.available_width());
-                                            job.wrap.max_rows = 2;
-                                            job.wrap.break_anywhere = true;
-                                            job.wrap.overflow_character = Some('…');
-                                            ui.label(job);
-                                        });
+                                        clipped(ui, &line, 44., 2, egui::FontId::monospace(11.5), design::mix(p.text, p.muted, 0.45));
                                     }
                                     if detail.openness(ui.ctx()) < 0.5 {
                                         egui::Frame::new().inner_margin(egui::Margin { left: 44, ..Default::default() }).show(ui, |ui| {
@@ -473,6 +466,19 @@ fn status_mark(ui: &egui::Ui, r: egui::Rect, mark: Mark, error: egui::Color32) {
     }
 }
 
+/// Text that never pushes its container wider: at most `rows` rows, the rest becomes "…".
+/// (A Label in a horizontal layout ignores the job's width and would grow the whole card.)
+fn clipped(ui: &mut egui::Ui, text: &str, indent: f32, rows: usize, font: egui::FontId, color: egui::Color32) {
+    let width = (ui.available_width() - indent).max(40.);
+    let mut job = egui::text::LayoutJob::simple(text.to_owned(), font, color, width);
+    job.wrap.max_rows = rows;
+    job.wrap.break_anywhere = true;
+    job.wrap.overflow_character = Some('…');
+    let galley = ui.painter().layout_job(job);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width + indent, galley.size().y), egui::Sense::hover());
+    ui.painter().galley(rect.min + egui::vec2(indent, 0.), galley, color);
+}
+
 /// The one line that says what exactly ran: `$ ./gradlew build`, a path, a search.
 fn command_line(m: &Message) -> String {
     let i = &m.input;
@@ -516,11 +522,7 @@ fn preview(ui: &mut egui::Ui, call: Option<&Message>, results: Vec<&Message>, ru
                     shown += 1;
                     egui::Frame::new().fill(color.gamma_multiply(0.1)).corner_radius(4.).inner_margin(egui::Margin::symmetric(6, 1)).show(ui, |ui| {
                         ui.set_width(ui.available_width());
-                        let mut job = egui::text::LayoutJob::simple_singleline(format!("{sign} {}", line.trim_end()), egui::FontId::monospace(11.5), color);
-                        job.wrap.max_width = ui.available_width();
-                        job.wrap.max_rows = 1;
-                        job.wrap.overflow_character = Some('…');
-                        ui.label(job);
+                        clipped(ui, &format!("{sign} {}", line.trim_end()), 0., 1, egui::FontId::monospace(11.5), color);
                     });
                 }
             }
@@ -558,11 +560,7 @@ fn preview(ui: &mut egui::Ui, call: Option<&Message>, results: Vec<&Message>, ru
                 ui.label(RichText::new(format!("… ещё {n} {word} выше · открой, чтобы увидеть всё")).size(10.5).color(p.muted));
             }
             for line in tail {
-                let mut job = egui::text::LayoutJob::simple_singleline(line.trim_end().to_owned(), egui::FontId::monospace(11.5), if result.failed { error } else { design::mix(p.text, p.muted, 0.35) });
-                job.wrap.max_width = ui.available_width();
-                job.wrap.max_rows = 1;
-                job.wrap.overflow_character = Some('…');
-                ui.label(job);
+                clipped(ui, line.trim_end(), 0., 1, egui::FontId::monospace(11.5), if result.failed { error } else { design::mix(p.text, p.muted, 0.35) });
             }
         });
 }

@@ -343,6 +343,8 @@ impl RelayApp {
                         done("c1", "src/combat.rs:12:pub fn damage(base: f32, crit: f32) -> f32 {\nsrc/combat.rs:40:    damage -= armor;", false),
                         tool("c2", "Edit", json!({"file_path":"/opt/sbrp-client/src/combat.rs","old_string":"    damage -= armor;","new_string":"    damage = (damage - armor).max(0.0);"})),
                         done("c2", "The file /opt/sbrp-client/src/combat.rs has been updated.", false),
+                        tool("c5", "Bash", json!({"command":"cd /root/relay-desktop && sed -n \"$(grep -n 'fn send_prompt' src/app.rs | cut -d: -f1),+30p\" src/app.rs; grep -n \"send_prompt\\|fn submit\\|send = true\" src/app.rs src/app/*.rs | head -40 && echo done-with-a-very-long-command-line-that-never-ends"})),
+                        done("c5", "src/app.rs:2737:                                send = true;\n 472309  464349 Tue Nov 10 09:40:52 2026 /usr/local/bin/claude -p --output-format stream-json --input-format stream-json --verbose --include-partial-messages --permission-prompt-tool stdio --permission-mode auto --session-id=0e33b7a5", false),
                         tool("c3", "Bash", json!({"command":"./gradlew build","description":"Собрать мод"})),
                         done("c3", "> Task :compileJava\n> Task :processResources\n> Task :jar\n\nBUILD SUCCESSFUL in 41s\n7 actionable tasks: 7 executed", false),
                         tool("c4", "Bash", json!({"command":"./gradlew test","description":"Прогнать тесты"})),

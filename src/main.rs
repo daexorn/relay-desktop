@@ -55,6 +55,8 @@ fn main() -> eframe::Result {
             .with_title("Relay")
             .with_inner_size(if args.iter().any(|a| a == "--demo-small") {
                 [800., 660.]
+            } else if args.iter().any(|a| a == "--demo-wide") {
+                [1700., 900.]
             } else {
                 [1180., 780.]
             })
