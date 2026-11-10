@@ -648,6 +648,23 @@ pub fn toggle(ui: &mut egui::Ui, value: &mut bool, text: &str, p: Palette) -> Re
     );
     response
 }
+/// A centred column whose width comes from the window, not from what is inside: a wide
+/// line of output can never make the whole chat wider than the screen.
+pub fn column(ui: &mut egui::Ui, visible: f32, max_width: f32, add: impl FnOnce(&mut egui::Ui)) {
+    let w = (visible - 40.).min(max_width).max(120.);
+    let gap = ((visible - w) * 0.5).max(0.);
+    ui.horizontal(|ui| {
+        ui.add_space(gap);
+        ui.vertical(|ui| {
+            ui.set_width(w);
+            ui.set_max_width(w);
+            let clip = ui.clip_rect().intersect(egui::Rect::from_min_size(ui.min_rect().min - egui::vec2(8., 10000.), egui::vec2(w + 16., f32::INFINITY)));
+            ui.set_clip_rect(clip);
+            add(ui);
+        });
+    });
+}
+
 pub fn content(ui: &mut egui::Ui, max_width: f32, add: impl FnOnce(&mut egui::Ui)) {
     let w = ui.available_width().min(max_width);
     let gap = ((ui.available_width() - w) * 0.5).max(0.);

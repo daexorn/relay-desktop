@@ -349,7 +349,7 @@ impl RelayApp {
                         done("c3", "> Task :compileJava\n> Task :processResources\n> Task :jar\n\nBUILD SUCCESSFUL in 41s\n7 actionable tasks: 7 executed", false),
                         tool("c4", "Bash", json!({"command":"./gradlew test","description":"Прогнать тесты"})),
                         done("c4", "> Task :test FAILED\n\nCombatTest > armorNeverHeals() FAILED\n    expected: <0.0> but was: <-3.0>\n\n3 tests completed, 1 failed", true),
-                        Message { role: "assistant".into(), text: "Один тест упал: броня делала урон отрицательным. Исправил.".into(), ..Default::default() },
+                        Message { role: "assistant".into(), text: "Один тест упал: броня делала урон отрицательным. Исправил. Вот очень длинная строка текста, которая должна переноситься по ширине колонки чата, а не уходить за край окна, сколько бы слов в ней ни было, и ещё немного слов для проверки переноса.\n\n```\n472309  464349 Tue Nov 10 09:40:52 2026 /usr/local/bin/claude -p --output-format stream-json --input-format stream-json --verbose --include-partial-messages --permission-prompt-tool stdio\n```\n\n| Колонка | Очень длинное значение |\n|---|---|\n| a | /root/.cache/relay-desktop/host/f43d31ba77ddc39e.py--relay-host/root/.cache/relay-desktop/host/f43d31ba77ddc39e.sock |".into(), ..Default::default() },
                     ];
                     egui::collapsing_header::CollapsingState::load_with_default_open(&cc.egui_ctx, egui::Id::new(("activity-group", k.as_str(), 2usize)), true).store(&cc.egui_ctx);
                 }
@@ -2242,13 +2242,15 @@ impl RelayApp {
                     0.30,
                     egui::emath::easing::cubic_in_out,
                 );
+                // Measured outside the scroll area, so content cannot widen it.
+                let visible = ui.available_width();
                 egui::ScrollArea::vertical()
                     .id_salt(("chat", &k))
                     .stick_to_bottom(true)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         ui.add_space(24.);
-                        design::content(ui, (ui.available_width() - 40.).min(chat_width), |ui| {
+                        design::column(ui, visible, chat_width, |ui| {
                             ui.set_opacity(fade);
                             if chat.loading {
                                 ui.horizontal(|ui| {
