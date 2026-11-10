@@ -444,11 +444,11 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         if (localCommand(c, text)) return
         if (!canSend(c)) return
         c.transcript.error = ""
-        if (c.transcript.busy) {
-            c.queued.add(text)
-        } else {
-            c.transcript.userAt = c.transcript.messages.size
-            c.transcript.messages.add(Message("user", text))
+        // Mid-answer the message goes straight in: Claude takes it at its next step, as in the terminal.
+        val steering = c.transcript.busy
+        c.transcript.userAt = c.transcript.messages.size
+        c.transcript.messages.add(Message("user", text))
+        if (!steering) {
             c.transcript.busy = true
             c.transcript.status = "Отправляем"
         }

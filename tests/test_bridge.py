@@ -288,21 +288,18 @@ class ProtocolTests(unittest.TestCase):
         self.assertIn('роль',event['message'])
         self.assertNotIn(self.sid,self.host.runs)
 
-    def test_prompt_during_an_answer_joins_the_queue(self):
+    def test_prompt_during_an_answer_steers_the_same_turn(self):
         self.prompt();self.wait('permission')
         run=self.host.runs[self.sid]
+        written=[]
+        write=run.write
+        run.write=lambda obj:(written.append(obj),write(obj))
         self.prompt()
-        state=self.wait('run_state')
-        while state['queued']!=1:state=self.wait('run_state')
-        self.assertIs(self.host.runs[self.sid],run);self.assertEqual(run.turns,2);self.assertTrue(run.busy)
+        self.assertIs(self.host.runs[self.sid],run)
+        # Claude Code takes it in at its next step: same turn, one result for both.
+        self.assertEqual(written[-1]['priority'],'next');self.assertEqual(written[-1]['type'],'user')
+        self.assertEqual(run.turns,1);self.assertTrue(run.busy)
         self.assertEqual(self.host.running(),{self.sid})
-        self.host.dispatch({'op':'permission','sid':self.sid,'id':'test-permission','allow':True})
-        self.wait('claude')
-        # The first answer is done, the queued message is still being answered.
-        while True:
-            state=self.wait('run_state')
-            if state['queued']==0:break
-        self.assertTrue(run.busy);self.assertEqual(run.turns,1)
 
     def test_claude_carrying_on_by_itself_is_running_again(self):
         self.prompt();self.wait('permission')

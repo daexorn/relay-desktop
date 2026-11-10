@@ -966,7 +966,7 @@ fun Composer(vm: RelayViewModel, chat: Chat) {
             textStyle = TextStyle(color = p.text, fontSize = 15.sp),
             cursorBrush = SolidColor(p.accent),
             modifier = Modifier.fillMaxWidth().heightIn(min = 24.dp, max = 160.dp),
-            decorationBox = { inner -> Box { if (chat.draft.isEmpty()) Label(when { !online -> "Нет связи с сервером"; busy && vm.canSend(chat) -> "Добавь сообщение — Claude ответит следом…"; busy -> "Claude отвечает…"; else -> "Напиши задачу… или / для команд" }, 15.sp, p.muted); inner() } },
+            decorationBox = { inner -> Box { if (chat.draft.isEmpty()) Label(when { !online -> "Нет связи с сервером"; busy && vm.canSend(chat) -> "Добавь уточнение — Claude учтёт по ходу работы…"; busy -> "Claude отвечает…"; else -> "Напиши задачу… или / для команд" }, 15.sp, p.muted); inner() } },
         )
         Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             FlowRow(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -1048,7 +1048,7 @@ fun SettingsScreen(vm: RelayViewModel) {
                     if (vm.notice.isNotEmpty()) { Spacer(Modifier.height(8.dp)); Label(vm.notice, 12.sp, p.muted) }
                 }
                 Spacer(Modifier.height(24.dp))
-                Label("Relay для Android 0.2.3 · тот же сервер и тот же помощник, что у десктопа", 12.sp, p.muted)
+                Label("Relay для Android 0.2.4 · тот же сервер и тот же помощник, что у десктопа", 12.sp, p.muted)
             }
         }
     }

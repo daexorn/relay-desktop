@@ -1222,11 +1222,14 @@ impl RelayApp {
         if self.local_command(&server, &k) {
             return;
         }
+        let live = self.remote.get(&server.id).is_some_and(|r| r.protocol >= 4);
         let c = self.chats.get_mut(&k).unwrap();
-        if c.busy {
+        if c.busy && !live {
             c.enqueue_draft();
             return;
         }
+        // With the server host a message sent mid-answer goes straight to Claude, who takes it
+        // in at the next step of the same answer, as in the terminal.
         self.send_to_chat(server, k);
     }
     /// Commands that act at once, also in the middle of an answer: `/model`, `/mode`, `/stop`.
@@ -1301,8 +1304,10 @@ impl RelayApp {
             .cluster_for_chat(&server.id, &self.chats[&k].sid)
             .and_then(|id| self.cluster_store.runs.iter().find(|r| r.id == id))
             .is_some_and(|r| r.leader_sid != self.chats[&k].sid);
+        let live = self.remote.get(&server.id).is_some_and(|r| r.protocol >= 4);
         let c = self.chats.get_mut(&k).unwrap();
-        if c.busy || c.loading || (c.draft.trim().is_empty() && c.images.is_empty()) {
+        let steering = c.busy && live;
+        if (c.busy && !live) || c.loading || (c.draft.trim().is_empty() && c.images.is_empty()) {
             return;
         }
         let text = c.draft.trim().to_owned();
@@ -1344,7 +1349,10 @@ impl RelayApp {
                 .insert(c.user_at, std::mem::take(&mut c.images));
         }
         c.draft.clear();
-        c.blocks.clear();
+        if !steering {
+            // Mid-answer the stream keeps going into the blocks it already started.
+            c.blocks.clear();
+        }
         c.busy = true;
         c.upload_progress =
             uploading.then(|| (0, files.iter().filter_map(|f| f["bytes"].as_u64()).sum()));
@@ -2699,7 +2707,9 @@ impl RelayApp {
                                 .id(egui::Id::new("prompt-field"))
                                 .frame(false)
                                 .hint_text(
-                                    RichText::new(if chat.busy {
+                                    RichText::new(if chat.busy && live {
+                                        "Добавь уточнение — Claude учтёт его по ходу работы…"
+                                    } else if chat.busy {
                                         "Добавь уточнение — отправится после текущего ответа…"
                                     } else {
                                         "Напиши задачу…"
@@ -2746,7 +2756,9 @@ impl RelayApp {
                                 p,
                                 true,
                             )
-                            .on_hover_text(if chat.busy {
+                            .on_hover_text(if chat.busy && live {
+                                "Отправить сейчас · Claude учтёт по ходу работы"
+                            } else if chat.busy {
                                 "В очередь · текущий ответ продолжится"
                             } else if connected {
                                 "Отправить"

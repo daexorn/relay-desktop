@@ -37,21 +37,18 @@ class QueueTest {
         assertTrue(slashMatches("/c x", vm.commands).isEmpty())
     }
 
-    @Test fun messagesSentMidAnswerWaitTheirTurn() {
+    @Test fun messagesSentMidAnswerGoStraightIn() {
         val vm = online()
         vm.newChat()
         val c = vm.chat()!!
         c.draft = "первое"; vm.submit()
         assertTrue(c.transcript.busy)
-        c.draft = "второе"; vm.submit()
-        assertEquals(listOf("второе"), c.queued.toList())
-        assertEquals(1, c.transcript.messages.count { it.role == "user" })
-        // Claude finishes the first answer and moves on to the queued message.
-        vm.handle(JSONObject().put("type", "claude").put("sid", c.sid).put("data", JSONObject().put("type", "result").put("result", "ок")))
+        c.draft = "поправка"; vm.submit()
+        // Shown at once, like in the terminal; Claude takes it in at its next step.
+        assertEquals(listOf("первое", "поправка"), c.transcript.messages.filter { it.role == "user" }.map { it.text })
         assertTrue(c.queued.isEmpty())
-        assertEquals("второе", c.transcript.messages.last { it.role == "user" }.text)
         assertTrue(c.transcript.busy)
-        vm.handle(JSONObject().put("type", "run_state").put("sid", c.sid).put("busy", false))
+        vm.handle(JSONObject().put("type", "claude").put("sid", c.sid).put("data", JSONObject().put("type", "result").put("result", "ок")))
         assertFalse(c.transcript.busy)
     }
 

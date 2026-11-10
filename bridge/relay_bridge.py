@@ -739,14 +739,22 @@ class Run:
                 self.owner.send({"type": "run_closed", "sid": self.sid, "interrupted": was_busy,
                                  "detail": "\n".join(self.error)[-1800:]})
 
-    def prompt(self, text, images=None):
+    def prompt(self, text, images=None, steer=False):
         if not self.ready.wait(75):
             self.close()
             raise ValueError("Claude не ответил при запуске. Проверь авторизацию на сервере и повтори подключение.")
         if self.process.poll() is not None:
             raise ValueError("\n".join(self.error) or "Claude завершился при запуске.")
         content = ([{"type": "text", "text": text}] if text else []) + [{"type": "image", "source": image} for image in (images or [])]
-        self.write({"type": "user", "session_id": self.sid, "message": {"role": "user", "content": content}, "parent_tool_use_id": None})
+        message = {"type": "user", "session_id": self.sid, "message": {"role": "user", "content": content}, "parent_tool_use_id": None}
+        if steer:
+            # Mid-answer: Claude Code takes it in at the next step of the same turn, like
+            # typing into the terminal while it works. It joins that turn, so no extra result.
+            message["priority"] = "next"
+            self.write(message)
+            self.owner.run_state(self)
+            return
+        self.write(message)
         self.turns += 1
         self.busy = True
         self.owner.run_state(self)
@@ -1162,6 +1170,7 @@ class Bridge:
                     self.actor=str(req.get("actor") or "")[:80]
                     self.desktop_context=json.dumps(req.get("desktop_context",{}),ensure_ascii=False)[:5000] if desktop_enabled else ""
                     run = self.runs.get(sid)
+                    steer = bool(run and run.busy and run.turns > 0 and not run.closed and run.process.poll() is None)
                     if run and run.busy and not run.closed and run.process.poll() is None:
                         # Mid-answer: the message joins Claude's queue; model and mode switch live.
                         if model != run.model:
@@ -1184,12 +1193,12 @@ class Bridge:
                             raise ValueError("Открой исходную рабочую папку этой сессии.")
                         run = Run(self, sid, cwd, model, mode, bool(existing), effort)
                         self.runs[sid] = run
-                    claimed = not run.busy
+                    claimed = not steer and not run.busy
                 if decoded or uploaded:
                     saved = store_files(sid, decoded) if decoded else []
                     saved.extend(uploaded)
                     text += "\n\n<relay-files>\n" + json.dumps(saved, ensure_ascii=False) + "\n</relay-files>"
-                run.prompt(text, images)
+                run.prompt(text, images, steer=steer)
             elif op == "cluster_reply":
                 if self.cluster:self.cluster.result(valid_id(req.get("id")),valid_id(req.get("sid")),valid_id(req.get("run")),req.get("result"))
             elif op == "permission":
