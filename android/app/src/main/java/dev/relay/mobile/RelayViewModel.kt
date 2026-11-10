@@ -275,9 +275,14 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                 val busy = value.optBoolean("busy")
                 running = if (busy) running + sid else running - sid
                 chats[sid]?.let { c ->
+                    val background = value.optJSONArray("background")?.let { a -> (0 until a.length()).map { a.optString(it) } }.orEmpty()
                     if (busy && !c.transcript.busy && c.loaded) {
                         c.transcript.busy = true
                         if (c.transcript.status.isEmpty()) c.transcript.status = "Работает"
+                        c.changed()
+                    }
+                    if (busy && background.isNotEmpty() && (c.transcript.status.isEmpty() || c.transcript.status == "Работает" || c.transcript.status.startsWith("В фоне"))) {
+                        c.transcript.status = "В фоне: " + background.joinToString()
                         c.changed()
                     } else if (!busy && c.transcript.busy) {
                         c.transcript.busy = false

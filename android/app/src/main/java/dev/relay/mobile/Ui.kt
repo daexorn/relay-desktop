@@ -1048,7 +1048,7 @@ fun SettingsScreen(vm: RelayViewModel) {
                     if (vm.notice.isNotEmpty()) { Spacer(Modifier.height(8.dp)); Label(vm.notice, 12.sp, p.muted) }
                 }
                 Spacer(Modifier.height(24.dp))
-                Label("Relay для Android 0.2.2 · тот же сервер и тот же помощник, что у десктопа", 12.sp, p.muted)
+                Label("Relay для Android 0.2.3 · тот же сервер и тот же помощник, что у десктопа", 12.sp, p.muted)
             }
         }
     }

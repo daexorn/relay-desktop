@@ -304,6 +304,32 @@ class ProtocolTests(unittest.TestCase):
             if state['queued']==0:break
         self.assertTrue(run.busy);self.assertEqual(run.turns,1)
 
+    def test_claude_carrying_on_by_itself_is_running_again(self):
+        self.prompt();self.wait('permission')
+        run=self.host.runs[self.sid]
+        self.host.dispatch({'op':'permission','sid':self.sid,'id':'test-permission','allow':True})
+        while self.wait('run_state')['busy']:pass
+        self.assertFalse(run.busy)
+        # A background task finished: Claude Code starts a turn nobody sent.
+        stdout=run.process.stdout
+        import io
+        run.process.stdout=io.StringIO('\n'.join(json.dumps(x) for x in [
+            {'type':'system','subtype':'background_tasks_changed','tasks':[{'description':'Сборка мода'}]},
+            {'type':'result','result':'started'},
+            {'type':'system','subtype':'task_notification','status':'completed'},
+            {'type':'system','subtype':'background_tasks_changed','tasks':[]},
+            {'type':'assistant','message':{'content':[{'type':'text','text':'Фоновая команда закончилась'}]}},
+            {'type':'result','result':'ok'}])+'\n')
+        run.closed=False
+        threading.Thread(target=run.read,daemon=True).start()
+        state=self.wait('run_state');self.assertTrue(state['busy']);self.assertEqual(state['background'],['Сборка мода'])
+        # The turn ends but the build still runs: the session stays running.
+        self.assertTrue(self.wait('run_state')['busy'])
+        # No gap between the command finishing and Claude answering it.
+        states=[self.wait('run_state') for _ in range(2)]
+        self.assertEqual([x['busy'] for x in states],[True,False])
+        run.process.stdout=stdout
+
     def test_model_switches_live_during_an_answer(self):
         self.prompt();self.wait('permission')
         run=self.host.runs[self.sid]
@@ -605,4 +631,34 @@ class HostTests(unittest.TestCase):
             self.host.route({'type':'desktop_request','id':'x','sid':self.sid,'tool':'run_local_command','input':{}})
         self.assertEqual([e['id'] for e in seen],['x'])
         first.close();second.close()
+
+    def test_new_version_adopts_answers_running_in_the_old_host(self):
+        conn,stream=self.app();self.next(stream,'hello')
+        conn.sendall((json.dumps({'op':'prompt','sid':self.sid,'cwd':str(self.root),'text':'test','mode':'manual'})+'\n').encode())
+        permission=self.next(stream,'permission')
+        conn.close()
+        # Relay was updated: a host of the new version starts next to the old one.
+        cli=self.root/'claude'
+        transcripts=bridge.Transcripts(self.root/'transcripts')
+        newer=bridge.Host(lambda send:bridge.Bridge(send=send,transcripts=transcripts,binary=str(cli)))
+        newer.bridge.catalog={'type':'catalog','models':[],'commands':[]}
+        path=str(self.root/'newer.sock')
+        threading.Thread(target=newer.serve,args=(path,),daemon=True).start()
+        self.addCleanup(newer.bridge.close)
+        end=time.monotonic()+5
+        while self.sid not in newer.bridge.running() and time.monotonic()<end:time.sleep(.05)
+        self.assertIn(self.sid,newer.bridge.running())
+        self.assertTrue(self.host.retiring)
+        app=socket.socket(socket.AF_UNIX);app.connect(path);app.settimeout(5);events=app.makefile('rb')
+        self.assertTrue(self.next(events,'run_state')['busy'])
+        self.assertEqual(self.next(events,'permission')['id'],permission['id'])
+        # The answer to the permission reaches the old host, its result comes back through the new one.
+        app.sendall((json.dumps({'op':'permission','sid':self.sid,'id':permission['id'],'allow':True})+'\n').encode())
+        self.assertEqual(self.next(events,'claude')['data']['message']['content'][0]['text'],'allow')
+        self.assertFalse(self.next(events,'run_state')['busy'])
+        end=time.monotonic()+8
+        while self.sid in newer.bridge.running() and time.monotonic()<end:time.sleep(.05)
+        self.assertNotIn(self.sid,newer.bridge.running())
+        self.assertTrue(self.host.idle())  # The old host now exits on its next check.
+        app.close()
 

@@ -1028,11 +1028,15 @@ impl RelayApp {
                     r.running.remove(&sid);
                 }
                 if let Some(c) = self.chats.get_mut(&key(&server, &sid)) {
+                    let background: Vec<&str> = value["background"].as_array().map(|a| a.iter().filter_map(|t| t.as_str()).collect()).unwrap_or_default();
                     if busy && !c.busy && c.loaded {
                         c.busy = true;
                         if c.status.is_empty() {
                             c.status = "Работает".into();
                         }
+                    }
+                    if busy && !background.is_empty() && (c.status.is_empty() || c.status == "Работает" || c.status.starts_with("В фоне")) {
+                        c.status = format!("В фоне: {}", background.join(", "));
                     } else if !busy && c.busy {
                         c.busy = false;
                         c.status.clear();

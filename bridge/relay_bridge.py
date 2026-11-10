@@ -601,6 +601,7 @@ class Run:
         self.desktop_context = getattr(owner,"desktop_context", "")
         self.busy = False
         self.turns = 0  # Prompts sent and not yet answered: Claude Code answers queued ones in order.
+        self.background = []  # Commands Claude left running; it carries on when they finish.
         self.closed = False
         self.ready = threading.Event()
         self.pending = {}
@@ -707,10 +708,23 @@ class Run:
                     self.pending.pop(request_id, None)
                     self.owner.send({"type": "permission_cancelled", "sid": self.sid, "id": request_id})
                     continue
+                if kind == "system" and data.get("subtype") == "task_notification" and self.turns == 0 and not self.closed:
+                    # A background command finished: Claude Code is about to answer it.
+                    self.turns = 1
+                if kind == "system" and data.get("subtype") == "background_tasks_changed":
+                    self.background = [str(t.get("description") or t.get("task_type") or "задача")[:200]
+                                       for t in data.get("tasks") or [] if isinstance(t, dict)]
+                    self.busy = self.turns > 0 or bool(self.background)
+                    self.owner.run_state(self)
+                if kind in ("assistant", "stream_event") and self.turns == 0 and not self.closed:
+                    # Claude carries on by itself, e.g. when a background command finishes.
+                    self.turns = 1
+                    self.busy = True
+                    self.owner.run_state(self)
                 self.owner.send({"type": "claude", "sid": self.sid, "data": data})
                 if kind == "result":
                     self.turns = max(0, self.turns - 1)
-                    self.busy = self.turns > 0
+                    self.busy = self.turns > 0 or bool(self.background)
                     if not self.busy:
                         self.pending.clear()
                     self.owner.run_state(self)
@@ -719,6 +733,7 @@ class Run:
             was_busy = self.busy
             self.busy = False
             self.turns = 0
+            self.background = []
             self.owner.run_state(self)
             if not self.closed:
                 self.owner.send({"type": "run_closed", "sid": self.sid, "interrupted": was_busy,
@@ -1001,10 +1016,12 @@ class Bridge:
         return True
 
     def run_state(self, run):
-        self.send({"type": "run_state", "sid": run.sid, "busy": bool(run.busy), "queued": max(0, run.turns - 1)})
+        self.send({"type": "run_state", "sid": run.sid, "busy": bool(run.busy), "queued": max(0, run.turns - 1),
+                   "background": list(getattr(run, "background", []))})
 
     def running(self):
-        return {sid for sid, run in list(self.runs.items()) if run.busy and not run.closed}
+        own = {sid for sid, run in list(self.runs.items()) if run.busy and not run.closed}
+        return own | set(getattr(self, "peer_running", {}))
 
     def send_sessions(self):
         sessions = self.transcripts.sessions()
@@ -1349,6 +1366,66 @@ class HostClient:
             pass
 
 
+class Peer:
+    """An older host (previous Relay version) that still has answers running. The new host
+    shows them as running, passes their events on and sends their permissions and stops back;
+    once they are done it lets go, and the old host exits."""
+    def __init__(self, host, conn):
+        self.host, self.conn = host, conn
+        self.running = set()
+        self.pending = {}  # sid -> {permission id: event}
+        self.lock = threading.Lock()
+
+    def send(self, req):
+        with self.lock:
+            self.conn.sendall((json.dumps(req, ensure_ascii=False) + "\n").encode("utf-8"))
+
+    def watch(self):
+        settle = time.time() + 5
+        self.conn.settimeout(5)
+        try:
+            self.send({"op": "_peer"})
+            stream = self.conn.makefile("rb")
+            while True:
+                try:
+                    line = stream.readline()
+                except socket.timeout:
+                    if not self.running and time.time() > settle:
+                        break
+                    continue
+                if not line:
+                    break
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                kind, sid = event.get("type"), event.get("sid")
+                if kind == "run_state":
+                    (self.running.add if event.get("busy") else self.running.discard)(sid)
+                    if not event.get("busy"):
+                        self.pending.pop(sid, None)
+                elif kind == "permission":
+                    self.pending.setdefault(sid, {})[event.get("id")] = event
+                elif kind == "permission_cancelled":
+                    self.pending.get(sid, {}).pop(event.get("id"), None)
+                elif kind == "run_closed":
+                    self.running.discard(sid); self.pending.pop(sid, None)
+                if kind in ("claude", "permission", "permission_cancelled", "run_closed", "run_state", "notice") or (kind == "error" and sid):
+                    self.host.route(event)
+                self.host.peers_changed()
+                if not self.running and time.time() > settle:
+                    break
+        except OSError:
+            pass
+        finally:
+            self.running.clear(); self.pending.clear()
+            self.host.drop_peer(self)
+            try:
+                self.conn.close()
+            except OSError:
+                pass
+
+
 class Host:
     """The long-lived process: one Bridge whose Claude runs outlive any app connection."""
     def __init__(self, bridge_factory=None):
@@ -1356,7 +1433,36 @@ class Host:
         self.lock = threading.Lock()
         self.owners = {}  # sid -> the app that sent its last prompt (it serves the PC tools)
         self.quiet_since = time.time()
+        self.retiring = False
+        self.peers = []
         self.bridge = (bridge_factory or Bridge)(send=self.route)
+        self.bridge.peer_running = {}
+
+    def peers_changed(self):
+        self.bridge.peer_running = {sid: peer for peer in list(self.peers) for sid in peer.running}
+
+    def drop_peer(self, peer):
+        self.peers = [p for p in self.peers if p is not peer]
+        self.peers_changed()
+
+    def adopt(self, own_path):
+        """Join older hosts so the answers they are still giving stay visible."""
+        for path in Path(own_path).parent.glob("*.sock"):
+            if str(path) == str(own_path):
+                continue
+            conn = connect(path)
+            if conn is None:
+                try:
+                    path.unlink()  # Stale socket of a host that is gone.
+                except OSError:
+                    pass
+                continue
+            peer = Peer(self, conn)
+            self.peers.append(peer)
+            threading.Thread(target=peer.watch, daemon=True).start()
+
+    def peer_for(self, sid):
+        return self.bridge.peer_running.get(sid)
 
     def route(self, event):
         kind = event.get("type")
@@ -1380,9 +1486,15 @@ class Host:
 
     def replay(self, client):
         """A returning app learns what is still running and what is waiting for an answer."""
+        for peer in list(self.peers):
+            for sid in list(peer.running):
+                client.send({"type": "run_state", "sid": sid, "busy": True, "queued": 0})
+                for event in list(peer.pending.get(sid, {}).values()):
+                    client.send(event)
         for run in list(self.bridge.runs.values()):
             if run.busy and not run.closed:
-                client.send({"type": "run_state", "sid": run.sid, "busy": True, "queued": max(0, run.turns - 1)})
+                client.send({"type": "run_state", "sid": run.sid, "busy": True, "queued": max(0, run.turns - 1),
+                             "background": list(run.background)})
                 for ident, req in list(run.pending.items()):
                     client.send({"type": "permission", "sid": run.sid, "id": ident,
                                  "tool": req.get("tool_name", "Действие"), "input": req.get("input", {})})
@@ -1403,6 +1515,21 @@ class Host:
                 except ValueError:
                     continue
                 if not isinstance(req, dict):
+                    continue
+                if req.get("op") == "_peer":
+                    # A newer host took over: finish what runs here, then exit. It still
+                    # gets every event, but does not keep this host alive.
+                    client.peer = True
+                    self.retiring = True
+                    self.quiet_since = 0
+                    continue
+                peer = self.peer_for(req.get("sid")) if req.get("op") in ("permission", "stop", "control", "prompt") else None
+                if peer is not None:
+                    # The answer is running in the older host: it gets the reply, the stop or the follow-up.
+                    try:
+                        peer.send(req)
+                    except OSError:
+                        pass
                     continue
                 if req.get("op") == "prompt" and isinstance(req.get("sid"), str):
                     self.owners[req["sid"]] = client
@@ -1425,8 +1552,10 @@ class Host:
 
     def idle(self):
         with self.lock:
-            if self.clients:
+            if any(not getattr(c, "peer", False) for c in self.clients) and not self.retiring:
                 return False
+        if self.retiring:
+            return not self.bridge.running()
         return not self.bridge.running() and time.time() - self.quiet_since > HOST_IDLE
 
     def serve(self, path):
@@ -1443,6 +1572,7 @@ class Host:
             os.umask(old)
         listener.listen(16)
         listener.settimeout(30)
+        threading.Thread(target=self.adopt, args=(os.path.abspath(path),), daemon=True).start()
         next_update = time.time() + 60
         try:
             while True:
