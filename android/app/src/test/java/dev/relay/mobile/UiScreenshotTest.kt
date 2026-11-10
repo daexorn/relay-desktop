@@ -92,6 +92,10 @@ class UiScreenshotTest {
             JSONObject().put("role", "assistant").put("text", "Сначала посмотрю, как сейчас считается урон."),
             JSONObject().put("role", "tool").put("tool", "Bash").put("tool_id", "t1").put("input", JSONObject().put("command", "grep -rn damage src/ | head")),
             JSONObject().put("role", "tool_result").put("tool_id", "t1").put("text", "src/Combat.kt:12: val damage = base * crit\nsrc/Combat.kt:40: damage -= armor"),
+            JSONObject().put("role", "tool").put("tool", "Edit").put("tool_id", "t2").put("input", JSONObject().put("file_path", "/opt/sbrp-client/src/Combat.kt").put("old_string", "damage -= armor").put("new_string", "damage = maxOf(0f, damage - armor)")),
+            JSONObject().put("role", "tool_result").put("tool_id", "t2").put("text", "The file has been updated."),
+            JSONObject().put("role", "tool").put("tool", "Bash").put("tool_id", "t3").put("input", JSONObject().put("command", "./gradlew test").put("description", "Прогнать тесты")),
+            JSONObject().put("role", "tool_result").put("tool_id", "t3").put("failed", true).put("text", "> Task :compileKotlin\n> Task :test FAILED\nCombatTest > armorNeverHeals() FAILED\n    expected: <0.0> but was: <-3.0>\n3 tests completed, 1 failed"),
             JSONObject().put("role", "assistant").put("text", """
                 Средний урон за удар:
 

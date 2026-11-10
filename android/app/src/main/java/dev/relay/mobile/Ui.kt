@@ -3,6 +3,9 @@ package dev.relay.mobile
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.animation.animateColorAsState
@@ -745,7 +748,9 @@ fun AssistantText(m: Message, streaming: Boolean = false) {
 @Composable
 fun ActionsGroup(item: Item.Actions, running: Boolean) {
     val p = LocalPalette.current
-    var open by rememberSaveable(item.start) { mutableStateOf(false) }
+    // The live group stays open so you can follow along; finished ones fold into one line.
+    var open by rememberSaveable(item.start) { mutableStateOf(running) }
+    LaunchedEffect(running) { if (running) open = true }
     val calls = item.messages.filter { it.role == "tool" }
     val failed = item.messages.any { it.role == "tool_result" && it.failed }
     val turn by animateFloatAsState(if (open) 90f else 0f, tween(200), label = "turn")
@@ -764,7 +769,7 @@ fun ActionsGroup(item: Item.Actions, running: Boolean) {
             Column(Modifier.padding(start = 12.dp, end = 12.dp, bottom = 10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 for (call in calls) {
                     val result = item.messages.firstOrNull { it.role == "tool_result" && it.toolId == call.toolId && call.toolId.isNotEmpty() }
-                    ToolCall(call, result)
+                    ToolCall(call, result, running)
                 }
             }
         }
@@ -772,36 +777,95 @@ fun ActionsGroup(item: Item.Actions, running: Boolean) {
 }
 
 @Composable
-fun ToolCall(call: Message, result: Message?) {
+fun ToolCall(call: Message, result: Message?, running: Boolean = false) {
     val p = LocalPalette.current
     var full by remember { mutableStateOf(false) }
-    Column(Modifier.fillMaxWidth()) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(7.dp).clip(CircleShape).background(when { result == null -> p.accent; result.failed -> p.red; else -> p.green }))
-            Spacer(Modifier.width(8.dp))
-            Label(toolName(call.tool), 13.sp, p.text, FontWeight.Medium)
-        }
-        val summary = toolSummary(call.tool, call.input)
-        if (summary.isNotEmpty()) {
-            Text(summary, color = p.muted, fontSize = 12.sp, fontFamily = FontFamily.Monospace, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(start = 15.dp, top = 2.dp))
-        }
-        if (result != null && result.text.isNotBlank()) {
-            // Command output: monospace on the base colour, a few lines until tapped.
-            Box(
-                Modifier.padding(start = 15.dp, top = 6.dp).fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(p.base)
-                    .border(1.dp, if (result.failed) p.red.copy(alpha = 0.4f) else p.line, RoundedCornerShape(8.dp))
-                    .clickable { full = !full }.padding(10.dp).animateContentSize(tween(200))
-            ) {
-                Text(
-                    result.text.trimEnd(),
-                    color = if (result.failed) p.red else p.mix(p.text, p.muted, 0.25f),
-                    fontSize = 12.sp,
-                    fontFamily = FontFamily.Monospace,
-                    maxLines = if (full) 400 else 6,
-                    overflow = TextOverflow.Ellipsis,
-                )
+    // New actions slide in instead of popping up.
+    val appear = remember { MutableTransitionState(false).apply { targetState = true } }
+    AnimatedVisibility(appear, enter = fadeIn(tween(260)) + slideInVertically(tween(260)) { it / 3 }) {
+        Column(
+            Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(p.base)
+                .border(1.dp, when { result?.failed == true -> p.red.copy(alpha = 0.45f); result == null && running -> p.accent.copy(alpha = 0.45f); else -> p.line }, RoundedCornerShape(10.dp))
+                .clickable { full = !full }.padding(10.dp).animateContentSize(tween(220))
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                StatusMark(when { result == null && running -> 0; result?.failed == true -> 2; else -> 1 })
+                Spacer(Modifier.width(9.dp))
+                val heading = call.input.optString("description").trim().takeIf { it.isNotEmpty() && !call.tool.startsWith("mcp__relay_cluster__") } ?: toolName(call.tool)
+                Label(heading, 13.5.sp, if (result?.failed == true) p.red else p.text, FontWeight.Medium, maxLines = 2)
+            }
+            val line = commandLine(call)
+            if (line.isNotEmpty()) {
+                Text(line, color = p.mix(p.text, p.muted, 0.45f), fontSize = 12.sp, fontFamily = FontFamily.Monospace, maxLines = if (full) 20 else 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(start = 27.dp, top = 3.dp))
+            }
+            Column(Modifier.padding(start = 27.dp, top = 6.dp)) {
+                if (call.tool == "Edit" || call.tool == "MultiEdit") {
+                    val pairs = if (call.tool == "MultiEdit") call.input.optJSONArray("edits")?.let { a -> (0 until a.length()).mapNotNull { a.optJSONObject(it) }.map { it.optString("old_string") to it.optString("new_string") } }.orEmpty()
+                        else listOf(call.input.optString("old_string") to call.input.optString("new_string"))
+                    val lines = pairs.flatMap { (old, new) -> old.lines().filter { it.isNotBlank() }.take(if (full) 40 else 3).map { "−" to it } + new.lines().filter { it.isNotBlank() }.take(if (full) 40 else 3).map { "+" to it } }
+                    for ((sign, text) in lines.take(if (full) 200 else 8)) {
+                        val color = if (sign == "+") p.green else p.red
+                        Text("$sign ${text.trimEnd()}", color = color, fontSize = 11.5.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp).clip(RoundedCornerShape(4.dp)).background(color.copy(alpha = 0.1f)).padding(horizontal = 6.dp, vertical = 1.dp))
+                    }
+                } else if (result == null && running) {
+                    val dots by rememberInfiniteTransition(label = "run").animateFloat(0f, 3f, infiniteRepeatable(tween(1200, easing = LinearEasing)), label = "dots")
+                    Label("выполняется" + ".".repeat(1 + dots.toInt().coerceAtMost(2)), 12.sp, p.accent)
+                } else if (result != null && result.text.isNotBlank() && call.tool != "Read") {
+                    val all = result.text.trimEnd().lines().filter { it.isNotBlank() }
+                    val shown = if (full) all.takeLast(400) else all.takeLast(4)
+                    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(7.dp)).background(if (result.failed) p.red.copy(alpha = 0.08f) else p.side).padding(horizontal = 9.dp, vertical = 6.dp)) {
+                        if (all.size > shown.size) Label("… ещё ${lines(all.size - shown.size)} выше · нажми, чтобы раскрыть", 10.5.sp, p.muted)
+                        Text(shown.joinToString("\n"), color = if (result.failed) p.red else p.mix(p.text, p.muted, 0.3f), fontSize = 11.5.sp, fontFamily = FontFamily.Monospace)
+                    }
+                }
             }
         }
+    }
+}
+
+/** 0 — a spinning arc while it runs, 1 — green tick, 2 — red cross. */
+@Composable
+fun StatusMark(state: Int) {
+    val p = LocalPalette.current
+    val spin by rememberInfiniteTransition(label = "spin").animateFloat(0f, 360f, infiniteRepeatable(tween(900, easing = LinearEasing)), label = "angle")
+    val color = when (state) { 0 -> p.accent; 1 -> p.green; else -> p.red }
+    androidx.compose.foundation.Canvas(Modifier.size(18.dp)) {
+        val r = size.minDimension / 2f - 1.5f
+        val stroke = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.7.dp.toPx(), cap = androidx.compose.ui.graphics.StrokeCap.Round)
+        when (state) {
+            0 -> {
+                drawCircle(color.copy(alpha = 0.2f), r, style = stroke)
+                drawArc(color, spin, 250f, false, topLeft = center - androidx.compose.ui.geometry.Offset(r, r), size = androidx.compose.ui.geometry.Size(r * 2, r * 2), style = stroke)
+            }
+            1 -> {
+                drawCircle(color.copy(alpha = 0.18f), r)
+                val path = androidx.compose.ui.graphics.Path().apply { moveTo(center.x - r * 0.42f, center.y); lineTo(center.x - r * 0.1f, center.y + r * 0.33f); lineTo(center.x + r * 0.45f, center.y - r * 0.3f) }
+                drawPath(path, color, style = stroke)
+            }
+            else -> {
+                drawCircle(color.copy(alpha = 0.18f), r)
+                val d = r * 0.36f
+                drawLine(color, center - androidx.compose.ui.geometry.Offset(d, d), center + androidx.compose.ui.geometry.Offset(d, d), stroke.width, androidx.compose.ui.graphics.StrokeCap.Round)
+                drawLine(color, center + androidx.compose.ui.geometry.Offset(d, -d), center + androidx.compose.ui.geometry.Offset(-d, d), stroke.width, androidx.compose.ui.graphics.StrokeCap.Round)
+            }
+        }
+    }
+}
+
+fun lines(n: Int) = "$n " + when { n % 10 == 1 && n % 100 != 11 -> "строка"; n % 10 in 2..4 && n % 100 !in 12..14 -> "строки"; else -> "строк" }
+
+/** What exactly ran: `$ ./gradlew build`, a file, a search. */
+fun commandLine(call: Message): String {
+    val i = call.input
+    return when (call.tool) {
+        "Bash", "mcp__relay_desktop__run_local_command" -> "$ " + i.optString("command").trim().lines().joinToString(" ⏎ ")
+        "Grep" -> "«${i.optString("pattern")}»" + i.optString("path").let { if (it.isEmpty()) "" else " в $it" }
+        "Read", "Write", "Edit", "MultiEdit" -> i.optString("file_path")
+        "Glob" -> i.optString("pattern")
+        "WebSearch" -> i.optString("query")
+        "WebFetch" -> i.optString("url")
+        else -> if (call.tool.startsWith("mcp__relay_cluster__")) "" else toolSummary(call.tool, i)
     }
 }
 

@@ -145,7 +145,7 @@ pub fn show(
     let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
         ui.ctx(),
         id,
-        auto_errors && errors > 0,
+        (auto_errors && errors > 0) || busy,
     );
     let error_color = egui::Color32::from_rgb(222, 143, 151);
     let width = ui.available_width().max(100.);
@@ -229,9 +229,10 @@ pub fn show(
                 ui.set_width((width - 20.).max(80.));
                 egui::ScrollArea::vertical()
                     .id_salt(id.with("journal"))
-                    .max_height(420.)
+                    .max_height(560.)
+                    .stick_to_bottom(busy)
                     .min_scrolled_height(
-                        (rows.len() as f32 * 54. + detail_openness * 190.).clamp(68., 420.),
+                        (rows.len() as f32 * 104. + detail_openness * 190.).clamp(68., 560.),
                     )
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
@@ -248,44 +249,55 @@ pub fn show(
                                 .call
                                 .map(|i| action_title(&messages[i]))
                                 .unwrap_or_else(|| "Результат действия".into());
-                            let local = row.call.is_some_and(|i| {
-                                messages[i].tool.starts_with("mcp__relay_desktop__")
-                            });
-                            egui::Frame::new()
+                            let call = row.call.map(|i| &messages[i]);
+                            let local = call.is_some_and(|m| m.tool.starts_with("mcp__relay_desktop__"));
+                            let running = busy && row.results.is_empty();
+                            let tool = call.map(|m| m.tool.as_str()).unwrap_or("");
+                            let kind_icon = match tool {
+                                "Bash" | "mcp__relay_desktop__run_local_command" => design::Icon::Terminal,
+                                "Edit" | "MultiEdit" | "Write" => design::Icon::Pencil,
+                                "Grep" | "Glob" | "WebSearch" | "WebFetch" => design::Icon::Search,
+                                "mcp__relay_desktop__download_file" => design::Icon::Computer,
+                                t if t.starts_with("mcp__relay_cluster__") => design::Icon::Cluster,
+                                _ => design::Icon::File,
+                            };
+                            // What Claude said it is doing ("Собрать мод") reads better than the tool name.
+                            let heading = call
+                                .and_then(|m| m.input["description"].as_str())
+                                .filter(|d| !d.trim().is_empty() && !tool.starts_with("mcp__relay_cluster__"))
+                                .map(|d| model::shorten(d.trim(), 90))
+                                .unwrap_or(title);
+                            let line = call.map(command_line).unwrap_or_default();
+                            let shown = ui.ctx().animate_bool_with_time(row_id.with("shown"), true, design::duration(ui.ctx(), 0.3));
+                            let tint = if failed { error_color } else if running { accent() } else { p.line };
+                            ui.scope(|ui| {
+                                ui.multiply_opacity(shown);
+                                ui.add_space((1. - shown) * 10.);
+                                egui::Frame::new()
                                 .fill(p.base)
-                                .stroke(egui::Stroke::new(1_f32, p.line))
-                                .corner_radius(9.)
-                                .inner_margin(10)
+                                .stroke(egui::Stroke::new(1_f32, design::mix(p.line, tint, if failed || running { 0.55 } else { 0. })))
+                                .corner_radius(10.)
+                                .inner_margin(egui::Margin { left: 10, right: 10, top: 8, bottom: 8 })
                                 .show(ui, |ui| {
                                     let (r, res) = ui.allocate_exact_size(
-                                        egui::vec2(ui.available_width(), 26.),
+                                        egui::vec2(ui.available_width(), 22.),
                                         egui::Sense::click(),
                                     );
+                                    let mark = egui::Rect::from_center_size(r.left_center() + egui::vec2(8., 0.), egui::vec2(16., 16.));
+                                    status_mark(ui, mark, if running { Mark::Running } else if failed { Mark::Failed } else { Mark::Done }, error_color);
                                     design::icon(
                                         ui.painter(),
-                                        egui::Rect::from_min_size(
-                                            r.min + egui::vec2(0., 5.),
-                                            egui::vec2(16., 16.),
-                                        ),
-                                        if local {
-                                            design::Icon::Computer
-                                        } else {
-                                            design::Icon::File
-                                        },
+                                        egui::Rect::from_center_size(r.left_center() + egui::vec2(30., 0.), egui::vec2(15., 15.)),
+                                        if local { design::Icon::Computer } else { kind_icon },
                                         if failed { error_color } else { p.muted },
                                     );
-                                    let text = if failed {
-                                        format!("{title} · ошибка")
-                                    } else {
-                                        title
-                                    };
                                     ui.painter()
-                                        .with_clip_rect(r.shrink2(egui::vec2(22., 0.)))
+                                        .with_clip_rect(egui::Rect::from_min_max(r.min + egui::vec2(42., 0.), r.max - egui::vec2(20., 0.)))
                                         .text(
-                                            r.left_center() + egui::vec2(24., 0.),
+                                            r.left_center() + egui::vec2(44., 0.),
                                             egui::Align2::LEFT_CENTER,
-                                            text,
-                                            egui::FontId::proportional(12.),
+                                            heading,
+                                            egui::FontId::proportional(12.5),
                                             if failed { error_color } else { p.text },
                                         );
                                     design::chevron(
@@ -299,9 +311,25 @@ pub fn show(
                                     );
                                     if res
                                         .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                        .on_hover_text("Показать команду и весь вывод")
                                         .clicked()
                                     {
                                         detail.toggle(ui);
+                                    }
+                                    if !line.is_empty() {
+                                        ui.horizontal(|ui| {
+                                            ui.add_space(44.);
+                                            let mut job = egui::text::LayoutJob::simple(line.clone(), egui::FontId::monospace(11.5), design::mix(p.text, p.muted, 0.45), ui.available_width());
+                                            job.wrap.max_rows = 2;
+                                            job.wrap.break_anywhere = true;
+                                            job.wrap.overflow_character = Some('…');
+                                            ui.label(job);
+                                        });
+                                    }
+                                    if detail.openness(ui.ctx()) < 0.5 {
+                                        egui::Frame::new().inner_margin(egui::Margin { left: 44, ..Default::default() }).show(ui, |ui| {
+                                            preview(ui, call, row.results.iter().map(|i| &messages[*i]).collect(), running, p, error_color);
+                                        });
                                     }
                                     detail.show_body_unindented(ui, |ui| {
                                         if let Some(call) = row.call {
@@ -396,11 +424,145 @@ pub fn show(
                                         }
                                     });
                                 });
+                            });
                             ui.add_space(6.);
                         }
                     });
             });
     });
+}
+
+enum Mark {
+    Running,
+    Done,
+    Failed,
+}
+
+/// A spinning arc while the action runs, a green tick or a red cross when it is over.
+fn status_mark(ui: &egui::Ui, r: egui::Rect, mark: Mark, error: egui::Color32) {
+    let painter = ui.painter();
+    let c = r.center();
+    let radius = r.width() / 2. - 1.;
+    match mark {
+        Mark::Running => {
+            let t = ui.input(|i| i.time) as f32 * 5.;
+            painter.circle_stroke(c, radius, egui::Stroke::new(1.6_f32, accent().gamma_multiply(0.22)));
+            let points: Vec<_> = (0..=16)
+                .map(|k| {
+                    let a = t + k as f32 / 16. * 4.2;
+                    c + egui::vec2(a.cos(), a.sin()) * radius
+                })
+                .collect();
+            painter.add(egui::Shape::line(points, egui::Stroke::new(1.8_f32, accent())));
+            ui.ctx().request_repaint();
+        }
+        Mark::Done => {
+            painter.circle_filled(c, radius, design::GREEN.gamma_multiply(0.18));
+            painter.add(egui::Shape::line(
+                vec![c + egui::vec2(-3.5, 0.2), c + egui::vec2(-1., 2.8), c + egui::vec2(3.8, -2.6)],
+                egui::Stroke::new(1.6_f32, design::GREEN),
+            ));
+        }
+        Mark::Failed => {
+            painter.circle_filled(c, radius, error.gamma_multiply(0.18));
+            let s = egui::Stroke::new(1.6_f32, error);
+            painter.line_segment([c + egui::vec2(-3., -3.), c + egui::vec2(3., 3.)], s);
+            painter.line_segment([c + egui::vec2(3., -3.), c + egui::vec2(-3., 3.)], s);
+        }
+    }
+}
+
+/// The one line that says what exactly ran: `$ ./gradlew build`, a path, a search.
+fn command_line(m: &Message) -> String {
+    let i = &m.input;
+    let s = |k: &str| i[k].as_str().unwrap_or("").trim().to_owned();
+    match m.tool.as_str() {
+        "Bash" | "mcp__relay_desktop__run_local_command" => format!("$ {}", s("command").lines().collect::<Vec<_>>().join(" ⏎ ")),
+        "Grep" => {
+            let place = s("path");
+            format!("«{}»{}", s("pattern"), if place.is_empty() { String::new() } else { format!(" в {place}") })
+        }
+        "Glob" => s("pattern"),
+        "WebSearch" => s("query"),
+        "WebFetch" => s("url"),
+        "Read" | "Write" | "Edit" | "MultiEdit" => s("file_path"),
+        t if t.starts_with("mcp__relay_cluster__") => String::new(),
+        _ => {
+            let text = model::summary(i);
+            if text.starts_with('{') { String::new() } else { text }
+        }
+    }
+}
+
+/// Without opening the action: the change of an edit, or the last lines of the output.
+fn preview(ui: &mut egui::Ui, call: Option<&Message>, results: Vec<&Message>, running: bool, p: Palette, error: egui::Color32) {
+    let edit = call.filter(|m| m.tool == "Edit" || m.tool == "MultiEdit");
+    if let Some(m) = edit {
+        let pairs: Vec<(String, String)> = if m.tool == "MultiEdit" {
+            m.input["edits"].as_array().map(|a| a.iter().map(|e| (e["old_string"].as_str().unwrap_or("").to_owned(), e["new_string"].as_str().unwrap_or("").to_owned())).collect()).unwrap_or_default()
+        } else {
+            vec![(m.input["old_string"].as_str().unwrap_or("").to_owned(), m.input["new_string"].as_str().unwrap_or("").to_owned())]
+        };
+        let mut shown = 0;
+        ui.add_space(4.);
+        for (old, new) in pairs {
+            for (sign, text, color) in [("−", old, error), ("+", new, design::GREEN)] {
+                for line in text.lines().filter(|l| !l.trim().is_empty()).take(3) {
+                    if shown >= 8 {
+                        break;
+                    }
+                    shown += 1;
+                    egui::Frame::new().fill(color.gamma_multiply(0.1)).corner_radius(4.).inner_margin(egui::Margin::symmetric(6, 1)).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        let mut job = egui::text::LayoutJob::simple_singleline(format!("{sign} {}", line.trim_end()), egui::FontId::monospace(11.5), color);
+                        job.wrap.max_width = ui.available_width();
+                        job.wrap.max_rows = 1;
+                        job.wrap.overflow_character = Some('…');
+                        ui.label(job);
+                    });
+                }
+            }
+        }
+        return;
+    }
+    if running {
+        let t = ui.input(|i| i.time);
+        let dots = ".".repeat(1 + (t * 2.5) as usize % 3);
+        ui.label(RichText::new(format!("выполняется{dots}")).size(11.5).color(accent()));
+        return;
+    }
+    let Some(result) = results.last() else {
+        return;
+    };
+    if call.is_some_and(|m| m.tool == "Read") {
+        return;
+    }
+    let text = clean_terminal(&result.text);
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    if lines.is_empty() || decoded(&result.text).is_some() {
+        return;
+    }
+    let tail = &lines[lines.len().saturating_sub(3)..];
+    ui.add_space(5.);
+    egui::Frame::new()
+        .fill(if result.failed { error.gamma_multiply(0.08) } else { p.side })
+        .corner_radius(6.)
+        .inner_margin(egui::Margin::symmetric(8, 5))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            if lines.len() > tail.len() {
+                let n = lines.len() - tail.len();
+                let word = if n % 10 == 1 && n % 100 != 11 { "строка" } else if (2..=4).contains(&(n % 10)) && !(12..=14).contains(&(n % 100)) { "строки" } else { "строк" };
+                ui.label(RichText::new(format!("… ещё {n} {word} выше · открой, чтобы увидеть всё")).size(10.5).color(p.muted));
+            }
+            for line in tail {
+                let mut job = egui::text::LayoutJob::simple_singleline(line.trim_end().to_owned(), egui::FontId::monospace(11.5), if result.failed { error } else { design::mix(p.text, p.muted, 0.35) });
+                job.wrap.max_width = ui.available_width();
+                job.wrap.max_rows = 1;
+                job.wrap.overflow_character = Some('…');
+                ui.label(job);
+            }
+        });
 }
 
 fn decoded(text: &str) -> Option<Value> {

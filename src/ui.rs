@@ -180,6 +180,8 @@ pub enum Icon {
     Computer,
     Board,
     Cluster,
+    Terminal,
+    Pencil,
 }
 pub fn icon(p: &egui::Painter, r: Rect, which: Icon, color: Color32) {
     let c = r.center();
@@ -257,6 +259,15 @@ pub fn icon(p: &egui::Painter, r: Rect, which: Icon, color: Color32) {
             (-7., 6.),
             (-8., -5.),
         ]),
+        Icon::Terminal => {
+            p.rect_stroke(Rect::from_center_size(c, Vec2::new(18. * z, 15. * z)), 3. * z, s, egui::StrokeKind::Middle);
+            path(&[(-5., -2.5), (-2., 0.5), (-5., 3.5)]);
+            line((0., 3.5), (5., 3.5));
+        }
+        Icon::Pencil => {
+            path(&[(-7., 7.), (-6., 2.5), (4., -7.5), (7.5, -4.), (-2.5, 6.), (-7., 7.)]);
+            line((1.5, -5.), (5., -1.5));
+        }
         Icon::File => {
             path(&[
                 (-6., -8.),

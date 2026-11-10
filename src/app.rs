@@ -329,6 +329,27 @@ impl RelayApp {
                     }
                 }
             }
+            if args.iter().any(|a| a == "--demo-commands") {
+                if let Some(k) = app.current_key() {
+                    let chat = app.chats.get_mut(&k).unwrap();
+                    let tool = |id: &str, name: &str, input: Value| Message { role: "tool".into(), tool: name.into(), tool_id: id.into(), input, ..Default::default() };
+                    let done = |id: &str, text: &str, failed: bool| Message { role: "tool_result".into(), tool_id: id.into(), text: text.into(), failed, ..Default::default() };
+                    chat.messages = vec![
+                        Message { role: "user".into(), text: "Собери мод и проверь тесты".into(), ..Default::default() },
+                        Message { role: "assistant".into(), text: "Сначала найду, где считается урон, потом соберу.".into(), ..Default::default() },
+                        tool("c1", "Grep", json!({"pattern":"fn damage","path":"src/"})),
+                        done("c1", "src/combat.rs:12:pub fn damage(base: f32, crit: f32) -> f32 {\nsrc/combat.rs:40:    damage -= armor;", false),
+                        tool("c2", "Edit", json!({"file_path":"/opt/sbrp-client/src/combat.rs","old_string":"    damage -= armor;","new_string":"    damage = (damage - armor).max(0.0);"})),
+                        done("c2", "The file /opt/sbrp-client/src/combat.rs has been updated.", false),
+                        tool("c3", "Bash", json!({"command":"./gradlew build","description":"Собрать мод"})),
+                        done("c3", "> Task :compileJava\n> Task :processResources\n> Task :jar\n\nBUILD SUCCESSFUL in 41s\n7 actionable tasks: 7 executed", false),
+                        tool("c4", "Bash", json!({"command":"./gradlew test","description":"Прогнать тесты"})),
+                        done("c4", "> Task :test FAILED\n\nCombatTest > armorNeverHeals() FAILED\n    expected: <0.0> but was: <-3.0>\n\n3 tests completed, 1 failed", true),
+                        Message { role: "assistant".into(), text: "Один тест упал: броня делала урон отрицательным. Исправил.".into(), ..Default::default() },
+                    ];
+                    egui::collapsing_header::CollapsingState::load_with_default_open(&cc.egui_ctx, egui::Id::new(("activity-group", k.as_str(), 2usize)), true).store(&cc.egui_ctx);
+                }
+            }
             if args.iter().any(|a| a == "--demo-artifact") {
                 if let Some(k) = app.current_key() {
                     app.chats.get_mut(&k).unwrap().messages=vec![Message{role:"assistant".into(),text:"Собрал мод. Готовый файл:\n\n[sbrp-client-0.7.300.jar](/opt/project/build/libs/sbrp-client-0.7.300.jar)\n\nСкачай его кнопкой ниже.".into(),..Default::default()}];
