@@ -131,7 +131,7 @@ private class MathSpans(private val size: Float, private val color: Int, private
     }
 }
 
-fun markwon(context: Context, p: Palette, room: () -> Int = { 0 }): Markwon {
+fun markwon(context: Context, p: Palette, room: () -> Int = { 0 }, onFile: ((String) -> Unit)? = null): Markwon {
     Formulas.init(context)
     val px = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, TEXT_SP, context.resources.displayMetrics)
     return Markwon.builder(context)
@@ -144,6 +144,15 @@ fun markwon(context: Context, p: Palette, room: () -> Int = { 0 }): Markwon {
         .usePlugin(TablePlugin.create(context))
         .usePlugin(StrikethroughPlugin.create())
         .usePlugin(object : AbstractMarkwonPlugin() {
+            // Links to files on the server download to the phone; web links open in the browser.
+            override fun configureConfiguration(builder: io.noties.markwon.MarkwonConfiguration.Builder) {
+                val web = io.noties.markwon.LinkResolverDef()
+                builder.linkResolver { view, link ->
+                    if (onFile != null && Downloads.isServerFile(link)) onFile(Downloads.serverPath(link))
+                    else runCatching { web.resolve(view, link) }
+                }
+            }
+
             override fun configureTheme(builder: MarkwonTheme.Builder) {
                 builder
                     .linkColor(p.accent.toArgb())
@@ -166,12 +175,12 @@ fun markwon(context: Context, p: Palette, room: () -> Int = { 0 }): Markwon {
  * writing, a formula that is not closed yet stays hidden until its closing marker arrives.
  */
 @Composable
-fun MarkdownText(text: String, p: Palette, modifier: Modifier = Modifier, streaming: Boolean = false) {
+fun MarkdownText(text: String, p: Palette, modifier: Modifier = Modifier, streaming: Boolean = false, onFile: ((String) -> Unit)? = null) {
     val context = LocalContext.current
     val holder = remember { arrayOfNulls<TextView>(1) }
     val engine = remember(p) {
         val fallback = context.resources.displayMetrics.widthPixels - (40 * context.resources.displayMetrics.density).roundToInt()
-        markwon(context, p) { holder[0]?.let { it.width - it.paddingLeft - it.paddingRight }?.takeIf { it > 0 } ?: fallback }
+        markwon(context, p, { holder[0]?.let { it.width - it.paddingLeft - it.paddingRight }?.takeIf { it > 0 } ?: fallback }, onFile)
     }
     val prepared = remember(text, streaming) { MathText.prepare(text, streaming) }
     AndroidView(

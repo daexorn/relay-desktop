@@ -302,6 +302,17 @@ class ProtocolTests(unittest.TestCase):
             control.assert_called_with('set_model',model=None)
         self.assertIs(self.host.runs[self.sid],run)
 
+    def test_claude_update_reports_the_new_version(self):
+        calls=[]
+        def run(args,**kw):
+            calls.append(args);return mock.Mock(returncode=0,stdout='Updated to 2.2.0',stderr='')
+        versions=iter(['2.1.0 (Claude Code)','2.2.0 (Claude Code)'])
+        with mock.patch.object(bridge.subprocess,'run',side_effect=run),mock.patch.object(self.host,'claude_version',side_effect=lambda:next(versions)),mock.patch.object(self.host,'probe_catalog'):
+            self.host.dispatch({'op':'claude_update'})
+        self.assertTrue(self.wait('claude_update')['running'])
+        event=self.wait('claude_update')
+        self.assertEqual(calls[0][1:],['update']);self.assertTrue(event['ok']);self.assertTrue(event['changed']);self.assertEqual(event['version'],'2.2.0 (Claude Code)')
+
     def test_catalog_comes_from_initialize(self):
         self.host.learn_catalog({'models':[{'value':'claude-fable-5-2','displayName':'Fable 5.2','description':'x','supportsEffort':True}],
                                  'commands':[{'name':'compact','description':'Сжать','argumentHint':'[focus]'},{'name':'__internal'}],'claude_code_version':'2.1'})

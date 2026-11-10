@@ -903,6 +903,42 @@ class Bridge:
                 self.catalog_probe = False
         threading.Thread(target=run, daemon=True).start()
 
+    def claude_version(self):
+        try:
+            return subprocess.check_output([self.binary, "--version"], text=True, timeout=15, stdin=subprocess.DEVNULL).strip()
+        except (OSError, subprocess.SubprocessError):
+            return "Claude Code"
+
+    def update_claude(self, manual=False):
+        """`claude update` on this server; the next started session uses the new version."""
+        if getattr(self, "updating", False):
+            if manual:
+                self.send({"type": "claude_update", "ok": False, "running": True, "output": "Обновление уже идёт."})
+            return
+        self.updating = True
+        try:
+            before = self.claude_version()
+            if manual:
+                self.send({"type": "claude_update", "running": True, "version": before})
+            env = dict(os.environ); env.pop("CLAUDECODE", None)
+            try:
+                result = subprocess.run([self.binary, "update"], cwd=str(Path.home()), env=env, stdin=subprocess.DEVNULL,
+                                        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
+                ok, output = result.returncode == 0, (result.stdout + result.stderr).strip()
+            except (OSError, subprocess.SubprocessError) as error:
+                ok, output = False, str(error)
+            self.binary = claude_binary()
+            after = self.claude_version()
+            self.catalog = None  # New models and commands come with a new version.
+            event = {"type": "claude_update", "ok": ok, "running": False, "before": before, "version": after,
+                     "changed": before != after, "output": output[-3000:]}
+            if manual or before != after:
+                self.send(event)
+            if before != after:
+                self.probe_catalog()
+        finally:
+            self.updating = False
+
     def run_state(self, run):
         self.send({"type": "run_state", "sid": run.sid, "busy": bool(run.busy), "queued": max(0, run.turns - 1)})
 
@@ -921,10 +957,7 @@ class Bridge:
         self.send({"type": "sessions", "sessions": sessions, "folders": folders})
 
     def hello(self):
-        try:
-            version = subprocess.check_output([self.binary, "--version"], text=True, timeout=15).strip()
-        except (OSError, subprocess.SubprocessError):
-            version = "Claude Code"
+        version = self.claude_version()
         self.send({"type": "hello", "home": str(Path.home()), "hostname": os.uname().nodename,
                    "version": version, "protocol": 4, "host": bool(globals().get("RELAY_HOSTED"))})
         if self.catalog:
@@ -1094,6 +1127,8 @@ class Bridge:
                         run.control("set_permission_mode", mode=value); run.mode = value
                 else:
                     raise ValueError("Неизвестная команда.")
+            elif op == "claude_update":
+                self.update_claude(manual=True)
             elif op == "catalog":
                 if self.catalog:
                     self.send(self.catalog)
@@ -1201,7 +1236,8 @@ def store_files(sid, files, root=None):
 
 CLIENT = threading.local()
 # Replies go to the app that asked; what happens in a session goes to every app.
-BROADCAST = {"claude", "permission", "permission_cancelled", "run_closed", "run_state", "sessions", "session_deleted", "catalog"}
+BROADCAST = {"claude", "permission", "permission_cancelled", "run_closed", "run_state", "sessions", "session_deleted", "catalog", "claude_update"}
+UPDATE_EVERY = 6 * 3600
 OWNED = {"desktop_request", "desktop_cancel", "cluster_request", "cluster_cancelled"}
 HOST_IDLE = 30 * 60
 
@@ -1344,6 +1380,7 @@ class Host:
             os.umask(old)
         listener.listen(16)
         listener.settimeout(30)
+        next_update = time.time() + 60
         try:
             while True:
                 try:
@@ -1351,6 +1388,10 @@ class Host:
                 except socket.timeout:
                     if self.idle():
                         break
+                    # Claude Code updates itself only between answers, never under a running session.
+                    if time.time() >= next_update and not self.bridge.running():
+                        next_update = time.time() + UPDATE_EVERY
+                        threading.Thread(target=self.bridge.update_claude, daemon=True).start()
                     continue
                 conn.settimeout(None)
                 threading.Thread(target=self.serve_client, args=(conn,), daemon=True).start()

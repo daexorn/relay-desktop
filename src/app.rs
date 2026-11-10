@@ -43,6 +43,8 @@ struct Remote {
     running: std::collections::HashSet<String>,
     models: Vec<crate::model::ModelInfo>,
     commands: Vec<crate::model::CommandInfo>,
+    /// `claude update` is running on the server.
+    updating: bool,
 }
 struct Chat {
     sid: String,
@@ -986,6 +988,23 @@ impl RelayApp {
                 r.models = serde_json::from_value(value["models"].clone()).unwrap_or_default();
                 r.commands = serde_json::from_value(value["commands"].clone()).unwrap_or_default();
             }
+            "claude_update" => {
+                let r = self.remote.entry(server.clone()).or_default();
+                r.updating = value["running"] == true;
+                if let Some(v) = value["version"].as_str() {
+                    r.version = v.into();
+                }
+                if !r.updating {
+                    self.notice = if value["changed"] == true {
+                        format!("Claude Code на сервере обновлён: {} → {}", value["before"].as_str().unwrap_or(""), r.version)
+                    } else if value["ok"] == true {
+                        format!("Claude Code уже последней версии: {}", r.version)
+                    } else {
+                        let output = value["output"].as_str().unwrap_or("");
+                        format!("Не удалось обновить Claude Code: {}", &output[output.len().saturating_sub(400)..])
+                    };
+                }
+            }
             "run_state" => {
                 let sid = value["sid"].as_str().unwrap_or("").to_owned();
                 let busy = value["busy"] == true;
@@ -1625,6 +1644,20 @@ impl RelayApp {
                                     if let Some(remote) = self.remote.get(&server.id) {
                                         ui.add_space(6.);
                                         limits::show(ui, &remote.usage, p, connected);
+                                        if remote.protocol >= 4 {
+                                            ui.add_space(4.);
+                                            let text = if remote.updating {
+                                                format!("{} · обновляется…", remote.version)
+                                            } else {
+                                                format!("{} · обновить", remote.version)
+                                            };
+                                            let response = ui
+                                                .add(egui::Label::new(RichText::new(text).size(11.).color(p.muted)).truncate().sense(egui::Sense::click()))
+                                                .on_hover_text("Claude Code на сервере обновляется сам раз в 6 часов, когда ничего не делает. Нажми, чтобы обновить сейчас.");
+                                            if response.clicked() && !remote.updating {
+                                                self.controller.send(&server.id, json!({"op":"claude_update"}));
+                                            }
+                                        }
                                     }
                                 }
                                 if !connected && !connecting {
@@ -3835,6 +3868,7 @@ impl RelayApp {
                     {"value":"claude-fable-5-2","displayName":"Fable 5.2","description":"For your toughest challenges"},
                     {"value":"haiku","displayName":"Haiku 5.5","description":"Fastest for quick answers"}
                 ])).unwrap_or_default(),
+                updating: false,
                 commands: serde_json::from_value(json!([
                     {"name":"compact","description":"Сжать историю разговора","hint":"[что сохранить]"},
                     {"name":"context","description":"Показать, чем занят контекст","hint":""},

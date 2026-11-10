@@ -3,6 +3,10 @@ package dev.relay.mobile
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.runtime.key
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.core.MutableTransitionState
@@ -697,7 +701,7 @@ fun ChatScreen(vm: RelayViewModel) {
             items(items, key = { when (it) { is Item.Text -> "m${it.index}"; is Item.Actions -> "a${it.start}" } }) { item ->
                 Box(Modifier.animateItem()) {
                     when (item) {
-                        is Item.Text -> if (item.message.role == "user") UserBubble(item.message) else AssistantText(item.message, busy && item.index == chat.transcript.messages.lastIndex)
+                        is Item.Text -> if (item.message.role == "user") UserBubble(item.message) else AssistantText(item.message, busy && item.index == chat.transcript.messages.lastIndex) { path -> vm.download(path, chat.cwd) }
                         is Item.Actions -> ActionsGroup(item, busy && item.start + item.messages.size == chat.transcript.messages.size)
                     }
                 }
@@ -740,9 +744,9 @@ fun UserBubble(m: Message) {
 }
 
 @Composable
-fun AssistantText(m: Message, streaming: Boolean = false) {
+fun AssistantText(m: Message, streaming: Boolean = false, onFile: ((String) -> Unit)? = null) {
     val p = LocalPalette.current
-    Box(Modifier.fillMaxWidth().padding(vertical = 6.dp)) { MarkdownText(m.text, p, Modifier.fillMaxWidth(), streaming) }
+    Box(Modifier.fillMaxWidth().padding(vertical = 6.dp)) { MarkdownText(m.text, p, Modifier.fillMaxWidth(), streaming, onFile) }
 }
 
 @Composable
@@ -893,9 +897,45 @@ fun PermissionCard(permission: Permission, vm: RelayViewModel) {
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
+fun TransferCard(vm: RelayViewModel, t: Transfer) {
+    val p = LocalPalette.current
+    val progress by animateFloatAsState(if (t.size > 0) (t.received.toFloat() / t.size).coerceIn(0f, 1f) else 0f, tween(200), label = "progress")
+    Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp).padding(top = 6.dp).clip(RoundedCornerShape(12.dp)).background(p.side)
+        .border(1.dp, if (t.error.isNotEmpty()) p.red.copy(alpha = 0.5f) else p.line, RoundedCornerShape(12.dp)).padding(horizontal = 12.dp, vertical = 9.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            StatusMark(when { t.error.isNotEmpty() -> 2; t.done -> 1; else -> 0 })
+            Spacer(Modifier.width(9.dp))
+            Column(Modifier.weight(1f)) {
+                Label(t.name, 13.5.sp, p.text, FontWeight.Medium, maxLines = 1)
+                Label(when {
+                    t.error.isNotEmpty() -> t.error
+                    t.done -> "В «Загрузки/Relay» · ${megabytes(t.size)}"
+                    t.size > 0 -> "${megabytes(t.received)} из ${megabytes(t.size)}"
+                    else -> "Ищем файл на сервере…"
+                }, 12.sp, if (t.error.isNotEmpty()) p.red else p.muted, maxLines = 2)
+            }
+            if (t.done) {
+                GhostButton("Открыть", p.accent) { vm.openTransfer(t) }
+                IconButton(Icons.Default.Share, "Поделиться") { vm.shareTransfer(t) }
+            }
+            IconButton(Icons.Default.Close, if (t.done || t.error.isNotEmpty()) "Убрать" else "Отменить") { vm.dismiss(t) }
+        }
+        if (!t.done && t.error.isEmpty() && t.size > 0) {
+            Box(Modifier.padding(top = 6.dp).fillMaxWidth().height(3.dp).clip(RoundedCornerShape(2.dp)).background(p.line)) {
+                Box(Modifier.fillMaxWidth(progress).fillMaxHeight().background(p.accent))
+            }
+        }
+    }
+}
+
+fun megabytes(bytes: Long) = if (bytes < 1024 * 1024) "${(bytes + 1023) / 1024} КБ" else "%.1f МБ".format(bytes / 1048576.0)
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
 fun Composer(vm: RelayViewModel, chat: Chat) {
     val p = LocalPalette.current
     val busy = chat.version >= 0 && chat.transcript.busy
+    for (t in vm.transfers.take(3)) key(t.id) { TransferCard(vm, t) }
     val online = vm.link == Link.Online
     val suggestions = slashMatches(chat.draft, vm.commands)
     if (chat.queued.isNotEmpty()) {
@@ -997,8 +1037,17 @@ fun SettingsScreen(vm: RelayViewModel) {
                 Label("Видно на доске задач и в общих названиях сессий", 12.sp, p.muted)
                 Spacer(Modifier.height(8.dp))
                 Field(name, { name = it; vm.chooseActor(it) }, "Например, champ")
+                if (vm.link == Link.Online) {
+                    Spacer(Modifier.height(24.dp))
+                    Label("Claude Code на сервере", 15.sp, p.text, FontWeight.Medium)
+                    Spacer(Modifier.height(4.dp))
+                    Label("${vm.claudeVersion.ifEmpty { "версия неизвестна" }} · обновляется сам раз в 6 часов, когда Claude ничего не делает", 12.sp, p.muted)
+                    Spacer(Modifier.height(8.dp))
+                    PrimaryButton(if (vm.updating) "Обновляем…" else "Обновить сейчас", enabled = !vm.updating) { vm.updateClaude() }
+                    if (vm.notice.isNotEmpty()) { Spacer(Modifier.height(8.dp)); Label(vm.notice, 12.sp, p.muted) }
+                }
                 Spacer(Modifier.height(24.dp))
-                Label("Relay для Android 0.2.0 · тот же сервер и тот же помощник, что у десктопа", 12.sp, p.muted)
+                Label("Relay для Android 0.2.1 · тот же сервер и тот же помощник, что у десктопа", 12.sp, p.muted)
             }
         }
     }

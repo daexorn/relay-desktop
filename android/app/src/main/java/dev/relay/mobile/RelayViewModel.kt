@@ -75,6 +75,11 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var commands by mutableStateOf<List<CommandInfo>>(emptyList())
         private set
+    var claudeVersion by mutableStateOf("")
+        private set
+    var updating by mutableStateOf(false)
+        private set
+    val transfers = mutableStateListOf<Transfer>()
     var collapsed by mutableStateOf(store.collapsed)
         private set
     var trust by mutableStateOf<TrustRequest?>(null)
@@ -207,6 +212,7 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                 link = Link.Online
                 home = value.optString("home", "~")
                 protocol = value.optInt("protocol", 0)
+                claudeVersion = value.optString("version")
                 val c = current
                 if (c != null && c.fingerprint == null && bridge?.fingerprint != null) {
                     val trusted = c.copy(fingerprint = bridge?.fingerprint, cwd = if (c.cwd == "~") home else c.cwd)
@@ -313,6 +319,35 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                     selected = null
                     screen = Screen.Sessions
                 }
+            }
+            "claude_update" -> {
+                updating = value.optBoolean("running")
+                if (value.has("version")) claudeVersion = value.optString("version")
+                if (!updating) notice = when {
+                    value.optBoolean("changed") -> "Claude Code на сервере обновлён: ${value.optString("before")} → ${value.optString("version")}"
+                    value.optBoolean("ok") -> "Claude Code уже последней версии: ${value.optString("version")}"
+                    else -> "Не удалось обновить Claude Code: " + value.optString("output").takeLast(400)
+                }
+            }
+            "artifact_info" -> transfers.firstOrNull { it.id == value.optString("id") }?.let { t ->
+                val error = value.optString("error")
+                if (error.isNotEmpty()) Downloads.fail(t, error)
+                else runCatching {
+                    Downloads.begin(getApplication(), t, value.optString("name"), value.optLong("size"))
+                    send(JSONObject().put("op", "file_stream").put("id", t.id))
+                }.onFailure { Downloads.fail(t, it.message ?: "Не удалось начать загрузку.") }
+            }
+            "desktop_chunk" -> transfers.firstOrNull { it.id == value.optString("id") }?.let { t ->
+                runCatching { Downloads.chunk(t, value.optString("data")) }.onFailure {
+                    Downloads.fail(t, "Не хватает места на телефоне.")
+                    send(JSONObject().put("op", "file_cancel").put("id", t.id))
+                }
+            }
+            "desktop_end" -> transfers.firstOrNull { it.id == value.optString("id") }?.let { t ->
+                val error = value.optString("error")
+                if (error.isNotEmpty()) Downloads.fail(t, error)
+                else runCatching { Downloads.finish(getApplication(), t, value.optString("sha256")) }
+                    .onFailure { Downloads.fail(t, it.message ?: "Не удалось сохранить файл.") }
             }
             "fatal" -> notice = value.optString("message", "Не удалось запустить помощник.")
         }
@@ -425,6 +460,38 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                 saveServer(updated, null, false)
             }
         }
+    }
+
+    /** A file Claude mentioned: fetched over the same connection into Downloads/Relay. */
+    fun download(path: String, cwd: String) {
+        if (link != Link.Online) {
+            notice = "Подключись к серверу, чтобы скачать файл."
+            return
+        }
+        if (transfers.count { !it.done && it.error.isEmpty() } >= 4) {
+            notice = "Уже скачивается несколько файлов. Дождись их."
+            return
+        }
+        val t = Transfer(UUID.randomUUID().toString(), path)
+        transfers.add(0, t)
+        send(JSONObject().put("op", "file_info").put("id", t.id).put("path", path).put("cwd", cwd))
+    }
+
+    fun dismiss(t: Transfer) {
+        if (!t.done && t.error.isEmpty()) send(JSONObject().put("op", "file_cancel").put("id", t.id))
+        Downloads.fail(t, "")
+        transfers.remove(t)
+    }
+
+    fun openTransfer(t: Transfer) {
+        Downloads.open(getApplication(), t)?.let { notice = it }
+    }
+
+    fun shareTransfer(t: Transfer) = runCatching { Downloads.share(getApplication(), t) }
+
+    fun updateClaude() {
+        updating = true
+        send(JSONObject().put("op", "claude_update"))
     }
 
     fun stop() {
