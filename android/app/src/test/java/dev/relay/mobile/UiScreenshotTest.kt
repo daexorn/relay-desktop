@@ -161,4 +161,13 @@ class UiScreenshotTest {
         rule.mainClock.advanceTimeBy(400)
         shot("10-attachments")
     }
+
+    @Test fun demo() {
+        val vm = RelayViewModel(ApplicationProvider.getApplicationContext())
+        vm.startDemo()
+        vm.open(vm.sessions.first { it.id == Demo.SID })
+        ShadowLooper.idleMainLooper()
+        rule.setContent { RelayApp(vm) }
+        shot("11-demo")
+    }
 }

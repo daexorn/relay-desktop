@@ -129,3 +129,14 @@ object Downloads {
 
     fun serverPath(link: String) = Uri.decode(link.trim().removePrefix("file://"))
 }
+
+/** Server files named in an answer: link targets and absolute paths with an extension, in order, at most four. */
+fun mentionedFiles(text: String): List<String> {
+    val found = LinkedHashSet<String>()
+    Regex("\\]\\(([^)\\s]+)\\)").findAll(text).forEach { m ->
+        val link = m.groupValues[1]
+        if (Downloads.isServerFile(link) && (link.startsWith("/") || link.startsWith("~/") || link.startsWith("file://"))) found.add(Downloads.serverPath(link))
+    }
+    Regex("(?<![\\w/.:])(/(?:[\\w.+\\-]+/)+[\\w.+\\-]+\\.[A-Za-z0-9]{1,8})(?![\\w/])").findAll(text).forEach { found.add(it.groupValues[1]) }
+    return found.filterNot { it.endsWith(".kt") && !it.contains("/build/") || it.contains("/src/") }.take(4)
+}

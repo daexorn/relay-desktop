@@ -206,9 +206,57 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
     /** Tests read what would go to the server. */
     internal var sentForTest: ((JSONObject) -> Unit)? = null
 
+    /** The demo server: everything is local, nothing leaves the phone. */
+    var demo by mutableStateOf(false)
+        private set
+
+    fun startDemo() {
+        disconnect()
+        demo = true
+        current = ServerProfile(id = "demo", name = "Демо", host = "без сервера", cwd = "/opt/sbrp-client")
+        chats.clear()
+        selected = null
+        sessions = emptyList()
+        link = Link.Online
+        screen = Screen.Sessions
+        Demo.events().forEach { if (it.optString("type") != "history") handle(it) }
+    }
+
+    fun leaveDemo() {
+        demo = false
+        link = Link.Off
+        current = null
+        sessions = emptyList()
+        chats.clear()
+        screen = Screen.Servers
+    }
+
     private fun send(value: JSONObject) {
         sentForTest?.invoke(value)
+        if (demo) {
+            demoAnswer(value)
+            return
+        }
         bridge?.send(value)
+    }
+
+    private fun demoAnswer(value: JSONObject) {
+        val sid = value.optString("sid")
+        when (value.optString("op")) {
+            "history" -> main.post {
+                val history = Demo.events().firstOrNull { it.optString("type") == "history" && it.optString("sid") == sid }
+                handle(history ?: JSONObject().put("type", "history").put("sid", sid).put("messages", JSONArray()))
+            }
+            "prompt" -> main.postDelayed({
+                handle(JSONObject().put("type", "claude").put("sid", sid).put("data", JSONObject().put("type", "assistant")
+                    .put("message", JSONObject().put("content", JSONArray().put(JSONObject().put("type", "text").put("text", Demo.reply(value.optString("text"))))))))
+                handle(JSONObject().put("type", "claude").put("sid", sid).put("data", JSONObject().put("type", "result").put("result", "")))
+            }, 700)
+            "file_info" -> main.post {
+                transfers.firstOrNull { it.id == value.optString("id") }?.let { Downloads.fail(it, "В демо-режиме файлы не скачиваются — подключи свой сервер.") }
+            }
+            "stop" -> main.post { handle(JSONObject().put("type", "run_closed").put("sid", sid)) }
+        }
     }
 
     internal fun handle(value: JSONObject) {
@@ -519,6 +567,7 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
 
     /** A file Claude mentioned: fetched over the same connection into Downloads/Relay. */
     fun download(path: String, cwd: String) {
+        if (transfers.any { it.path == path && it.error.isEmpty() && !it.done }) return
         if (link != Link.Online) {
             notice = "Подключись к серверу, чтобы скачать файл."
             return

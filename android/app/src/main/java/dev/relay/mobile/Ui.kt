@@ -255,6 +255,11 @@ fun ServersScreen(vm: RelayViewModel) {
                     Label("Подключи сервер и продолжай с того места, где остановился.", 14.sp, p.muted)
                 }
             }
+            item {
+                Box(Modifier.fillMaxWidth().padding(top = 8.dp), contentAlignment = Alignment.Center) {
+                    GhostButton("Посмотреть без сервера — демо", p.accent) { vm.startDemo() }
+                }
+            }
             items(vm.servers, key = { it.id }) { s ->
                 val online = vm.current?.id == s.id && vm.link == Link.Online
                 Row(
@@ -448,14 +453,14 @@ fun SessionsScreen(vm: RelayViewModel) {
     var renaming by remember { mutableStateOf<Session?>(null) }
     var moving by remember { mutableStateOf<Session?>(null) }
     var naming by remember { mutableStateOf<Pair<Folder?, Session?>?>(null) }
-    BackHandler { vm.screen = Screen.Servers }
+    BackHandler { if (vm.demo) vm.leaveDemo() else vm.screen = Screen.Servers }
     Column(Modifier.fillMaxSize().background(p.side)) {
         val status = when (vm.link) {
             Link.Online -> "на связи"
             Link.Connecting -> "подключаемся…"
             Link.Off -> "нет связи"
         }
-        TopBar(server?.name?.ifEmpty { server.host } ?: "Сессии", status, onBack = { vm.screen = Screen.Servers }) {
+        TopBar(server?.name?.ifEmpty { server.host } ?: "Сессии", status, onBack = { if (vm.demo) vm.leaveDemo() else vm.screen = Screen.Servers }) {
             IconButton(Icons.Default.Search, "Поиск") { searching = !searching; if (!searching) query = "" }
             IconButton(Icons.Default.Refresh, "Обновить") { vm.refresh() }
             IconButton(Icons.Default.Settings, "Настройки") { vm.screen = Screen.Settings }
@@ -748,7 +753,25 @@ fun UserBubble(m: Message) {
 @Composable
 fun AssistantText(m: Message, streaming: Boolean = false, onFile: ((String) -> Unit)? = null) {
     val p = LocalPalette.current
-    Box(Modifier.fillMaxWidth().padding(vertical = 6.dp)) { MarkdownText(m.text, p, Modifier.fillMaxWidth(), streaming, onFile) }
+    Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+        MarkdownText(m.text, p, Modifier.fillMaxWidth(), streaming, onFile)
+        // Files Claude mentioned (a built mod, a log): one tap to download them to the phone.
+        val files = remember(m.text, streaming) { if (streaming) emptyList() else mentionedFiles(m.text) }
+        if (onFile != null && files.isNotEmpty()) {
+            Column(Modifier.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                for (path in files) {
+                    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(p.side).border(1.dp, p.line, RoundedCornerShape(10.dp))
+                        .clickable { onFile(path) }.padding(horizontal = 12.dp, vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Label(path.substringAfterLast('/'), 13.5.sp, p.text, FontWeight.Medium, maxLines = 1)
+                            Label(path.substringBeforeLast('/', ""), 11.sp, p.muted, maxLines = 1)
+                        }
+                        Label("Скачать", 13.sp, p.accent, FontWeight.Medium)
+                    }
+                }
+            }
+        }
+    }
 }
 
 @Composable
@@ -1069,7 +1092,7 @@ fun SettingsScreen(vm: RelayViewModel) {
                     if (vm.notice.isNotEmpty()) { Spacer(Modifier.height(8.dp)); Label(vm.notice, 12.sp, p.muted) }
                 }
                 Spacer(Modifier.height(24.dp))
-                Label("Relay для Android 0.2.7 · тот же сервер и тот же помощник, что у десктопа", 12.sp, p.muted)
+                Label("Relay для Android 0.2.8 · тот же сервер и тот же помощник, что у десктопа", 12.sp, p.muted)
             }
         }
     }
