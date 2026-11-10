@@ -101,6 +101,8 @@ class UiScreenshotTest {
 
                 §§\bar{D} = B \cdot \left(1 + p \cdot (k - 1)\right) - A§§
 
+                Волна в строке: §y(x,t) = \sum_{i=1}^{n} A_i \sin(k_i x - \omega_i t + \varphi_i) + \frac{1}{2}\rho g \sum_j h_j^2§ — и дальше текст.
+
                 где §p§ — шанс крита, §k§ — множитель, а §\text{броня} = A§. За §n§ ударов:
                 \begin{equation}
                 \sum_{i=1}^{n} D_i \approx n \bar{D}

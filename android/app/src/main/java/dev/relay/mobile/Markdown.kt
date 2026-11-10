@@ -81,10 +81,9 @@ object Formulas {
 class MathSpan(private val math: JLatexMathDrawable, private val block: Boolean, private val room: () -> Int) : ReplacementSpan() {
     private val pad = if (block) (math.intrinsicHeight * 0.12f).roundToInt().coerceIn(4, 24) else 0
 
-    private fun scale(): Float {
-        val w = room()
-        return if (w > 0 && math.intrinsicWidth > w) w.toFloat() / math.intrinsicWidth else 1f
-    }
+    // Formulas are never shrunk: one that does not fit the line is taken out of the text and
+    // shown as its own block that scrolls sideways (see MarkdownText).
+    private fun scale(): Float = 1f
 
     override fun getSize(paint: Paint, text: CharSequence?, start: Int, end: Int, fm: Paint.FontMetricsInt?): Int {
         val s = scale()
@@ -184,7 +183,15 @@ fun markwon(context: Context, p: Palette, room: () -> Int = { 0 }, onFile: ((Str
 @Composable
 fun MarkdownText(text: String, p: Palette, modifier: Modifier = Modifier, streaming: Boolean = false, onFile: ((String) -> Unit)? = null) {
     val prepared = remember(text, streaming) { MathText.prepare(text, streaming) }
-    val parts = remember(prepared) { MathText.split(prepared) }
+    val context = LocalContext.current
+    val metrics = context.resources.displayMetrics
+    // Room for a formula inside a line: the screen minus the chat's side padding.
+    val room = metrics.widthPixels - (44 * metrics.density).roundToInt()
+    val inlinePx = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, TEXT_SP, metrics)
+    val parts = remember(prepared, room, p) {
+        Formulas.init(context)
+        MathText.split(prepared) { tex -> (Formulas.drawable(tex, inlinePx, p.text.toArgb())?.intrinsicWidth ?: 0) > room }
+    }
     // Display formulas are drawn on their own at full size and scroll sideways when wide,
     // instead of being squeezed into the text width.
     androidx.compose.foundation.layout.Column(modifier) {

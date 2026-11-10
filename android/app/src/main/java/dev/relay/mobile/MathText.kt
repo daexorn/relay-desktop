@@ -163,7 +163,7 @@ object MathText {
     data class Part(val text: String, val math: Boolean)
 
     /** Prepared text cut into Markdown and the display formulas between, which `prepare` writes as `\n$$\n…\n$$\n`. */
-    fun split(prepared: String): List<Part> {
+    fun split(prepared: String, wide: (String) -> Boolean = { false }): List<Part> {
         val out = mutableListOf<Part>()
         val block = Regex("\n\\$\\$\n(.+?)\n\\$\\$\n", RegexOption.DOT_MATCHES_ALL)
         var at = 0
@@ -176,6 +176,24 @@ object MathText {
             at = m.range.last + 1
         }
         if (at < prepared.length) out.add(Part(prepared.substring(at), false))
-        return out
+        return out.flatMap { if (it.math) listOf(it) else promote(it.text, wide) }
+    }
+
+    /** A formula inside a line that is wider than the screen becomes a block of its own. */
+    private fun promote(text: String, wide: (String) -> Boolean): List<Part> {
+        val out = mutableListOf<Part>()
+        val inline = Regex("\\$\\$(.+?)\\$\\$")
+        val fences = Regex("(?m)^```").findAll(text).map { it.range.first }.toList()
+        var at = 0
+        for (m in inline.findAll(text)) {
+            if (fences.count { it < m.range.first } % 2 == 1) continue
+            val tex = m.groupValues[1].trim()
+            if (tex.isEmpty() || !wide(tex)) continue
+            if (m.range.first > at) out.add(Part(text.substring(at, m.range.first), false))
+            out.add(Part(tex, true))
+            at = m.range.last + 1
+        }
+        if (at < text.length) out.add(Part(text.substring(at), false))
+        return out.ifEmpty { listOf(Part(text, false)) }
     }
 }

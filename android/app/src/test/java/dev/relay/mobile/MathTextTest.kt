@@ -61,4 +61,11 @@ class MathTextTest {
         assertEquals("\\vec P = \\sum_i A_i", parts[1].text)
         assertTrue(parts[2].text.contains("```"))
     }
+
+    @Test fun wideInlineFormulaBecomesItsOwnBlock() {
+        val parts = MathText.split(p("Сумма \$\\sum_{i=1}^{n} A_i \\sin(k_i x - \\omega_i t + \\varphi_i)\$ по всем волнам, а \$x\$ — координата.")) { it.length > 20 }
+        assertEquals(listOf(false, true, false), parts.map { it.math })
+        assertTrue(parts[1].text.startsWith("\\sum"))
+        assertTrue(parts[2].text.contains("$\$x$$"))
+    }
 }
