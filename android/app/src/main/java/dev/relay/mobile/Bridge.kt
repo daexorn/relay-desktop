@@ -38,7 +38,8 @@ class Bridge(
         private set
 
     fun start() {
-        Thread({ run() }, "relay-ssh").apply { isDaemon = true }.start()
+        // A roomy stack: the key exchange math of Bouncy Castle recurses deeply on some phones.
+        Thread(null, { run() }, "relay-ssh", 16L shl 20).apply { isDaemon = true }.start()
     }
 
     fun send(value: JSONObject) {
@@ -68,6 +69,9 @@ class Bridge(
                 override fun showMessage(message: String?) {}
             }
             s.setConfig("PreferredAuthentications", "password,keyboard-interactive")
+            // OpenSSH 10 offers post-quantum hybrids first (mlkem768x25519, sntrup761x25519). Their
+            // JSch + Bouncy Castle path is the suspect for a StackOverflowError on a phone, so use the classic set.
+            s.setConfig("kex", KEX)
             s.serverAliveInterval = 20_000
             s.serverAliveCountMax = 3
             s.connect(15_000)
@@ -102,7 +106,7 @@ class Bridge(
                 e.message?.contains("UnknownHostKey") == true || e.message?.contains("reject HostKey") == true ->
                     "Ключ сервера не подтверждён."
                 e.message?.contains("timeout", ignoreCase = true) == true -> "Сервер не ответил. Проверь адрес и порт."
-                e !is Exception -> "Ошибка подключения: $e"
+                e !is Exception -> "Ошибка подключения: $e\n" + e.stackTrace.take(6).joinToString("\n") { "  ${it.className}.${it.methodName}:${it.lineNumber}" }
                 else -> e.message ?: e.toString()
             }
         } finally {
@@ -149,6 +153,9 @@ class Bridge(
     }
 
     companion object {
+        const val KEX = "curve25519-sha256,curve25519-sha256@libssh.org,ecdh-sha2-nistp256,ecdh-sha2-nistp384," +
+            "ecdh-sha2-nistp521,diffie-hellman-group-exchange-sha256,diffie-hellman-group16-sha512,diffie-hellman-group14-sha256"
+
         /** DESKTOP_SOURCE = "...", ... then relay_bridge.py, exactly as the desktop builds it. */
         fun helper(read: (String) -> String): ByteArray = buildString {
             append("DESKTOP_SOURCE = ").append(pythonString(read("desktop_mcp.py"))).append('\n')
