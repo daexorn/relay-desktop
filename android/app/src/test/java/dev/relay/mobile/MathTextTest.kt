@@ -39,4 +39,19 @@ class MathTextTest {
     }
 
     @Test fun brokenBracesStayText() = assertFalse(p("\\[ \\frac{1}{ \\]").contains("$$"))
+
+    @Test fun unfinishedFormulasWaitWhileStreaming() {
+        val s = { t: String -> MathText.prepare(t, streaming = true) }
+        assertEquals("Сумма:" + MathText.PENDING, s("Сумма:\n$$\n\\sum_i A_i"))
+        assertEquals("Пусть" + MathText.PENDING, s("Пусть \\(x_"))
+        assertEquals("Пусть" + MathText.PENDING, s("Пусть \$\\omega_i = \\sqrt{g"))
+        assertEquals("Цена \$5", s("Цена \$5"))
+        assertEquals("Пусть $\$x$$ и", s("Пусть \$x\$ и"))
+        assertTrue(s("\\begin{pmatrix} a").endsWith(MathText.PENDING))
+        // Without streaming the same text stays as it is.
+        assertEquals("Пусть \\(x_", p("Пусть \\(x_"))
+    }
+
+    @Test fun rowGapsAreDropped() =
+        assertEquals("\n$$\n\\begin{pmatrix} a \\\\ b \\end{pmatrix}\n$$\n", p("\\begin{pmatrix}\na \\\\[6pt]\nb\n\\end{pmatrix}"))
 }

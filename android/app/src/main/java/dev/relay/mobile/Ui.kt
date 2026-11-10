@@ -691,7 +691,7 @@ fun ChatScreen(vm: RelayViewModel) {
             items(items, key = { when (it) { is Item.Text -> "m${it.index}"; is Item.Actions -> "a${it.start}" } }) { item ->
                 Box(Modifier.animateItem()) {
                     when (item) {
-                        is Item.Text -> if (item.message.role == "user") UserBubble(item.message) else AssistantText(item.message)
+                        is Item.Text -> if (item.message.role == "user") UserBubble(item.message) else AssistantText(item.message, busy && item.index == chat.transcript.messages.lastIndex)
                         is Item.Actions -> ActionsGroup(item, busy && item.start + item.messages.size == chat.transcript.messages.size)
                     }
                 }
@@ -734,9 +734,9 @@ fun UserBubble(m: Message) {
 }
 
 @Composable
-fun AssistantText(m: Message) {
+fun AssistantText(m: Message, streaming: Boolean = false) {
     val p = LocalPalette.current
-    Box(Modifier.fillMaxWidth().padding(vertical = 6.dp)) { MarkdownText(m.text, p, Modifier.fillMaxWidth()) }
+    Box(Modifier.fillMaxWidth().padding(vertical = 6.dp)) { MarkdownText(m.text, p, Modifier.fillMaxWidth(), streaming) }
 }
 
 @Composable

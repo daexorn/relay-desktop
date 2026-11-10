@@ -12,7 +12,10 @@ object MathText {
         "vmatrix", "Vmatrix", "array", "alignat",
     )
 
-    fun prepare(text: String): String {
+    /** A formula is still being written: it is hidden and this mark shows in its place. */
+    const val PENDING = " ⋯"
+
+    fun prepare(text: String, streaming: Boolean = false): String {
         if (!text.contains('$') && !text.contains("\\(") && !text.contains("\\[") && !text.contains("\\begin{")) return text
         val out = StringBuilder(text.length + 32)
         var i = 0
@@ -53,11 +56,30 @@ object MathText {
                 lineStart = false
                 continue
             }
+            // Mid-answer, an opened formula without its end is not drawn half-written.
+            if (streaming && opensUnfinished(text, i, lineStart)) {
+                out.setLength(out.trimEnd().length)
+                out.append(PENDING)
+                break
+            }
             out.append(c)
             lineStart = c == '\n' || (lineStart && (c == ' ' || c == '\t'))
             i++
         }
         return out.toString()
+    }
+
+    private fun opensUnfinished(text: String, i: Int, lineStart: Boolean): Boolean = when {
+        text.startsWith("\\[", i) -> closing(text, i + 2, "\\]") == null
+        text.startsWith("\\(", i) -> closing(text, i + 2, "\\)") == null
+        text.startsWith("$$", i) -> closing(text, i + 2, "$$") == null
+        lineStart && text.startsWith("\\begin{", i) -> text.indexOf('}', i).let { e ->
+            e < 0 || (text.substring(i + 7, e) in ENVIRONMENTS && text.indexOf("\\end{" + text.substring(i + 7, e) + "}", e) < 0)
+        }
+        // `$x + y` on the last line, no closing `$` yet; prices like `$5` are text anyway.
+        text[i] == '$' -> (i == 0 || text[i - 1] != '\\') && text.indexOf('\n', i) < 0 &&
+            text.getOrNull(i + 1)?.let { !it.isWhitespace() && !it.isDigit() } != false && text.indexOf('$', i + 1) < 0
+        else -> false
     }
 
     private fun closing(text: String, from: Int, marker: String): Int? {
@@ -73,7 +95,9 @@ object MathText {
         return null
     }
 
+    /** One line; `\\[6pt]` row gaps, which JLatexMath prints as text, become plain `\\`. */
     private fun clean(content: String) = content.trim().replace(Regex("\\s*\\n\\s*"), " ")
+        .replace(Regex("\\\\\\\\\\s*\\[[^\\]]*\\]"), "\\\\\\\\")
 
     private fun block(content: String): String? {
         val tex = clean(content).takeIf { it.isNotEmpty() && balanced(it) } ?: return null
