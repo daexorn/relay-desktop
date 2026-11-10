@@ -988,6 +988,19 @@ impl RelayApp {
                 r.models = serde_json::from_value(value["models"].clone()).unwrap_or_default();
                 r.commands = serde_json::from_value(value["commands"].clone()).unwrap_or_default();
             }
+            "model_changed" | "mode_changed" | "notice" => {
+                let sid = value["sid"].as_str().unwrap_or("");
+                if let Some(c) = self.chats.get_mut(&key(&server, sid)) {
+                    match kind {
+                        "model_changed" => c.model = value["model"].as_str().unwrap_or("default").into(),
+                        "mode_changed" => c.mode = value["mode"].as_str().unwrap_or("manual").into(),
+                        _ => {}
+                    }
+                }
+                if kind == "notice" {
+                    self.notice = value["message"].as_str().unwrap_or("").into();
+                }
+            }
             "claude_update" => {
                 let r = self.remote.entry(server.clone()).or_default();
                 r.updating = value["running"] == true;

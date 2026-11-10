@@ -320,6 +320,9 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                     screen = Screen.Sessions
                 }
             }
+            "model_changed" -> chats[sid]?.let { it.model = value.optString("model", "default") }
+            "mode_changed" -> chats[sid]?.let { it.mode = value.optString("mode", "manual") }
+            "notice" -> notice = value.optString("message")
             "claude_update" -> {
                 updating = value.optBoolean("running")
                 if (value.has("version")) claudeVersion = value.optString("version")

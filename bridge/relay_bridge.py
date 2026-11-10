@@ -358,6 +358,7 @@ class Transcripts:
                         if 0 < len(data) <= image_budget:
                             image_budget -= len(data)
                             b["_relay_keep"] = True
+        command = None
         for row in chain:
             # Claude's own bookkeeping (image paths, interrupt markers) is not conversation.
             if row.get("isMeta"):
@@ -366,6 +367,22 @@ class Transcripts:
             if not isinstance(message,dict):continue
             role = message.get("role", row.get("type"))
             content = message.get("content", "")
+            # Slash commands (/model, /context…) become one action: the command and what it printed.
+            raw = plain(content).strip() if role == "user" else ""
+            if raw.startswith("<command-name>"):
+                name = re.search(r"<command-name>(.*?)</command-name>", raw, re.S)
+                args = re.search(r"<command-args>(.*?)</command-args>", raw, re.S)
+                line = ((name.group(1).strip() if name else "") + " " + (args.group(1).strip() if args else "")).strip()
+                if line:
+                    command = {"role": "tool", "tool": "SlashCommand", "input": {"command": line}, "tool_id": "cmd-" + str(row.get("uuid", ""))}
+                    result.append(command)
+                continue
+            if raw.startswith(("<local-command-stdout>", "<local-command-stderr>")):
+                output = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", re.sub(r"</?local-command-std(?:out|err)>", "", raw)).strip()
+                if command is not None:
+                    result.append({"role": "tool_result", "text": output[:24000], "failed": raw.startswith("<local-command-stderr>"), "tool_id": command["tool_id"]})
+                    command = None
+                continue
             text = visible_text(plain(content)) if role == "user" else plain(content)
             if role == "user" and INTERRUPTED.fullmatch(text.strip()):
                 continue
@@ -927,7 +944,10 @@ class Bridge:
                 ok, output = result.returncode == 0, (result.stdout + result.stderr).strip()
             except (OSError, subprocess.SubprocessError) as error:
                 ok, output = False, str(error)
-            self.binary = claude_binary()
+            try:
+                self.binary = claude_binary()  # An update can move the binary.
+            except ValueError:
+                pass
             after = self.claude_version()
             self.catalog = None  # New models and commands come with a new version.
             event = {"type": "claude_update", "ok": ok, "running": False, "before": before, "version": after,
@@ -938,6 +958,47 @@ class Bridge:
                 self.probe_catalog()
         finally:
             self.updating = False
+
+    def quick_command(self, sid, text):
+        """`/model x` and `/mode x` switch at once, whichever app sent them, and answer right away."""
+        match = re.fullmatch(r"\s*/(model|mode)(?:\s+(\S+))?\s*", text)
+        if not match:
+            return False
+        kind, value = match.groups()
+        run = self.runs.get(sid)
+        models = (self.catalog or {}).get("models") or []
+        if kind == "model":
+            if not value:
+                reply = "Модели на этом сервере: " + ", ".join(f"`{m['value']}` ({m.get('displayName') or m['value']})" for m in models) if models else "Напиши `/model <название>`, например `/model opus`."
+            else:
+                wanted = value.lower()
+                found = next((m for m in models if wanted in (m["value"].lower(), str(m.get("displayName", "")).lower())), None) or \
+                    next((m for m in models if m["value"].lower().startswith(wanted) or str(m.get("displayName", "")).lower().startswith(wanted)), None)
+                if models and not found:
+                    reply = f"Нет модели «{value}». Есть: " + ", ".join(m["value"] for m in models)
+                else:
+                    chosen = found["value"] if found else value
+                    if run and not run.closed:
+                        run.control("set_model", model=None if chosen == "default" else chosen); run.model = chosen
+                    self.send({"type": "model_changed", "sid": sid, "model": chosen})
+                    reply = "Модель: " + ((found or {}).get("displayName") or chosen) + (" — со следующего ответа." if run and run.busy else ".")
+        else:
+            modes = {"auto": "auto", "авто": "auto", "plan": "plan", "план": "plan", "edits": "acceptEdits", "acceptedits": "acceptEdits", "manual": "manual", "ручной": "manual"}
+            mode = modes.get((value or "").lower())
+            if not mode:
+                reply = "Режимы: `/mode auto`, `/mode manual`, `/mode edits`, `/mode plan`."
+            else:
+                if run and not run.closed:
+                    run.control("set_permission_mode", mode=mode); run.mode = mode
+                self.send({"type": "mode_changed", "sid": sid, "mode": mode})
+                reply = "Режим: " + {"auto": "авто", "plan": "план", "acceptEdits": "правки файлов", "manual": "с подтверждением"}[mode] + "."
+        # The app has marked the chat busy for this message: answer it like Claude would.
+        if not (run and run.busy):
+            self.send({"type": "claude", "sid": sid, "data": {"type": "assistant", "message": {"content": [{"type": "text", "text": reply}]}}})
+            self.send({"type": "claude", "sid": sid, "data": {"type": "result", "is_error": False, "result": reply}})
+        else:
+            self.send({"type": "notice", "sid": sid, "message": reply})
+        return True
 
     def run_state(self, run):
         self.send({"type": "run_state", "sid": run.sid, "busy": bool(run.busy), "queued": max(0, run.turns - 1)})
@@ -1035,6 +1096,8 @@ class Bridge:
                 files = req.get("files", [])
                 if not isinstance(text, str) or (not text.strip() and not images and not files) or len(text.encode("utf-8")) > 1024 * 1024:
                     raise ValueError("Сообщение пустое или слишком длинное.")
+                if not images and not files and self.quick_command(sid, text):
+                    return
                 validate_images(images)
                 if not isinstance(files, list) or any(not isinstance(f, dict) or f.get('type') not in ('file', 'uploaded_file') for f in files):
                     raise ValueError('Некорректное вложение.')

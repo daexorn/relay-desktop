@@ -102,6 +102,7 @@ fn action_title(message: &Message) -> String {
         "Write" => "Создание файла",
         "Edit" | "MultiEdit" => "Изменение файла",
         "Bash" => "Команда на сервере",
+        "SlashCommand" => "Команда Claude Code",
         "Glob" | "Grep" => "Поиск по проекту",
         "WebSearch" | "WebFetch" => "Поиск в интернете",
         "mcp__relay_desktop__download_file" => "Скачивание на этот ПК",
@@ -483,6 +484,7 @@ fn command_line(m: &Message) -> String {
             format!("«{}»{}", s("pattern"), if place.is_empty() { String::new() } else { format!(" в {place}") })
         }
         "Glob" => s("pattern"),
+        "SlashCommand" => s("command"),
         "WebSearch" => s("query"),
         "WebFetch" => s("url"),
         "Read" | "Write" | "Edit" | "MultiEdit" => s("file_path"),

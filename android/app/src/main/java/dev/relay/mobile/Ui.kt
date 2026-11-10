@@ -867,6 +867,7 @@ fun commandLine(call: Message): String {
         "Grep" -> "«${i.optString("pattern")}»" + i.optString("path").let { if (it.isEmpty()) "" else " в $it" }
         "Read", "Write", "Edit", "MultiEdit" -> i.optString("file_path")
         "Glob" -> i.optString("pattern")
+        "SlashCommand" -> i.optString("command")
         "WebSearch" -> i.optString("query")
         "WebFetch" -> i.optString("url")
         else -> if (call.tool.startsWith("mcp__relay_cluster__")) "" else toolSummary(call.tool, i)
@@ -1047,7 +1048,7 @@ fun SettingsScreen(vm: RelayViewModel) {
                     if (vm.notice.isNotEmpty()) { Spacer(Modifier.height(8.dp)); Label(vm.notice, 12.sp, p.muted) }
                 }
                 Spacer(Modifier.height(24.dp))
-                Label("Relay для Android 0.2.1 · тот же сервер и тот же помощник, что у десктопа", 12.sp, p.muted)
+                Label("Relay для Android 0.2.2 · тот же сервер и тот же помощник, что у десктопа", 12.sp, p.muted)
             }
         }
     }

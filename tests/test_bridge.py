@@ -58,6 +58,18 @@ class TranscriptTests(unittest.TestCase):
         ])
         self.assertEqual([m['text'] for m in self.store.history(self.sid)], ['Привет','Ответ'])
 
+    def test_slash_commands_show_as_actions_in_history(self):
+        self.write([
+            {'type':'user','uuid':'a','message':{'role':'user','content':'Привет'}},
+            {'type':'user','uuid':'b','parentUuid':'a','message':{'role':'user','content':'<local-command-caveat>The command below was run directly</local-command-caveat>'}},
+            {'type':'user','uuid':'c','parentUuid':'b','message':{'role':'user','content':'<command-name>/model</command-name>\n <command-message>model</command-message>\n <command-args>opus</command-args>'}},
+            {'type':'user','uuid':'d','parentUuid':'c','message':{'role':'user','content':'<local-command-stdout>Set model to `opus`</local-command-stdout>'}},
+        ])
+        rows=self.store.history(self.sid)
+        self.assertEqual([r['role'] for r in rows],['user','tool','tool_result'])
+        self.assertEqual(rows[1]['input']['command'],'/model opus');self.assertEqual(rows[1]['tool'],'SlashCommand')
+        self.assertEqual(rows[2]['text'],'Set model to `opus`');self.assertEqual(rows[2]['tool_id'],rows[1]['tool_id'])
+
     def test_cached_metadata_refreshes_after_append(self):
         self.write([{'type':'user','uuid':'a','cwd':'/opt/project','message':{'content':'Первая задача'}}])
         self.assertEqual(self.store.sessions()[0]['title'],'Первая задача')
@@ -312,6 +324,16 @@ class ProtocolTests(unittest.TestCase):
         self.assertTrue(self.wait('claude_update')['running'])
         event=self.wait('claude_update')
         self.assertEqual(calls[0][1:],['update']);self.assertTrue(event['ok']);self.assertTrue(event['changed']);self.assertEqual(event['version'],'2.2.0 (Claude Code)')
+
+    def test_model_command_switches_without_claude(self):
+        self.host.catalog={'type':'catalog','models':[{'value':'default','displayName':'Default'},{'value':'claude-fable-5-2','displayName':'Fable 5.2'}],'commands':[]}
+        self.host.dispatch({'op':'prompt','sid':self.sid,'cwd':str(self.root),'text':'/model fable','mode':'manual'})
+        self.assertEqual(self.wait('model_changed')['model'],'claude-fable-5-2')
+        self.assertIn('Fable 5.2',self.wait('claude')['data']['message']['content'][0]['text'])
+        self.assertEqual(self.wait('claude')['data']['type'],'result')
+        self.assertNotIn(self.sid,self.host.runs)  # No Claude process was started for it.
+        self.host.dispatch({'op':'prompt','sid':self.sid,'cwd':str(self.root),'text':'/model gpt','mode':'manual'})
+        self.assertIn('Нет модели',self.wait('claude')['data']['message']['content'][0]['text'])
 
     def test_catalog_comes_from_initialize(self):
         self.host.learn_catalog({'models':[{'value':'claude-fable-5-2','displayName':'Fable 5.2','description':'x','supportsEffort':True}],

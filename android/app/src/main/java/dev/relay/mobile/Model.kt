@@ -240,6 +240,7 @@ fun toolName(name: String) = when (name) {
     "Edit", "MultiEdit" -> "Изменение файла"
     "Write" -> "Создание файла"
     "Bash" -> "Команда на сервере"
+    "SlashCommand" -> "Команда Claude Code"
     "Glob", "Grep" -> "Поиск по проекту"
     "WebSearch", "WebFetch" -> "Поиск в интернете"
     "TodoWrite" -> "План работы"
