@@ -159,4 +159,23 @@ object MathText {
         }
         return depth == 0
     }
+
+    data class Part(val text: String, val math: Boolean)
+
+    /** Prepared text cut into Markdown and the display formulas between, which `prepare` writes as `\n$$\n…\n$$\n`. */
+    fun split(prepared: String): List<Part> {
+        val out = mutableListOf<Part>()
+        val block = Regex("\n\\$\\$\n(.+?)\n\\$\\$\n", RegexOption.DOT_MATCHES_ALL)
+        var at = 0
+        val fences = Regex("(?m)^```").findAll(prepared).map { it.range.first }.toList()
+        for (m in block.findAll(prepared)) {
+            // A formula inside a fenced code block stays code.
+            if (fences.count { it < m.range.first } % 2 == 1) continue
+            if (m.range.first > at) out.add(Part(prepared.substring(at, m.range.first), false))
+            out.add(Part(m.groupValues[1].trim(), true))
+            at = m.range.last + 1
+        }
+        if (at < prepared.length) out.add(Part(prepared.substring(at), false))
+        return out
+    }
 }

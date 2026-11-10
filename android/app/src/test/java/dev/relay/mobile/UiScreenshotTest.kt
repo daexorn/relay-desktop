@@ -106,6 +106,8 @@ class UiScreenshotTest {
                 \sum_{i=1}^{n} D_i \approx n \bar{D}
                 \end{equation}
 
+                §§\vec P(x,z,t) = \begin{pmatrix} x + \sum_i \frac{Q_i}{k_i} D_{i,x}\cos\theta_i \\ \sum_i A_i \sin\theta_i \\ z + \sum_i \frac{Q_i}{k_i} D_{i,z}\cos\theta_i \end{pmatrix}, \quad \theta_i = k_i (\vec D_i \cdot \vec x) - \omega_i t§§
+
                 | Оружие | §B§ | §p§ |
                 |---|---|---|
                 | Меч | 12 | 0.1 |

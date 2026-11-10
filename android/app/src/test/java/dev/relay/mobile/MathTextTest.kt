@@ -54,4 +54,11 @@ class MathTextTest {
 
     @Test fun rowGapsAreDropped() =
         assertEquals("\n$$\n\\begin{pmatrix} a \\\\ b \\end{pmatrix}\n$$\n", p("\\begin{pmatrix}\na \\\\[6pt]\nb\n\\end{pmatrix}"))
+
+    @Test fun displayFormulasAreCutOutOfTheText() {
+        val parts = MathText.split(p("Смещение:\n$$\n\\vec P = \\sum_i A_i\n$$\nгде A — амплитуда.\n```\n$$\nкод\n$$\n```"))
+        assertEquals(listOf(false, true, false), parts.map { it.math })
+        assertEquals("\\vec P = \\sum_i A_i", parts[1].text)
+        assertTrue(parts[2].text.contains("```"))
+    }
 }

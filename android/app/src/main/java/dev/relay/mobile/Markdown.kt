@@ -13,6 +13,13 @@ import android.util.TypedValue
 import android.widget.TextView
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
@@ -125,7 +132,7 @@ private class MathSpans(private val size: Float, private val color: Int, private
         val source = latex.trim()
         val start = visitor.length()
         visitor.builder().append(source.replace('\n', ' '))
-        val math = Formulas.drawable(source, if (block) size * 1.12f else size, color) ?: return
+        val math = Formulas.drawable(source, if (block) size * 1.3f else size, color) ?: return
         visitor.setSpans(start, MathSpan(math, block, room))
         if (block) visitor.setSpans(start, AlignmentSpan.Standard(Layout.Alignment.ALIGN_CENTER))
     }
@@ -176,13 +183,52 @@ fun markwon(context: Context, p: Palette, room: () -> Int = { 0 }, onFile: ((Str
  */
 @Composable
 fun MarkdownText(text: String, p: Palette, modifier: Modifier = Modifier, streaming: Boolean = false, onFile: ((String) -> Unit)? = null) {
+    val prepared = remember(text, streaming) { MathText.prepare(text, streaming) }
+    val parts = remember(prepared) { MathText.split(prepared) }
+    // Display formulas are drawn on their own at full size and scroll sideways when wide,
+    // instead of being squeezed into the text width.
+    androidx.compose.foundation.layout.Column(modifier) {
+        for ((i, part) in parts.withIndex()) {
+            if (part.math) FormulaBlock(part.text, p)
+            else if (part.text.isNotBlank()) MarkdownSegment(part.text.trim('\n'), p, androidx.compose.ui.Modifier.fillMaxWidth(), onFile, i)
+        }
+    }
+}
+
+@Composable
+private fun FormulaBlock(latex: String, p: Palette) {
+    val context = LocalContext.current
+    val px = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, TEXT_SP * 1.3f, context.resources.displayMetrics)
+    val math = remember(latex, p) { Formulas.init(context); Formulas.drawable(latex, px, p.text.toArgb()) }
+    if (math == null) {
+        androidx.compose.material3.Text(latex, color = p.muted, fontSize = androidx.compose.ui.unit.TextUnit(13f, androidx.compose.ui.unit.TextUnitType.Sp), fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+        return
+    }
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val w = with(density) { math.intrinsicWidth.toDp() }
+    val h = with(density) { math.intrinsicHeight.toDp() }
+    androidx.compose.foundation.layout.BoxWithConstraints(androidx.compose.ui.Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+        val wide = w > maxWidth
+        androidx.compose.foundation.layout.Box(
+            androidx.compose.ui.Modifier.fillMaxWidth().then(if (wide) androidx.compose.ui.Modifier.horizontalScroll(androidx.compose.foundation.rememberScrollState()) else androidx.compose.ui.Modifier),
+            contentAlignment = if (wide) androidx.compose.ui.Alignment.CenterStart else androidx.compose.ui.Alignment.Center,
+        ) {
+            androidx.compose.foundation.Canvas(androidx.compose.ui.Modifier.size(w, h)) {
+                drawIntoCanvas { math.draw(it.nativeCanvas) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MarkdownSegment(text: String, p: Palette, modifier: Modifier, onFile: ((String) -> Unit)?, key: Int) {
     val context = LocalContext.current
     val holder = remember { arrayOfNulls<TextView>(1) }
     val engine = remember(p) {
         val fallback = context.resources.displayMetrics.widthPixels - (40 * context.resources.displayMetrics.density).roundToInt()
         markwon(context, p, { holder[0]?.let { it.width - it.paddingLeft - it.paddingRight }?.takeIf { it > 0 } ?: fallback }, onFile)
     }
-    val prepared = remember(text, streaming) { MathText.prepare(text, streaming) }
+    var relayout: ((TextView) -> Unit)? = null
     AndroidView(
         modifier = modifier,
         factory = { ctx ->
@@ -192,15 +238,20 @@ fun MarkdownText(text: String, p: Palette, modifier: Modifier = Modifier, stream
                 movementMethod = LinkMovementMethod.getInstance()
                 setTextIsSelectable(true)
                 holder[0] = this
+                // Tables and wide formulas measure themselves by the view width: lay out again once it is known.
+                addOnLayoutChangeListener { v, l, _, r, _, ol, _, or_, _ ->
+                    if (r - l != or_ - ol && r - l > 0) (v as TextView).post { v.tag = null; v.requestLayout(); v.invalidate(); relayout?.invoke(v) }
+                }
             }
         },
         update = { view ->
             holder[0] = view
             view.setTextColor(p.text.toArgb())
             view.highlightColor = p.accent.copy(alpha = 0.3f).toArgb()
-            if (view.tag != prepared to p) {
-                engine.setMarkdown(view, prepared)
-                view.tag = prepared to p
+            relayout = { v -> engine.setMarkdown(v, text); v.tag = text to p }
+            if (view.tag != text to p) {
+                engine.setMarkdown(view, text)
+                view.tag = text to p
             }
         },
     )
