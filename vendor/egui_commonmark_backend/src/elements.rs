@@ -131,36 +131,44 @@ pub fn code_block<'t>(
         ),
     );
 
-    // Copy icon
-    let spacing = &ui.style().spacing;
-    let position = egui::pos2(
-        frame_rect.right_top().x - spacing.icon_width * 0.5 - spacing.button_padding.x,
-        frame_rect.right_top().y + spacing.button_padding.y * 2.0,
+    // Copy icon: painted, not an emoji glyph, so it sits inside the block's top-right corner
+    // and lines up the same in every theme and for one-line blocks.
+    let side = 20.0_f32.min(frame_rect.height() - 2.0).max(14.0);
+    let icon_rect = egui::Rect::from_min_size(
+        egui::pos2(frame_rect.right() - side - 4.0, frame_rect.top() + ((frame_rect.height().min(28.0) - side) * 0.5).max(1.0)),
+        egui::vec2(side, side),
     );
 
-    // Check if we should show ✔ instead of 🗐 if the text was copied and the mouse is hovered
+    // Check if we should show a tick instead of the copy icon if the text was copied and the mouse is hovered
     let persistent_id = ui.make_persistent_id(output.response.id);
     let copied_icon = ui.memory_mut(|m| *m.data.get_temp_mut_or_default::<bool>(persistent_id));
 
     let copy_button = ui
-        .put(
-            egui::Rect {
-                min: position,
-                max: position,
-            },
-            egui::Button::new(if copied_icon { "✔" } else { "🗐" })
-                .small()
-                .frame(false)
-                .fill(egui::Color32::TRANSPARENT),
-        )
-        // workaround for a regression after egui 0.27 where the edit cursor was shown even when
-        // hovering over the button. We try interact_cursor first to allow the cursor to be
-        // overriden
-        .on_hover_cursor(
-            ui.visuals()
-                .interact_cursor
-                .unwrap_or(egui::CursorIcon::Default),
-        );
+        .interact(icon_rect, persistent_id.with("copy"), egui::Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Копировать");
+    {
+        let painter = ui.painter();
+        let visuals = ui.visuals();
+        let ink = if copy_button.hovered() { visuals.strong_text_color() } else { visuals.weak_text_color() };
+        // A pad under the icon keeps long lines from showing through it.
+        painter.rect_filled(icon_rect.expand(2.0), 5.0, if copy_button.hovered() { visuals.widgets.hovered.weak_bg_fill } else { visuals.extreme_bg_color });
+        let stroke = egui::Stroke::new(1.3_f32, ink);
+        let c = icon_rect.center();
+        let z = side / 20.0;
+        if copied_icon {
+            painter.add(egui::Shape::line(
+                vec![c + egui::vec2(-4.5 * z, 0.0), c + egui::vec2(-1.2 * z, 3.4 * z), c + egui::vec2(4.8 * z, -3.6 * z)],
+                egui::Stroke::new(1.6_f32, ink),
+            ));
+        } else {
+            let back = egui::Rect::from_min_size(c + egui::vec2(-5.5 * z, -5.5 * z), egui::vec2(8.0 * z, 8.0 * z));
+            let front = back.translate(egui::vec2(3.0 * z, 3.0 * z));
+            painter.rect_stroke(back, 2.0, stroke, egui::StrokeKind::Middle);
+            painter.rect_filled(front, 2.0, if copy_button.hovered() { visuals.widgets.hovered.weak_bg_fill } else { visuals.extreme_bg_color });
+            painter.rect_stroke(front, 2.0, stroke, egui::StrokeKind::Middle);
+        }
+    }
 
     // Update icon state in persistent memory
     if copied_icon && !copy_button.hovered() {
@@ -185,6 +193,8 @@ pub fn code_block<'t>(
         };
         ui.ctx().copy_text(copy_text);
     }
+    // Blocks one after another do not touch.
+    ui.add_space(4.0);
 }
 
 // Stripped down version of egui's Checkbox. The only difference is that this
