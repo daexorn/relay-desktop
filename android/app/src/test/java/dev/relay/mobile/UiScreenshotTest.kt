@@ -151,5 +151,10 @@ class UiScreenshotTest {
         c.draft = "/co"
         rule.setContent { RelayApp(vm) }
         shot("09-slash-queue")
+        c.draft = "Почему упал сервер?"
+        c.picked.add(Picked("latest.log", "text/plain", ByteArray(48_000), null))
+        c.picked.add(Picked("sbrp-client-0.7.300.jar", "application/java-archive", ByteArray(2_400_000), null))
+        rule.mainClock.advanceTimeBy(400)
+        shot("10-attachments")
     }
 }

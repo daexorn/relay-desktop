@@ -35,7 +35,13 @@ class Transfer(val id: String, val path: String) {
 object Downloads {
     fun mime(name: String): String {
         val ext = name.substringAfterLast('.', "").lowercase()
-        if (ext == "apk") return "application/vnd.android.package-archive"
+        when (ext) {
+            "apk" -> return "application/vnd.android.package-archive"
+            "png" -> return "image/png"
+            "jpg", "jpeg" -> return "image/jpeg"
+            "webp" -> return "image/webp"
+            "gif" -> return "image/gif"
+        }
         return MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "application/octet-stream"
     }
 

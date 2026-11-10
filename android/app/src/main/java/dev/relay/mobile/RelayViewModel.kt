@@ -3,6 +3,7 @@ package dev.relay.mobile
 import android.app.Application
 import android.os.Handler
 import android.os.Looper
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
@@ -33,6 +34,7 @@ class Chat(val sid: String, cwd: String, title: String, model: String, mode: Str
     val permissions = mutableStateListOf<Permission>()
     /** Sent while Claude was answering: Claude Code answers them in order, one after another. */
     val queued = mutableStateListOf<String>()
+    val picked = mutableStateListOf<Picked>()
     fun changed() {
         version++
     }
@@ -201,7 +203,11 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         if (!error.isNullOrBlank()) notice = error
     }
 
+    /** Tests read what would go to the server. */
+    internal var sentForTest: ((JSONObject) -> Unit)? = null
+
     private fun send(value: JSONObject) {
+        sentForTest?.invoke(value)
         bridge?.send(value)
     }
 
@@ -437,27 +443,68 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Photos and files from the phone's picker, read now so the message goes in one piece. */
+    fun pick(uris: List<android.net.Uri>) {
+        val c = chat() ?: return
+        val app = getApplication<Application>()
+        Thread {
+            val added = mutableListOf<Picked>()
+            var problem = ""
+            for (uri in uris) {
+                if (c.picked.size + added.size >= 8) { problem = "До восьми вложений в одном сообщении."; break }
+                runCatching {
+                    val resolver = app.contentResolver
+                    val name = resolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cur ->
+                        if (cur.moveToFirst()) cur.getString(0) else null
+                    } ?: uri.lastPathSegment?.substringAfterLast('/') ?: "файл"
+                    val mime = resolver.getType(uri) ?: Downloads.mime(name)
+                    val bytes = resolver.openInputStream(uri)!!.use { it.readBytes() }
+                    val total = c.picked.sumOf { it.bytes.size } + added.sumOf { it.bytes.size } + bytes.size
+                    if (total > 12 * 1024 * 1024) { problem = "С телефона можно отправить до 12 МБ за раз."; return@runCatching }
+                    val preview = if (mime.startsWith("image/")) runCatching {
+                        val options = android.graphics.BitmapFactory.Options().apply { inSampleSize = 4 }
+                        android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)?.asImageBitmap()
+                    }.getOrNull() else null
+                    added.add(Picked(name, mime, bytes, preview))
+                }.onFailure { problem = "Не удалось прочитать файл: ${it.message}" }
+            }
+            main.post {
+                c.picked.addAll(added)
+                if (problem.isNotEmpty()) notice = problem
+            }
+        }.start()
+    }
+
+    fun unpick(c: Chat, item: Picked) {
+        c.picked.remove(item)
+    }
+
     fun submit() {
         val c = chat() ?: return
         val text = c.draft.trim()
-        if (text.isEmpty() || link != Link.Online) return
-        if (localCommand(c, text)) return
+        if ((text.isEmpty() && c.picked.isEmpty()) || link != Link.Online) return
+        if (c.picked.isEmpty() && localCommand(c, text)) return
         if (!canSend(c)) return
         c.transcript.error = ""
         // Mid-answer the message goes straight in: Claude takes it at its next step, as in the terminal.
         val steering = c.transcript.busy
         c.transcript.userAt = c.transcript.messages.size
-        c.transcript.messages.add(Message("user", text))
+        val attached = c.picked.toList()
+        c.picked.clear()
+        val b64 = java.util.Base64.getEncoder()
+        val images = JSONArray(attached.filter { it.image }.map { JSONObject().put("type", "base64").put("media_type", it.mime).put("data", b64.encodeToString(it.bytes)) })
+        val files = JSONArray(attached.filter { !it.image }.map { JSONObject().put("type", "file").put("name", it.name).put("data", b64.encodeToString(it.bytes)) })
+        c.transcript.messages.add(Message("user", text, images = images.length(), files = attached.filter { !it.image }.map { it.name }))
         if (!steering) {
             c.transcript.busy = true
             c.transcript.status = "Отправляем"
         }
-        if (c.title == "Новая сессия") c.title = text.take(60)
+        if (c.title == "Новая сессия") c.title = text.ifEmpty { attached.firstOrNull()?.name.orEmpty() }.take(60)
         c.draft = ""
         c.changed()
         send(
             JSONObject().put("op", "prompt").put("sid", c.sid).put("cwd", c.cwd).put("text", text)
-                .put("images", JSONArray()).put("files", JSONArray()).put("model", c.model).put("mode", c.mode)
+                .put("images", images).put("files", files).put("model", c.model).put("mode", c.mode)
                 .put("effort", c.effort).put("actor", actor.ifBlank { "Relay Android" }).put("desktop_enabled", false)
                 .put("desktop_context", JSONObject())
         )

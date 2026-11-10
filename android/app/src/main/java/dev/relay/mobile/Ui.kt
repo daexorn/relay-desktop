@@ -3,6 +3,7 @@ package dev.relay.mobile
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.runtime.key
@@ -739,6 +740,7 @@ fun UserBubble(m: Message) {
         ) {
             if (m.text.isNotBlank()) Text(m.text, color = p.text, fontSize = 15.sp)
             if (m.images > 0) Label("🖼 Изображений: ${m.images}", 12.sp, p.muted)
+            for (f in m.files) Label("📎 $f", 12.sp, p.muted, maxLines = 1)
         }
     }
 }
@@ -959,7 +961,25 @@ fun Composer(vm: RelayViewModel, chat: Chat) {
             Label("/model, /mode и /stop срабатывают сразу, даже во время ответа", 11.sp, p.muted, modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp))
         }
     }
+    val picker = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.GetMultipleContents()) { uris ->
+        if (uris.isNotEmpty()) vm.pick(uris)
+    }
     Column(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp).clip(RoundedCornerShape(16.dp)).background(p.surface).border(1.dp, p.line, RoundedCornerShape(16.dp)).padding(start = 14.dp, end = 8.dp, top = 10.dp, bottom = 6.dp)) {
+        if (chat.picked.isNotEmpty()) {
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(bottom = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                for (f in chat.picked) key(f) {
+                    Row(Modifier.clip(RoundedCornerShape(10.dp)).background(p.side).border(1.dp, p.line, RoundedCornerShape(10.dp)).padding(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        if (f.preview != null) androidx.compose.foundation.Image(f.preview, f.name, Modifier.size(40.dp).clip(RoundedCornerShape(7.dp)), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
+                        else Box(Modifier.size(40.dp).clip(RoundedCornerShape(7.dp)).background(p.line), contentAlignment = Alignment.Center) { Label(f.name.substringAfterLast('.', "файл").take(4).uppercase(), 10.sp, p.muted) }
+                        Column(Modifier.padding(horizontal = 8.dp).widthIn(max = 140.dp)) {
+                            Label(f.name, 12.sp, p.text, maxLines = 1)
+                            Label(megabytes(f.bytes.size.toLong()), 11.sp, p.muted)
+                        }
+                        IconButton(Icons.Default.Close, "Убрать") { vm.unpick(chat, f) }
+                    }
+                }
+            }
+        }
         BasicTextField(
             value = chat.draft,
             onValueChange = { chat.draft = it },
@@ -969,6 +989,7 @@ fun Composer(vm: RelayViewModel, chat: Chat) {
             decorationBox = { inner -> Box { if (chat.draft.isEmpty()) Label(when { !online -> "Нет связи с сервером"; busy && vm.canSend(chat) -> "Добавь уточнение — Claude учтёт по ходу работы…"; busy -> "Claude отвечает…"; else -> "Напиши задачу… или / для команд" }, 15.sp, p.muted); inner() } },
         )
         Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(Icons.Default.Add, "Прикрепить файлы или фото") { picker.launch("*/*") }
             FlowRow(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
                 val models = vm.models.ifEmpty { listOf(ModelInfo("default", "Модель сервера", ""), ModelInfo("fable", "Fable", ""), ModelInfo("opus", "Opus", ""), ModelInfo("sonnet", "Sonnet", ""), ModelInfo("haiku", "Haiku", "")) }
                 Selector(modelLabel(vm.models, chat.model), models.map { it.value to if (it.value == "default") "Авто · ${it.description}".trimEnd(' ', '·') else it.name }) { chat.model = it; vm.liveChange(chat) }
@@ -977,7 +998,7 @@ fun Composer(vm: RelayViewModel, chat: Chat) {
                 Selector("Глубина: " + if (chat.effort == "default") "авто" else chat.effort,
                     listOf("default" to "Автоматически", "low" to "Низкая", "medium" to "Средняя", "high" to "Высокая", "xhigh" to "Очень высокая", "max" to "Максимальная")) { chat.effort = it }
             }
-            val ready = chat.draft.isNotBlank() && (vm.canSend(chat) || chat.draft.trim().startsWith("/"))
+            val ready = (chat.draft.isNotBlank() || chat.picked.isNotEmpty()) && (vm.canSend(chat) || chat.draft.trim().startsWith("/"))
             if (busy) {
                 Box(
                     Modifier.size(38.dp).clip(CircleShape).background(p.line).clickable { vm.stop() },
@@ -1048,7 +1069,7 @@ fun SettingsScreen(vm: RelayViewModel) {
                     if (vm.notice.isNotEmpty()) { Spacer(Modifier.height(8.dp)); Label(vm.notice, 12.sp, p.muted) }
                 }
                 Spacer(Modifier.height(24.dp))
-                Label("Relay для Android 0.2.4 · тот же сервер и тот же помощник, что у десктопа", 12.sp, p.muted)
+                Label("Relay для Android 0.2.5 · тот же сервер и тот же помощник, что у десктопа", 12.sp, p.muted)
             }
         }
     }

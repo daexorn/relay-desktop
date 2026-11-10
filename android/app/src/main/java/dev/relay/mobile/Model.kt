@@ -80,7 +80,15 @@ data class Message(
     val toolId: String = "",
     val failed: Boolean = false,
     val images: Int = 0,
+    /** Names of files sent with this message from the phone. */
+    val files: List<String> = emptyList(),
 )
+
+/** A photo or file picked on the phone, waiting to go with the next message. */
+class Picked(val name: String, val mime: String, val bytes: ByteArray, val preview: androidx.compose.ui.graphics.ImageBitmap?) {
+    /** The server helper takes PNG, JPEG, WebP and GIF up to 4 MB as pictures Claude sees; the rest as files. */
+    val image get() = mime in setOf("image/png", "image/jpeg", "image/webp", "image/gif") && bytes.size <= 4 * 1024 * 1024
+}
 
 data class Permission(val id: String, val tool: String, val input: JSONObject)
 
