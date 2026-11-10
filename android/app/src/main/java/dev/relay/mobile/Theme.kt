@@ -47,3 +47,5 @@ fun palette(id: String): Palette {
     val c = t.colors
     return Palette(rgb(c[0]), rgb(c[1]), rgb(c[2]), rgb(c[3]), rgb(c[4]), rgb(c[5]), rgb(c[6]), rgb(c[7]), t.light)
 }
+
+fun isLight(id: String) = THEMES.firstOrNull { it.id == id }?.light ?: false

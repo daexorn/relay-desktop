@@ -236,6 +236,7 @@ fun ServersScreen(vm: RelayViewModel) {
             IconButton(Icons.Default.Settings, "Настройки") { vm.screen = Screen.Settings }
         }
         if (vm.notice.isNotEmpty()) Notice(vm.notice) { vm.notice = "" }
+        if (vm.crash.isNotEmpty()) CrashCard(vm.crash) { vm.crash = "" }
         LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             if (vm.servers.isEmpty()) item {
                 Column(Modifier.fillMaxWidth().padding(top = 60.dp), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -375,6 +376,29 @@ fun Notice(text: String, close: () -> Unit) {
     Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp).clip(RoundedCornerShape(10.dp)).background(p.accent.copy(alpha = 0.14f)).padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
         Label(text, 13.sp, p.text, modifier = Modifier.weight(1f))
         GhostButton("OK", p.accent, close)
+    }
+}
+
+/** The previous start ended in a crash: show what happened and let the user copy it. */
+@Composable
+fun CrashCard(text: String, close: () -> Unit) {
+    val p = LocalPalette.current
+    val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
+    var copied by remember { mutableStateOf(false) }
+    Column(Modifier.fillMaxWidth().padding(12.dp).clip(RoundedCornerShape(12.dp)).background(p.red.copy(alpha = 0.12f)).border(1.dp, p.red.copy(alpha = 0.4f), RoundedCornerShape(12.dp)).padding(14.dp)) {
+        Label("Прошлый запуск закончился ошибкой", 14.sp, p.text, FontWeight.Medium)
+        Spacer(Modifier.height(4.dp))
+        Label("Скопируй отчёт и пришли его в Relay — так ошибку можно будет исправить.", 13.sp, p.muted)
+        Spacer(Modifier.height(8.dp))
+        Label(text.lineSequence().take(4).joinToString("\n"), 11.sp, p.muted, maxLines = 4)
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            PrimaryButton(if (copied) "Скопировано" else "Скопировать отчёт") {
+                clipboard.setText(androidx.compose.ui.text.AnnotatedString(text))
+                copied = true
+            }
+            GhostButton("Закрыть", p.muted, close)
+        }
     }
 }
 

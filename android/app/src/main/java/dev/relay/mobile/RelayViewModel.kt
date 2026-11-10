@@ -118,7 +118,8 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         chats.clear()
         selected = null
         screen = Screen.Sessions
-        val b = Bridge(
+        lateinit var b: Bridge
+        b = Bridge(
             getApplication(),
             profile,
             password,
@@ -127,12 +128,25 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                 main.post { trust = TrustRequest(profile.name.ifEmpty { profile.host }, fingerprint, answer) }
                 answer
             },
-            onEvent = { value -> main.post { handle(value) } },
-            onClosed = { error -> main.post { closed(error) } },
+            onEvent = { value -> main.post { if (bridge === b) safely { handle(value) } } },
+            onClosed = { error -> main.post { if (bridge === b) closed(error) } },
         )
         bridge = b
         b.start()
     }
+
+    /** One bad event from the server shows a message instead of closing the app. */
+    private fun safely(block: () -> Unit) {
+        try {
+            block()
+        } catch (e: Throwable) {
+            android.util.Log.e("Relay", "event", e)
+            notice = "Не удалось обработать ответ сервера: $e"
+        }
+    }
+
+    /** Text of the last crash, shown once on the next start so it can be sent to the developer. */
+    var crash by mutableStateOf(Crashes.take(app))
 
     /** Tests and previews: a server without a connection. */
     internal fun attach(profile: ServerProfile) {

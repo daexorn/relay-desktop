@@ -86,13 +86,14 @@ class Bridge(
             while (!closed) {
                 val line = reader.readLine() ?: break
                 if (line.isBlank()) continue
-                val value = runCatching { JSONObject(line) }.getOrNull() ?: continue
+                val value = try { JSONObject(line) } catch (_: Throwable) { continue }
                 onEvent(value)
             }
             if (!closed && exec.exitStatus > 0) {
                 error = "Не удалось запустить помощник на сервере. Нужны Python 3 и Claude Code."
             }
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
+            // Throwable, not Exception: a missing class on some Android version must not kill the app.
             error = when {
                 closed -> null
                 e is com.jcraft.jsch.JSchChangedHostKeyException || e.message?.contains("has been changed") == true ->
@@ -101,6 +102,7 @@ class Bridge(
                 e.message?.contains("UnknownHostKey") == true || e.message?.contains("reject HostKey") == true ->
                     "Ключ сервера не подтверждён."
                 e.message?.contains("timeout", ignoreCase = true) == true -> "Сервер не ответил. Проверь адрес и порт."
+                e !is Exception -> "Ошибка подключения: $e"
                 else -> e.message ?: e.toString()
             }
         } finally {
@@ -119,7 +121,7 @@ class Bridge(
                 output.write((line + "\n").toByteArray(Charsets.UTF_8))
                 output.flush()
             }
-        } catch (_: Exception) {
+        } catch (_: Throwable) {
             close()
         }
     }
