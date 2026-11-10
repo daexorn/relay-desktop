@@ -102,45 +102,39 @@ pub fn code_block<'t>(
     text: &str,
     layouter: &'t mut dyn FnMut(&Ui, &str, f32) -> std::sync::Arc<egui::Galley>,
 ) {
-    let mut text = text.strip_suffix('\n').unwrap_or(text);
+    let text = text.strip_suffix('\n').unwrap_or(text);
 
-    // To manually add background color to the code block, we imitate what
-    // TextEdit does internally
-    let where_to_put_background = ui.painter().add(egui::Shape::Noop);
-
-    // We use a `TextEdit` to make the text selectable.
-    // Note that we take a `&mut` to a non-`mut` `&str`, which is
-    // the how to tell `egui` that the text is not editable.
-    let output = egui::TextEdit::multiline(&mut text)
-        .layouter(layouter)
-        .desired_width(max_width)
-        // prevent trailing lines
-        .desired_rows(1)
-        .show(ui);
-
-    // Background color + frame (This is lost when TextEdit it not editable)
-    let frame_rect = output.response.rect;
-    ui.painter().set(
-        where_to_put_background,
-        epaint::RectShape::new(
-            frame_rect,
-            ui.style().noninteractive().corner_radius,
-            ui.visuals().extreme_bg_color,
-            ui.visuals().widgets.noninteractive.bg_stroke,
-            egui::StrokeKind::Outside,
-        ),
+    // Laid out by hand rather than through TextEdit: the block is exactly the column wide,
+    // the code sits inside even padding, and the right side is kept free for the copy button.
+    let (pad_x, pad_y, button_room) = (10.0_f32, 7.0_f32, 30.0_f32);
+    let width = max_width.max(80.0);
+    let galley = layouter(ui, text, (width - pad_x - button_room).max(40.0));
+    let height = galley.size().y.max(ui.fonts(|f| f.row_height(&egui::TextStyle::Monospace.resolve(ui.style())))) + pad_y * 2.0;
+    let (frame_rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+    ui.painter().rect(
+        frame_rect,
+        egui::CornerRadius::same(8),
+        ui.visuals().extreme_bg_color,
+        ui.visuals().widgets.noninteractive.bg_stroke,
+        egui::StrokeKind::Inside,
     );
+    let text_rect = egui::Rect::from_min_size(frame_rect.min + egui::vec2(pad_x, pad_y), galley.size());
+    let label = ui.put(text_rect, egui::Label::new(egui::WidgetText::Galley(galley)).selectable(true).wrap_mode(egui::TextWrapMode::Extend));
+    let output_id = label.id;
 
     // Copy icon: painted, not an emoji glyph, so it sits inside the block's top-right corner
     // and lines up the same in every theme and for one-line blocks.
-    let side = 20.0_f32.min(frame_rect.height() - 2.0).max(14.0);
-    let icon_rect = egui::Rect::from_min_size(
-        egui::pos2(frame_rect.right() - side - 4.0, frame_rect.top() + ((frame_rect.height().min(28.0) - side) * 0.5).max(1.0)),
+    // Centred on a one-line block, level with the first line on a longer one.
+    let side = 20.0_f32;
+    let line = ui.fonts(|f| f.row_height(&egui::TextStyle::Monospace.resolve(ui.style())));
+    let first_line_centre = frame_rect.top() + pad_y + line * 0.5;
+    let icon_rect = egui::Rect::from_center_size(
+        egui::pos2(frame_rect.right() - 7.0 - side * 0.5, first_line_centre.min(frame_rect.center().y)),
         egui::vec2(side, side),
     );
 
     // Check if we should show a tick instead of the copy icon if the text was copied and the mouse is hovered
-    let persistent_id = ui.make_persistent_id(output.response.id);
+    let persistent_id = ui.make_persistent_id(output_id);
     let copied_icon = ui.memory_mut(|m| *m.data.get_temp_mut_or_default::<bool>(persistent_id));
 
     let copy_button = ui
@@ -179,19 +173,7 @@ pub fn code_block<'t>(
     }
 
     if copy_button.clicked() {
-        use egui::TextBuffer as _;
-        let copy_text = if let Some(cursor) = output.cursor_range {
-            let selected_chars = cursor.as_sorted_char_range();
-            let selected_text = text.char_range(selected_chars);
-            if selected_text.is_empty() {
-                text.to_owned()
-            } else {
-                selected_text.to_owned()
-            }
-        } else {
-            text.to_owned()
-        };
-        ui.ctx().copy_text(copy_text);
+        ui.ctx().copy_text(text.to_owned());
     }
     // Blocks one after another do not touch.
     ui.add_space(4.0);

@@ -287,7 +287,9 @@ impl CodeBlock {
                     plain_highlighting(ui, string)
                 };
 
-                job.wrap.max_width = wrap_width;
+                // Wrap inside the block's own padding (see elements::code_block), whatever
+                // width TextEdit offers: lines never run under the copy button.
+                job.wrap.max_width = wrap_width.min((max_width - 44.0).max(60.0));
                 ui.fonts(|f| f.layout_job(job))
             };
 
