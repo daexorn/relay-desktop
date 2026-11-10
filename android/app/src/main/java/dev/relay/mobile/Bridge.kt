@@ -38,8 +38,7 @@ class Bridge(
         private set
 
     fun start() {
-        // A roomy stack: the key exchange math of Bouncy Castle recurses deeply on some phones.
-        Thread(null, { run() }, "relay-ssh", 16L shl 20).apply { isDaemon = true }.start()
+        Thread({ run() }, "relay-ssh").apply { isDaemon = true }.start()
     }
 
     fun send(value: JSONObject) {
@@ -60,17 +59,10 @@ class Bridge(
             jsch.setHostKeyRepository(Keys(server.fingerprint))
             val s = jsch.getSession(server.user, server.host, server.port)
             s.setPassword(password)
-            s.userInfo = object : UserInfo {
-                override fun getPassphrase(): String? = null
-                override fun getPassword(): String = password
-                override fun promptPassword(message: String?) = true
-                override fun promptPassphrase(message: String?) = false
-                override fun promptYesNo(message: String?) = false
-                override fun showMessage(message: String?) {}
-            }
+            s.userInfo = userInfo(password)
             s.setConfig("PreferredAuthentications", "password,keyboard-interactive")
-            // OpenSSH 10 offers post-quantum hybrids first (mlkem768x25519, sntrup761x25519). Their
-            // JSch + Bouncy Castle path is the suspect for a StackOverflowError on a phone, so use the classic set.
+            // OpenSSH 10 offers post-quantum hybrids first (mlkem768x25519, sntrup761x25519); with the
+            // Bouncy Castle classes Android uses, JSch fails on them, so stay with the classic set.
             s.setConfig("kex", KEX)
             s.serverAliveInterval = 20_000
             s.serverAliveCountMax = 3
@@ -168,6 +160,19 @@ class Bridge(
         /** The source travels over stdin, so its size never hits the shell's argument limit. */
         fun command(size: Int) =
             "python3 -u -c " + shellQuote("import sys; exec(compile(sys.stdin.buffer.read($size), '<relay>', 'exec'))")
+
+        /**
+         * Inside `object : UserInfo` a bare `password` means the object's own getPassword(), which
+         * then calls itself forever: the secret comes in under another name.
+         */
+        fun userInfo(secret: String): UserInfo = object : UserInfo {
+            override fun getPassphrase(): String? = null
+            override fun getPassword(): String = secret
+            override fun promptPassword(message: String?) = true
+            override fun promptPassphrase(message: String?) = false
+            override fun promptYesNo(message: String?) = false
+            override fun showMessage(message: String?) {}
+        }
 
         fun sha256(blob: ByteArray): String =
             "SHA256:" + Base64.getEncoder().withoutPadding().encodeToString(MessageDigest.getInstance("SHA-256").digest(blob))
