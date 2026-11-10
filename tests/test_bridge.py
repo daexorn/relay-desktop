@@ -2,6 +2,10 @@ import base64
 import importlib.util
 import io
 import json
+import socket
+import stat
+import threading
+import os
 from pathlib import Path
 import queue
 import tempfile
@@ -211,8 +215,7 @@ class ProtocolTests(unittest.TestCase):
         source=(Path(__file__).parents[1]/'bridge/desktop_mcp.py').read_text()
         with mock.patch.object(bridge,'DESKTOP_SOURCE',source,create=True):
             self.host.dispatch({'op':'prompt','sid':self.sid,'cwd':str(self.root),'text':'relay-pc-tool','mode':'manual','desktop_enabled':True})
-        event=self.events.get(timeout=3)
-        self.assertEqual(event['type'],'claude')
+        event=self.wait('claude')
         self.assertEqual(event['data']['message']['content'][0]['text'],'allow')
 
     def test_board_ops_and_session_mcp_config(self):
@@ -273,10 +276,38 @@ class ProtocolTests(unittest.TestCase):
         self.assertIn('роль',event['message'])
         self.assertNotIn(self.sid,self.host.runs)
 
-    def test_duplicate_prompt_does_not_clear_running_flag(self):
+    def test_prompt_during_an_answer_joins_the_queue(self):
         self.prompt();self.wait('permission')
-        self.prompt();error=self.wait('error')
-        self.assertIn('Дождись',error['message']);self.assertTrue(self.host.runs[self.sid].busy)
+        run=self.host.runs[self.sid]
+        self.prompt()
+        state=self.wait('run_state')
+        while state['queued']!=1:state=self.wait('run_state')
+        self.assertIs(self.host.runs[self.sid],run);self.assertEqual(run.turns,2);self.assertTrue(run.busy)
+        self.assertEqual(self.host.running(),{self.sid})
+        self.host.dispatch({'op':'permission','sid':self.sid,'id':'test-permission','allow':True})
+        self.wait('claude')
+        # The first answer is done, the queued message is still being answered.
+        while True:
+            state=self.wait('run_state')
+            if state['queued']==0:break
+        self.assertTrue(run.busy);self.assertEqual(run.turns,1)
+
+    def test_model_switches_live_during_an_answer(self):
+        self.prompt();self.wait('permission')
+        run=self.host.runs[self.sid]
+        with mock.patch.object(run,'control') as control:
+            self.host.dispatch({'op':'prompt','sid':self.sid,'cwd':str(self.root),'text':'ещё','mode':'auto','model':'opus'})
+            control.assert_any_call('set_model',model='opus');control.assert_any_call('set_permission_mode',mode='auto')
+            self.host.dispatch({'op':'control','sid':self.sid,'action':'model','value':'default'})
+            control.assert_called_with('set_model',model=None)
+        self.assertIs(self.host.runs[self.sid],run)
+
+    def test_catalog_comes_from_initialize(self):
+        self.host.learn_catalog({'models':[{'value':'claude-fable-5-2','displayName':'Fable 5.2','description':'x','supportsEffort':True}],
+                                 'commands':[{'name':'compact','description':'Сжать','argumentHint':'[focus]'},{'name':'__internal'}],'claude_code_version':'2.1'})
+        event=self.wait('catalog')
+        self.assertEqual(event['models'],[{'value':'claude-fable-5-2','displayName':'Fable 5.2','description':'x'}])
+        self.assertEqual(event['commands'],[{'name':'compact','description':'Сжать','hint':'[focus]'}])
 
     def test_permission_decline_is_sent_to_claude(self):
         self.prompt();event=self.wait('permission')
@@ -328,11 +359,6 @@ class ProtocolTests(unittest.TestCase):
         permission=self.wait('permission')
         first=self.host.runs[self.sid]
         self.addCleanup(cleanup,first)
-        self.host.dispatch(dict(request,effort='high'))
-        self.assertIn('Дождись',self.wait('error')['message'])
-        self.assertIs(self.host.runs[self.sid],first)
-        self.assertEqual(first.effort,'low')
-        self.assertIsNone(first.process.poll())
         self.host.dispatch({'op':'permission','sid':self.sid,'id':permission['id'],'allow':True})
         self.wait('claude');self.wait('claude')
         self.assertFalse(first.busy)
@@ -489,3 +515,61 @@ class FileTransferTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             events=[];transfer=bridge.FileTransfers(events.append)
             transfer.info(str(uuid.uuid4()),folder,folder);self.assertIn('error',events[0]);self.assertFalse(transfer.items)
+
+
+class HostTests(unittest.TestCase):
+    """Claude keeps working when the app disconnects; the next app sees it running."""
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        self.root=Path(self.temp.name);cli=self.root/'claude'
+        cli.write_text(FAKE);cli.chmod(0o700)
+        transcripts=bridge.Transcripts(self.root/'transcripts')
+        self.host=bridge.Host(lambda send:bridge.Bridge(send=send,transcripts=transcripts,binary=str(cli)))
+        self.host.bridge.catalog={'type':'catalog','models':[],'commands':[]}
+        self.path=str(self.root/'host.sock')
+        threading.Thread(target=self.host.serve,args=(self.path,),daemon=True).start()
+        end=time.monotonic()+5
+        while not os.path.exists(self.path) and time.monotonic()<end:time.sleep(.02)
+        self.addCleanup(self.host.bridge.close)
+        self.sid=str(uuid.uuid4())
+
+    def app(self):
+        conn=socket.socket(socket.AF_UNIX);conn.connect(self.path);conn.settimeout(5)
+        return conn,conn.makefile('rb')
+
+    def next(self,stream,kind):
+        while True:
+            event=json.loads(stream.readline())
+            if event.get('type')==kind:return event
+
+    def test_run_survives_the_app_and_is_replayed(self):
+        conn,stream=self.app()
+        self.assertEqual(self.next(stream,'hello')['protocol'],4)
+        self.assertTrue(stat.S_IMODE(os.stat(self.path).st_mode)&0o077==0)
+        conn.sendall((json.dumps({'op':'prompt','sid':self.sid,'cwd':str(self.root),'text':'test','mode':'manual'})+'\n').encode())
+        permission=self.next(stream,'permission')
+        conn.close()
+        time.sleep(.3)
+        run=self.host.bridge.runs[self.sid]
+        self.assertTrue(run.busy);self.assertIsNone(run.process.poll())
+        other,events=self.app()
+        self.assertTrue(self.next(events,'run_state')['busy'])
+        self.assertEqual(self.next(events,'permission')['id'],permission['id'])
+        other.sendall((json.dumps({'op':'sessions'})+'\n').encode())
+        other.sendall((json.dumps({'op':'permission','sid':self.sid,'id':permission['id'],'allow':True})+'\n').encode())
+        self.assertEqual(self.next(events,'claude')['data']['message']['content'][0]['text'],'allow')
+        self.assertFalse(self.next(events,'run_state')['busy'])
+        other.close()
+
+    def test_pc_tools_go_only_to_the_app_that_asked(self):
+        first,a=self.app();second,b=self.app()
+        self.next(a,'hello');self.next(b,'hello')
+        first.sendall((json.dumps({'op':'prompt','sid':self.sid,'cwd':str(self.root),'text':'test','mode':'manual'})+'\n').encode())
+        self.next(a,'permission');self.next(b,'permission')
+        owner=self.host.owners[self.sid]
+        seen=[]
+        with mock.patch.object(owner,'send',side_effect=seen.append):
+            self.host.route({'type':'desktop_request','id':'x','sid':self.sid,'tool':'run_local_command','input':{}})
+        self.assertEqual([e['id'] for e in seen],['x'])
+        first.close();second.close()
+

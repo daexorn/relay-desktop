@@ -190,6 +190,27 @@ pub struct Session {
     pub pinned: f64,
     #[serde(default)]
     pub folder: String,
+    /// Claude is answering in it right now (the server host keeps it running without the app).
+    #[serde(default)]
+    pub running: bool,
+}
+/// A model exactly as the server's Claude Code lists it: `fable`, `opus`, a full id…
+#[derive(Clone, Default, Deserialize, Debug, PartialEq)]
+pub struct ModelInfo {
+    pub value: String,
+    #[serde(default, rename = "displayName")]
+    pub display_name: String,
+    #[serde(default)]
+    pub description: String,
+}
+/// A slash command of the server's Claude Code, for completion in the composer.
+#[derive(Clone, Default, Deserialize, Debug, PartialEq)]
+pub struct CommandInfo {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub hint: String,
 }
 /// A named group of sessions, shared by everyone who connects to the server.
 #[derive(Clone, Default, Deserialize, Debug)]

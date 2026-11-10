@@ -44,7 +44,18 @@ class UiScreenshotTest {
         val vm = RelayViewModel(ApplicationProvider.getApplicationContext())
         vm.chooseTheme(theme)
         vm.attach(ServerProfile(name = "Production", host = "2.27.202.166", cwd = "/opt/sbrp-client"))
-        vm.handle(JSONObject().put("type", "hello").put("home", "/root").put("version", "2.1"))
+        vm.handle(JSONObject().put("type", "hello").put("home", "/root").put("version", "2.1").put("protocol", 4))
+        vm.handle(JSONObject().put("type", "catalog")
+            .put("models", JSONArray(listOf(
+                JSONObject().put("value", "default").put("displayName", "Default").put("description", "Opus 5.5"),
+                JSONObject().put("value", "opus").put("displayName", "Opus 5.5"),
+                JSONObject().put("value", "claude-fable-5-2").put("displayName", "Fable 5.2"),
+                JSONObject().put("value", "sonnet").put("displayName", "Sonnet 5.5"),
+                JSONObject().put("value", "haiku").put("displayName", "Haiku 5.5"))))
+            .put("commands", JSONArray(listOf(
+                JSONObject().put("name", "compact").put("description", "Сжать историю разговора").put("hint", "[что сохранить]"),
+                JSONObject().put("name", "context").put("description", "Чем занят контекст"),
+                JSONObject().put("name", "code-review").put("description", "Проверить изменения")))))
         val now = System.currentTimeMillis() / 1000.0
         fun s(id: String, title: String, ago: Double, pinned: Double = 0.0, folder: String = "") = JSONObject()
             .put("id", id).put("title", title).put("cwd", "/opt/sbrp-client").put("modified", now - ago).put("pinned", pinned).put("folder", folder)
@@ -54,7 +65,7 @@ class UiScreenshotTest {
                     s("a", "Формулы для расчёта урона", 60.0, pinned = now),
                     s("b", "Якорь и цепь у штурвала", 3000.0, folder = "f1"),
                     s("c", "Паруса и ветер", 90000.0, folder = "f1"),
-                    s("d", "Новая кузня: печь на домне", 7000.0),
+                    s("d", "Новая кузня: печь на домне", 7000.0).put("running", true),
                     s("e", "Проверка обновления сервера", 100000.0),
                 )))
                 .put("folders", JSONArray(listOf(JSONObject().put("id", "f1").put("name", "Корабли"))))
@@ -125,5 +136,16 @@ class UiScreenshotTest {
         vm.screen = Screen.Settings
         rule.setContent { RelayApp(vm) }
         shot("07-settings")
+    }
+
+    @Test fun slashCommandsAndQueue() {
+        val vm = connected()
+        vm.newChat()
+        val c = vm.chat()!!
+        c.draft = "Собери мод"; vm.submit()
+        c.draft = "И проверь в игре"; vm.submit()
+        c.draft = "/co"
+        rule.setContent { RelayApp(vm) }
+        shot("09-slash-queue")
     }
 }

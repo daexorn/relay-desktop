@@ -159,7 +159,7 @@ class Bridge(
 
         /** The source travels over stdin, so its size never hits the shell's argument limit. */
         fun command(size: Int) =
-            "python3 -u -c " + shellQuote("import sys; exec(compile(sys.stdin.buffer.read($size), '<relay>', 'exec'))")
+            "python3 -u -c " + shellQuote("import sys; RELAY_SOURCE = sys.stdin.buffer.read($size); exec(compile(RELAY_SOURCE, '<relay>', 'exec'))")
 
         /**
          * Inside `object : UserInfo` a bare `password` means the object's own getPassword(), which

@@ -1,9 +1,13 @@
-"""Relay's per-connection helper. Python stdlib only; no listening socket or installation.
+"""Relay's server helper. Python stdlib only.
 
-The desktop passes this file to python3 over an authenticated SSH channel. Only
-children created by this helper are stopped when the channel closes. Existing
-Claude transcripts are read; explicit session deletion moves only that session
-out of the active history. Project files and Claude settings are never changed.
+The app passes this file to python3 over an authenticated SSH channel. A new app
+also passes the whole source as RELAY_SOURCE: the helper then starts (or joins) a
+host process of the same version that owns the Claude processes, listening on a
+user-only Unix socket in ~/.cache/relay-desktop/host. Work then continues when the
+app disconnects, and every app that connects sees the same running sessions. The
+host exits after it has been idle without apps for a while. Existing Claude
+transcripts are read; explicit session deletion moves only that session out of the
+active history. Project files and Claude settings are never changed.
 """
 import collections
 import base64
@@ -13,6 +17,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import socket
 import signal
 import subprocess
 import sys
@@ -578,6 +583,7 @@ class Run:
         self.desktop_enabled = False
         self.desktop_context = getattr(owner,"desktop_context", "")
         self.busy = False
+        self.turns = 0  # Prompts sent and not yet answered: Claude Code answers queued ones in order.
         self.closed = False
         self.ready = threading.Event()
         self.pending = {}
@@ -656,6 +662,8 @@ class Run:
                     if response.get("request_id") == self.init_id:
                         if response.get("subtype") == "error":
                             self.error.append(response.get("error", "Не удалось запустить Claude."))
+                        else:
+                            self.owner.learn_catalog(response.get("response") or {})
                         self.ready.set()
                     continue
                 if kind == "control_request":
@@ -682,14 +690,19 @@ class Run:
                     self.pending.pop(request_id, None)
                     self.owner.send({"type": "permission_cancelled", "sid": self.sid, "id": request_id})
                     continue
-                if kind == "result":
-                    self.busy = False
-                    self.pending.clear()
                 self.owner.send({"type": "claude", "sid": self.sid, "data": data})
+                if kind == "result":
+                    self.turns = max(0, self.turns - 1)
+                    self.busy = self.turns > 0
+                    if not self.busy:
+                        self.pending.clear()
+                    self.owner.run_state(self)
         finally:
             self.ready.set()
             was_busy = self.busy
             self.busy = False
+            self.turns = 0
+            self.owner.run_state(self)
             if not self.closed:
                 self.owner.send({"type": "run_closed", "sid": self.sid, "interrupted": was_busy,
                                  "detail": "\n".join(self.error)[-1800:]})
@@ -700,9 +713,16 @@ class Run:
             raise ValueError("Claude не ответил при запуске. Проверь авторизацию на сервере и повтори подключение.")
         if self.process.poll() is not None:
             raise ValueError("\n".join(self.error) or "Claude завершился при запуске.")
-        self.busy = True
         content = ([{"type": "text", "text": text}] if text else []) + [{"type": "image", "source": image} for image in (images or [])]
         self.write({"type": "user", "session_id": self.sid, "message": {"role": "user", "content": content}, "parent_tool_use_id": None})
+        self.turns += 1
+        self.busy = True
+        self.owner.run_state(self)
+
+    def control(self, subtype, **fields):
+        """Model and permission mode change at once, even in the middle of an answer."""
+        self.write({"type": "control_request", "request_id": "relay-" + subtype + "-" + uuid.uuid4().hex,
+                    "request": {"subtype": subtype, **fields}})
 
     def permit(self, request_id, allow, answers):
         req = self.pending.pop(request_id, None)
@@ -837,6 +857,57 @@ class Bridge:
         self.actor = ""
         self.board, self.board_file = load_board()
         self.meta = SessionMeta()
+        self.catalog = None
+        self.catalog_probe = False
+
+    def learn_catalog(self, info):
+        """Models and slash commands exactly as this server's Claude Code reports them."""
+        models = [{k: m.get(k) for k in ("value", "displayName", "description", "resolvedModel", "supportedEffortLevels") if k in m}
+                  for m in info.get("models") or [] if isinstance(m, dict) and isinstance(m.get("value"), str)]
+        commands = [{"name": c.get("name"), "description": str(c.get("description") or "")[:300], "hint": str(c.get("argumentHint") or "")[:120]}
+                    for c in info.get("commands") or [] if isinstance(c, dict) and isinstance(c.get("name"), str) and not c["name"].startswith("__")]
+        if not models and not commands:
+            return
+        self.catalog = {"type": "catalog", "models": models, "commands": commands,
+                        "version": str(info.get("claude_code_version") or "")}
+        self.send(self.catalog)
+
+    def probe_catalog(self):
+        """Start Claude Code once without a prompt just to read its models and commands."""
+        if self.catalog or self.catalog_probe:
+            return
+        self.catalog_probe = True
+        def run():
+            try:
+                env = dict(os.environ); env.pop("CLAUDECODE", None)
+                process = subprocess.Popen([self.binary, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"],
+                    cwd=str(Path.home()), env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    text=True, encoding="utf-8", errors="replace", start_new_session=True)
+                timer = threading.Timer(40, process.kill); timer.start()
+                try:
+                    process.stdin.write(json.dumps({"type": "control_request", "request_id": "relay-catalog", "request": {"subtype": "initialize", "hooks": None}}) + "\n")
+                    process.stdin.flush()
+                    for line in process.stdout:
+                        try: data = json.loads(line)
+                        except ValueError: continue
+                        if data.get("type") == "control_response":
+                            self.learn_catalog((data.get("response") or {}).get("response") or {})
+                            break
+                finally:
+                    timer.cancel()
+                    process.kill()
+                    process.wait()
+            except (OSError, ValueError):
+                pass
+            finally:
+                self.catalog_probe = False
+        threading.Thread(target=run, daemon=True).start()
+
+    def run_state(self, run):
+        self.send({"type": "run_state", "sid": run.sid, "busy": bool(run.busy), "queued": max(0, run.turns - 1)})
+
+    def running(self):
+        return {sid for sid, run in list(self.runs.items()) if run.busy and not run.closed}
 
     def send_sessions(self):
         sessions = self.transcripts.sessions()
@@ -844,6 +915,9 @@ class Bridge:
             sessions, folders = self.meta.apply(sessions)
         except OSError:
             folders = []
+        busy = self.running()
+        for s in sessions:
+            s["running"] = s.get("id") in busy
         self.send({"type": "sessions", "sessions": sessions, "folders": folders})
 
     def hello(self):
@@ -852,7 +926,11 @@ class Bridge:
         except (OSError, subprocess.SubprocessError):
             version = "Claude Code"
         self.send({"type": "hello", "home": str(Path.home()), "hostname": os.uname().nodename,
-                   "version": version, "protocol": 3})
+                   "version": version, "protocol": 4, "host": bool(globals().get("RELAY_HOSTED"))})
+        if self.catalog:
+            self.send(self.catalog)
+        else:
+            self.probe_catalog()
 
     def dispatch(self, req):
         op = req.get("op")
@@ -971,9 +1049,13 @@ class Bridge:
                     self.actor=str(req.get("actor") or "")[:80]
                     self.desktop_context=json.dumps(req.get("desktop_context",{}),ensure_ascii=False)[:5000] if desktop_enabled else ""
                     run = self.runs.get(sid)
-                    if run and run.busy:
-                        raise ValueError("Дождись ответа Claude или останови его.")
-                    if run and (run.closed or run.process.poll() is not None or (run.cwd, run.model, run.mode, run.effort, getattr(run,"desktop_enabled",False), getattr(run,"desktop_context",""), getattr(run,"agent_role",""), getattr(run,"custom_prompt",""), getattr(run,"cluster_context",{})) != (cwd, model, mode, effort, desktop_enabled, self.desktop_context, agent_role, custom_prompt, cluster_context)):
+                    if run and run.busy and not run.closed and run.process.poll() is None:
+                        # Mid-answer: the message joins Claude's queue; model and mode switch live.
+                        if model != run.model:
+                            run.control("set_model", model=None if model == "default" else model); run.model = model
+                        if mode != run.mode:
+                            run.control("set_permission_mode", mode=mode); run.mode = mode
+                    elif run and (run.closed or run.process.poll() is not None or (run.cwd, run.model, run.mode, run.effort, getattr(run,"desktop_enabled",False), getattr(run,"desktop_context",""), getattr(run,"agent_role",""), getattr(run,"custom_prompt",""), getattr(run,"cluster_context",{})) != (cwd, model, mode, effort, desktop_enabled, self.desktop_context, agent_role, custom_prompt, cluster_context)):
                         run.close()
                         self.runs.pop(sid, None)
                         run = None
@@ -989,8 +1071,7 @@ class Bridge:
                             raise ValueError("Открой исходную рабочую папку этой сессии.")
                         run = Run(self, sid, cwd, model, mode, bool(existing), effort)
                         self.runs[sid] = run
-                    run.busy = True
-                    claimed = True
+                    claimed = not run.busy
                 if decoded or uploaded:
                     saved = store_files(sid, decoded) if decoded else []
                     saved.extend(uploaded)
@@ -1002,6 +1083,22 @@ class Bridge:
                 run = self.runs.get(valid_id(req.get("sid")))
                 if run:
                     run.permit(str(req.get("id", "")), bool(req.get("allow")), req.get("answers"))
+            elif op == "control":
+                run = self.runs.get(valid_id(req.get("sid")))
+                kind, value = req.get("action"), req.get("value")
+                if kind == "model" and isinstance(value, str) and len(value) <= 160:
+                    if run and not run.closed:
+                        run.control("set_model", model=None if value == "default" else value); run.model = value
+                elif kind == "mode" and value in ("manual", "auto", "acceptEdits", "plan"):
+                    if run and not run.closed:
+                        run.control("set_permission_mode", mode=value); run.mode = value
+                else:
+                    raise ValueError("Неизвестная команда.")
+            elif op == "catalog":
+                if self.catalog:
+                    self.send(self.catalog)
+                else:
+                    self.probe_catalog()
             elif op == "stop":
                 run = self.runs.get(valid_id(req.get("sid")))
                 if run:
@@ -1030,8 +1127,9 @@ class Bridge:
         except (ValueError, OSError, subprocess.SubprocessError, TypeError, AttributeError, UnicodeError) as error:
             sid = req.get("sid", "")
             run = self.runs.get(sid)
-            if op == "prompt" and run and claimed:
+            if op == "prompt" and run and claimed and run.turns == 0:
                 run.busy = False
+                self.run_state(run)
             self.send({"type": "error", "sid": sid, "op": op, "message": str(error)[:1800]})
 
     def close(self):
@@ -1101,7 +1199,271 @@ def store_files(sid, files, root=None):
     return result
 
 
+CLIENT = threading.local()
+# Replies go to the app that asked; what happens in a session goes to every app.
+BROADCAST = {"claude", "permission", "permission_cancelled", "run_closed", "run_state", "sessions", "session_deleted", "catalog"}
+OWNED = {"desktop_request", "desktop_cancel", "cluster_request", "cluster_cancelled"}
+HOST_IDLE = 30 * 60
+
+
+class HostClient:
+    """One connected app. A writer thread keeps a slow phone from holding up Claude's output."""
+    def __init__(self, conn):
+        self.conn = conn
+        self.queue = collections.deque()
+        self.ready = threading.Condition()
+        self.alive = True
+        threading.Thread(target=self.writer, daemon=True).start()
+
+    def send(self, event):
+        line = (json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8")
+        with self.ready:
+            if not self.alive:
+                return
+            self.queue.append(line)
+            if len(self.queue) > 20000:
+                self.alive = False  # Hopelessly behind: it reconnects and reloads.
+            self.ready.notify()
+
+    def writer(self):
+        try:
+            while True:
+                with self.ready:
+                    while self.alive and not self.queue:
+                        self.ready.wait()
+                    if not self.alive:
+                        break
+                    line = self.queue.popleft()
+                self.conn.sendall(line)
+        except OSError:
+            pass
+        finally:
+            self.close()
+
+    def close(self):
+        with self.ready:
+            self.alive = False
+            self.ready.notify()
+        try:
+            self.conn.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+
+class Host:
+    """The long-lived process: one Bridge whose Claude runs outlive any app connection."""
+    def __init__(self, bridge_factory=None):
+        self.clients = []
+        self.lock = threading.Lock()
+        self.owners = {}  # sid -> the app that sent its last prompt (it serves the PC tools)
+        self.quiet_since = time.time()
+        self.bridge = (bridge_factory or Bridge)(send=self.route)
+
+    def route(self, event):
+        kind = event.get("type")
+        with self.lock:
+            clients = [c for c in self.clients if c.alive]
+        if kind in OWNED:
+            owner = self.owners.get(event.get("sid"))
+            if owner in clients:
+                owner.send(event)
+            elif kind == "desktop_request" and self.bridge.desktop:
+                self.bridge.desktop.result(event.get("id"), {"ok": False, "message": "Relay на компьютере сейчас не подключён к серверу, поэтому действие на ПК не выполнено."})
+            elif kind == "cluster_request" and clients:
+                clients[0].send(event)
+            return
+        asking = getattr(CLIENT, "value", None)
+        if asking is not None and kind not in BROADCAST:
+            asking.send(event)
+            return
+        for client in clients:
+            client.send(event)
+
+    def replay(self, client):
+        """A returning app learns what is still running and what is waiting for an answer."""
+        for run in list(self.bridge.runs.values()):
+            if run.busy and not run.closed:
+                client.send({"type": "run_state", "sid": run.sid, "busy": True, "queued": max(0, run.turns - 1)})
+                for ident, req in list(run.pending.items()):
+                    client.send({"type": "permission", "sid": run.sid, "id": ident,
+                                 "tool": req.get("tool_name", "Действие"), "input": req.get("input", {})})
+
+    def serve_client(self, conn):
+        client = HostClient(conn)
+        with self.lock:
+            self.clients.append(client)
+        CLIENT.value = client
+        try:
+            self.bridge.hello()
+            self.replay(client)
+            for line in conn.makefile("rb"):
+                if len(line) > MAX_REQUEST:
+                    continue
+                try:
+                    req = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(req, dict):
+                    continue
+                if req.get("op") == "prompt" and isinstance(req.get("sid"), str):
+                    self.owners[req["sid"]] = client
+                if req.get("op") in ("desktop_upload", "desktop_upload_end", "desktop_result"):
+                    self.bridge.dispatch(req)
+                else:
+                    threading.Thread(target=self.dispatch, args=(client, req), daemon=True).start()
+        except OSError:
+            pass
+        finally:
+            client.close()
+            with self.lock:
+                self.clients = [c for c in self.clients if c is not client]
+                if not self.clients:
+                    self.quiet_since = time.time()
+
+    def dispatch(self, client, req):
+        CLIENT.value = client
+        self.bridge.dispatch(req)
+
+    def idle(self):
+        with self.lock:
+            if self.clients:
+                return False
+        return not self.bridge.running() and time.time() - self.quiet_since > HOST_IDLE
+
+    def serve(self, path):
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        path = socket_name(path)
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        old = os.umask(0o177)
+        try:
+            listener.bind(path)
+        finally:
+            os.umask(old)
+        listener.listen(16)
+        listener.settimeout(30)
+        try:
+            while True:
+                try:
+                    conn, _ = listener.accept()
+                except socket.timeout:
+                    if self.idle():
+                        break
+                    continue
+                conn.settimeout(None)
+                threading.Thread(target=self.serve_client, args=(conn,), daemon=True).start()
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+            self.bridge.close()
+
+
+def host_dir():
+    path = Path.home() / ".cache/relay-desktop/host"
+    path.mkdir(parents=True, exist_ok=True)
+    os.chmod(path, 0o700)
+    return path
+
+
+def socket_name(path):
+    """Unix socket paths are limited to ~100 bytes: long ones are reached from their folder."""
+    path = str(path)
+    if len(path.encode()) < 100:
+        return path
+    os.chdir(os.path.dirname(path))
+    return os.path.basename(path)
+
+
+def connect(path):
+    conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        conn.connect(socket_name(path))
+        return conn
+    except OSError:
+        conn.close()
+        return None
+
+
+def ensure_host(source):
+    """The host of exactly this helper version, started detached if it is not running yet."""
+    digest = hashlib.sha256(source).hexdigest()[:16]
+    base = host_dir()
+    path = base / (digest + ".sock")
+    conn = connect(path)
+    if conn:
+        return conn
+    with open(base / (digest + ".lock"), "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        conn = connect(path)
+        if conn:
+            return conn
+        script = base / (digest + ".py")
+        if not script.exists() or script.read_bytes() != source:
+            temp = script.with_suffix(".tmp")
+            temp.write_bytes(source)
+            os.chmod(temp, 0o600)
+            os.replace(temp, script)
+        log = open(base / (digest + ".log"), "ab")
+        subprocess.Popen([sys.executable, "-u", str(script), "--relay-host", str(path)], cwd=str(Path.home()),
+                         stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True, close_fds=True)
+        log.close()
+        end = time.time() + 15
+        while time.time() < end:
+            conn = connect(path)
+            if conn:
+                return conn
+            time.sleep(0.1)
+    return None
+
+
+def attach(conn):
+    """The SSH side: pass lines both ways until either end goes away."""
+    def upstream():
+        try:
+            for line in sys.stdin.buffer:
+                conn.sendall(line)
+        except OSError:
+            pass
+        finally:
+            try:
+                conn.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+    threading.Thread(target=upstream, daemon=True).start()
+    out = sys.stdout.buffer
+    try:
+        for line in conn.makefile("rb"):
+            out.write(line)
+            out.flush()
+    except (OSError, BrokenPipeError):
+        pass
+    finally:
+        conn.close()
+
+
 def main():
+    if len(sys.argv) >= 3 and sys.argv[1] == "--relay-host":
+        globals()["RELAY_HOSTED"] = True
+        Host().serve(sys.argv[2])
+        return
+    source = globals().get("RELAY_SOURCE")
+    if isinstance(source, (bytes, bytearray)) and os.environ.get("RELAY_IN_PROCESS") != "1":
+        try:
+            conn = ensure_host(bytes(source))
+        except OSError:
+            conn = None
+        if conn:
+            attach(conn)
+            return
+    in_process()
+
+
+def in_process():
+    """Older apps, or no host could start: everything stops when this connection closes."""
     bridge = None
     try:
         bridge = Bridge()

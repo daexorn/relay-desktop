@@ -265,7 +265,7 @@ async fn run(
             format!(
                 "python3 -u -c {}",
                 shell_quote(&format!(
-                    "import sys; exec(compile(sys.stdin.buffer.read({}), '<relay>', 'exec'))",
+                    "import sys; RELAY_SOURCE = sys.stdin.buffer.read({}); exec(compile(RELAY_SOURCE, '<relay>', 'exec'))",
                     helper.len()
                 ))
             ),

@@ -3,6 +3,8 @@ package dev.relay.mobile
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.RepeatMode
@@ -600,7 +602,7 @@ fun SessionRow(vm: RelayViewModel, s: Session, rename: () -> Unit, move: () -> U
     val p = LocalPalette.current
     var menu by remember { mutableStateOf(false) }
     var confirm by remember { mutableStateOf(false) }
-    val busy = vm.chats[s.id]?.let { it.version >= 0 && it.transcript.busy } == true
+    val busy = vm.chats[s.id]?.let { it.version >= 0 && it.transcript.busy } == true || s.id in vm.running
     val selected = vm.selected == s.id
     Box(modifier) {
         Row(
@@ -612,7 +614,8 @@ fun SessionRow(vm: RelayViewModel, s: Session, rename: () -> Unit, move: () -> U
         ) {
             Column(Modifier.weight(1f)) {
                 Label(s.title, 15.sp, if (selected) p.text else p.mix(p.text, p.muted, 0.2f), maxLines = 1)
-                Label("${folderName(s.cwd)} · ${relative(s.modified)}", 12.sp, p.muted, maxLines = 1)
+                if (busy) Label("работает · ${folderName(s.cwd)}", 12.sp, p.accent, maxLines = 1)
+                else Label("${folderName(s.cwd)} · ${relative(s.modified)}", 12.sp, p.muted, maxLines = 1)
             }
             if (busy) Dots(p.accent)
             IconButton(Icons.Default.MoreVert, "Меню") { menu = true }
@@ -830,6 +833,27 @@ fun Composer(vm: RelayViewModel, chat: Chat) {
     val p = LocalPalette.current
     val busy = chat.version >= 0 && chat.transcript.busy
     val online = vm.link == Link.Online
+    val suggestions = slashMatches(chat.draft, vm.commands)
+    if (chat.queued.isNotEmpty()) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp).padding(top = 6.dp).clip(RoundedCornerShape(12.dp)).background(p.side).border(1.dp, p.line, RoundedCornerShape(12.dp)).padding(10.dp)) {
+            Label("В очереди: ${chat.queued.size} — Claude ответит по порядку, даже если закрыть приложение", 12.sp, p.muted)
+            for ((i, q) in chat.queued.withIndex()) Label("${i + 1}  $q", 13.sp, p.text, maxLines = 1, modifier = Modifier.padding(top = 4.dp))
+        }
+    }
+    AnimatedVisibility(suggestions.isNotEmpty()) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp).padding(top = 6.dp).heightIn(max = 260.dp).clip(RoundedCornerShape(12.dp)).background(p.side).border(1.dp, p.line, RoundedCornerShape(12.dp)).verticalScroll(rememberScrollState()).padding(4.dp)) {
+            for (c in suggestions.take(12)) {
+                Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).clickable { chat.draft = "/${c.name} " }.padding(horizontal = 10.dp, vertical = 7.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Label("/${c.name}", 14.sp, p.accent, FontWeight.Medium)
+                        if (c.hint.isNotEmpty()) Label("  ${c.hint}", 12.sp, p.muted, maxLines = 1)
+                    }
+                    if (c.description.isNotEmpty()) Label(c.description, 12.sp, p.muted, maxLines = 2)
+                }
+            }
+            Label("/model, /mode и /stop срабатывают сразу, даже во время ответа", 11.sp, p.muted, modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp))
+        }
+    }
     Column(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp).clip(RoundedCornerShape(16.dp)).background(p.surface).border(1.dp, p.line, RoundedCornerShape(16.dp)).padding(start = 14.dp, end = 8.dp, top = 10.dp, bottom = 6.dp)) {
         BasicTextField(
             value = chat.draft,
@@ -837,24 +861,33 @@ fun Composer(vm: RelayViewModel, chat: Chat) {
             textStyle = TextStyle(color = p.text, fontSize = 15.sp),
             cursorBrush = SolidColor(p.accent),
             modifier = Modifier.fillMaxWidth().heightIn(min = 24.dp, max = 160.dp),
-            decorationBox = { inner -> Box { if (chat.draft.isEmpty()) Label(if (online) "Напиши задачу…" else "Нет связи с сервером", 15.sp, p.muted); inner() } },
+            decorationBox = { inner -> Box { if (chat.draft.isEmpty()) Label(when { !online -> "Нет связи с сервером"; busy && vm.canSend(chat) -> "Добавь сообщение — Claude ответит следом…"; busy -> "Claude отвечает…"; else -> "Напиши задачу… или / для команд" }, 15.sp, p.muted); inner() } },
         )
         Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             FlowRow(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                Selector(when (chat.model) { "opus" -> "Opus"; "sonnet" -> "Sonnet"; else -> "Модель: авто" }, listOf("default" to "Модель сервера", "sonnet" to "Sonnet", "opus" to "Opus")) { chat.model = it }
+                val models = vm.models.ifEmpty { listOf(ModelInfo("default", "Модель сервера", ""), ModelInfo("fable", "Fable", ""), ModelInfo("opus", "Opus", ""), ModelInfo("sonnet", "Sonnet", ""), ModelInfo("haiku", "Haiku", "")) }
+                Selector(modelLabel(vm.models, chat.model), models.map { it.value to if (it.value == "default") "Авто · ${it.description}".trimEnd(' ', '·') else it.name }) { chat.model = it; vm.liveChange(chat) }
                 Selector(when (chat.mode) { "auto" -> "Авто"; "acceptEdits" -> "Правки файлов"; "plan" -> "План"; else -> "С подтверждением" },
-                    listOf("auto" to "Авто", "manual" to "С подтверждением", "acceptEdits" to "Правки файлов", "plan" to "Планирование"), accent = chat.mode == "auto") { chat.mode = it }
+                    listOf("auto" to "Авто", "manual" to "С подтверждением", "acceptEdits" to "Правки файлов", "plan" to "Планирование"), accent = chat.mode == "auto") { chat.mode = it; vm.liveChange(chat) }
                 Selector("Глубина: " + if (chat.effort == "default") "авто" else chat.effort,
                     listOf("default" to "Автоматически", "low" to "Низкая", "medium" to "Средняя", "high" to "Высокая", "xhigh" to "Очень высокая", "max" to "Максимальная")) { chat.effort = it }
             }
-            val ready = online && (busy || chat.draft.isNotBlank())
-            Box(
-                Modifier.size(38.dp).clip(CircleShape).background(if (busy) p.line else if (ready) p.accent else p.line)
-                    .clickable(enabled = ready) { if (busy) vm.stop() else vm.submit() },
-                contentAlignment = Alignment.Center,
-            ) {
-                if (busy) Box(Modifier.size(12.dp).clip(RoundedCornerShape(3.dp)).background(p.text))
-                else Icon(Icons.AutoMirrored.Filled.Send, "Отправить", tint = if (ready) (if (p.light) p.base else Color(0xFF111114)) else p.muted, modifier = Modifier.size(18.dp))
+            val ready = chat.draft.isNotBlank() && (vm.canSend(chat) || chat.draft.trim().startsWith("/"))
+            if (busy) {
+                Box(
+                    Modifier.size(38.dp).clip(CircleShape).background(p.line).clickable { vm.stop() },
+                    contentAlignment = Alignment.Center,
+                ) { Box(Modifier.size(12.dp).clip(RoundedCornerShape(3.dp)).background(p.text)) }
+                Spacer(Modifier.width(6.dp))
+            }
+            if (!busy || ready) {
+                Box(
+                    Modifier.size(38.dp).clip(CircleShape).background(if (ready) p.accent else p.line)
+                        .clickable(enabled = ready) { vm.submit() },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(Icons.AutoMirrored.Filled.Send, "Отправить", tint = if (ready) (if (p.light) p.base else Color(0xFF111114)) else p.muted, modifier = Modifier.size(18.dp))
+                }
             }
         }
     }
@@ -901,7 +934,7 @@ fun SettingsScreen(vm: RelayViewModel) {
                 Spacer(Modifier.height(8.dp))
                 Field(name, { name = it; vm.chooseActor(it) }, "Например, champ")
                 Spacer(Modifier.height(24.dp))
-                Label("Relay для Android 0.1.0 · тот же сервер и тот же помощник, что у десктопа", 12.sp, p.muted)
+                Label("Relay для Android 0.2.0 · тот же сервер и тот же помощник, что у десктопа", 12.sp, p.muted)
             }
         }
     }

@@ -37,6 +37,12 @@ struct Remote {
     sessions_error: String,
     /// Names, pins and folders change on other computers too; the list is polled.
     sessions_polled: Option<Instant>,
+    /// 4 and later: Claude runs in a host process on the server and outlives the app.
+    protocol: u64,
+    /// Sessions Claude is answering in right now, on any computer.
+    running: std::collections::HashSet<String>,
+    models: Vec<crate::model::ModelInfo>,
+    commands: Vec<crate::model::CommandInfo>,
 }
 struct Chat {
     sid: String,
@@ -913,6 +919,7 @@ impl RelayApp {
                 r.connected = true;
                 r.connecting = false;
                 r.version = value["version"].as_str().unwrap_or("Claude Code").into();
+                r.protocol = value["protocol"].as_u64().unwrap_or(0);
                 r.home = value["home"].as_str().unwrap_or("~").into();
                 r.usage_requested = Some(Instant::now());
                 r.sessions_requested = Some(Instant::now());
@@ -953,6 +960,32 @@ impl RelayApp {
                 }
                 self.save();
             }
+            "catalog" => {
+                let r = self.remote.entry(server.clone()).or_default();
+                r.models = serde_json::from_value(value["models"].clone()).unwrap_or_default();
+                r.commands = serde_json::from_value(value["commands"].clone()).unwrap_or_default();
+            }
+            "run_state" => {
+                let sid = value["sid"].as_str().unwrap_or("").to_owned();
+                let busy = value["busy"] == true;
+                let r = self.remote.entry(server.clone()).or_default();
+                if busy {
+                    r.running.insert(sid.clone());
+                } else {
+                    r.running.remove(&sid);
+                }
+                if let Some(c) = self.chats.get_mut(&key(&server, &sid)) {
+                    if busy && !c.busy && c.loaded {
+                        c.busy = true;
+                        if c.status.is_empty() {
+                            c.status = "Работает".into();
+                        }
+                    } else if !busy && c.busy {
+                        c.busy = false;
+                        c.status.clear();
+                    }
+                }
+            }
             "usage" => {
                 if let Ok(usage) = serde_json::from_value(value.clone()) {
                     self.remote.entry(server.clone()).or_default().usage = usage;
@@ -979,6 +1012,9 @@ impl RelayApp {
                 remote.sessions_loaded = true;
                 remote.sessions_requested = None;
                 remote.sessions_error.clear();
+                if remote.protocol >= 4 {
+                    remote.running = sessions.iter().filter(|s| s.running).map(|s| s.id.clone()).collect();
+                }
                 for s in &sessions {
                     if let Some(c) = self.chats.get_mut(&key(&server, &s.id)) {
                         c.title = s.title.clone();
@@ -1038,6 +1074,12 @@ impl RelayApp {
                         c.messages = messages;
                         c.loading = false;
                         c.loaded = true;
+                        // Opened while Claude is still answering, maybe started from another computer.
+                        if self.remote.get(&server).is_some_and(|r| r.running.contains(sid)) {
+                            c.busy = true;
+                            c.user_at = c.messages.iter().rposition(|m| m.role == "user").unwrap_or(0);
+                            c.status = "Работает".into();
+                        }
                     }
                 }
             }
@@ -1118,12 +1160,61 @@ impl RelayApp {
                 }
             }
         }
+        if self.local_command(&server, &k) {
+            return;
+        }
         let c = self.chats.get_mut(&k).unwrap();
         if c.busy {
             c.enqueue_draft();
             return;
         }
         self.send_to_chat(server, k);
+    }
+    /// Commands that act at once, also in the middle of an answer: `/model`, `/mode`, `/stop`.
+    /// Every other `/command` goes to Claude Code like a message.
+    fn local_command(&mut self, server: &Server, k: &str) -> bool {
+        let models = self.remote.get(&server.id).map(|r| r.models.clone()).unwrap_or_default();
+        let Some(c) = self.chats.get_mut(k) else {
+            return false;
+        };
+        let text = c.draft.trim().to_owned();
+        let (name, arg) = text.split_once(' ').map_or((text.as_str(), ""), |(a, b)| (a, b.trim()));
+        let done = match name {
+            "/model" if !arg.is_empty() => match resolve_model(&models, arg) {
+                Some(value) => {
+                    c.model = value.clone();
+                    self.controller.send(&server.id, json!({"op":"control","sid":c.sid,"action":"model","value":value}));
+                    self.notice = format!("Модель: {}", model_label(&models, &c.model));
+                    true
+                }
+                None => {
+                    c.error = format!("Нет такой модели: {arg}. Доступны: {}", models.iter().map(|m| m.value.as_str()).collect::<Vec<_>>().join(", "));
+                    true
+                }
+            },
+            "/mode" if !arg.is_empty() => {
+                let mode = match arg {
+                    "auto" | "авто" => "auto",
+                    "plan" | "план" => "plan",
+                    "edits" | "acceptEdits" | "правки" => "acceptEdits",
+                    _ => "manual",
+                };
+                c.mode = mode.into();
+                self.controller.send(&server.id, json!({"op":"control","sid":c.sid,"action":"mode","value":mode}));
+                true
+            }
+            "/stop" => {
+                self.controller.send(&server.id, json!({"op":"stop","sid":c.sid}));
+                c.status = "Останавливаем…".into();
+                c.queue_paused = true;
+                true
+            }
+            _ => false,
+        };
+        if done {
+            c.draft.clear();
+        }
+        done
     }
     fn send_to_chat(&mut self, server: Server, k: String) {
         if self
@@ -1737,7 +1828,8 @@ impl RelayApp {
         let mut action = None;
         let k = key(server, &session.id);
         let selected = self.selected_chat.get(server) == Some(&session.id);
-        let busy = self.chats.get(&k).is_some_and(|c| c.busy);
+        let busy = self.chats.get(&k).is_some_and(|c| c.busy)
+            || self.remote.get(server).is_some_and(|r| r.running.contains(&session.id));
         let title = self.cluster_label(server, &session.id).unwrap_or_else(|| session.title.clone());
         if let Some((sid, text)) = self.renaming.clone().filter(|(sid, _)| *sid == session.id) {
             let mut text = text;
@@ -1771,7 +1863,11 @@ impl RelayApp {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().interact_size.y = 14.;
                     let place = folder_name(&session.cwd);
-                    let meta = format!("{place} · {}", relative(session.modified));
+                    let meta = if busy {
+                        format!("работает · {place}")
+                    } else {
+                        format!("{place} · {}", relative(session.modified))
+                    };
                     let width = ui.available_width() - 30. - if busy { 32. } else { 0. };
                     let mut job = egui::text::LayoutJob::simple(meta, FontId::proportional(11.5), p.muted, width);
                     job.wrap.max_rows = 1;
@@ -2300,6 +2396,11 @@ impl RelayApp {
         ui.add_space(4.);
         let mut tests = server.tests.clone();
         self.game_test_cards(ui, &server.id, p);
+        let (models, commands, live) = self
+            .remote
+            .get(&server.id)
+            .map(|r| (r.models.clone(), r.commands.clone(), r.protocol >= 4))
+            .unwrap_or_default();
         let chat = self.chats.get_mut(k).unwrap();
         if let Some((sent, total)) = chat.upload_progress {
             let progress = sent as f32 / total.max(1) as f32;
@@ -2401,6 +2502,54 @@ impl RelayApp {
                         }
                     }
                 });
+            ui.add_space(6.);
+        }
+        let suggestions = slash_matches(&chat.draft, &commands);
+        if !suggestions.is_empty() {
+            let tab = ui.memory(|m| m.has_focus(egui::Id::new("prompt-field")))
+                && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab));
+            let mut chosen = tab.then(|| suggestions[0].name.clone());
+            egui::Frame::new()
+                .fill(p.side)
+                .stroke(Stroke::new(1_f32, p.line))
+                .corner_radius(12.)
+                .inner_margin(6)
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    for (i, c) in suggestions.iter().take(8).enumerate() {
+                        let row = egui::Frame::new()
+                            .inner_margin(egui::Margin::symmetric(8, 5))
+                            .corner_radius(8.)
+                            .fill(if i == 0 { design::mix(p.side, p.line, 0.6) } else { Color32::TRANSPARENT })
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.horizontal(|ui| {
+                                    label(ui, format!("/{}", c.name), 13., accent());
+                                    if !c.hint.is_empty() {
+                                        label(ui, &c.hint, 12., p.muted);
+                                    }
+                                    let mut job = egui::text::LayoutJob::simple(c.description.clone(), FontId::proportional(12.), p.muted, ui.available_width());
+                                    job.wrap.max_rows = 1;
+                                    job.wrap.overflow_character = Some('…');
+                                    ui.label(job);
+                                });
+                            })
+                            .response;
+                        if ui.interact(row.rect, ui.id().with(("slash", i)), egui::Sense::click()).clicked() {
+                            chosen = Some(c.name.clone());
+                        }
+                    }
+                    label(ui, "Tab — подставить · /model, /mode и /stop срабатывают сразу, даже во время ответа", 11., p.muted);
+                });
+            if let Some(name) = chosen {
+                chat.draft = format!("/{name} ");
+                ui.memory_mut(|m| m.request_focus(egui::Id::new("prompt-field")));
+                if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), egui::Id::new("prompt-field")) {
+                    let end = egui::text::CCursor::new(chat.draft.chars().count());
+                    state.cursor.set_char_range(Some(egui::text::CCursorRange::one(end)));
+                    state.store(ui.ctx(), egui::Id::new("prompt-field"));
+                }
+            }
             ui.add_space(6.);
         }
         let previous = (chat.model.clone(), chat.mode.clone(), chat.effort.clone());
@@ -2509,7 +2658,7 @@ impl RelayApp {
                         attach = true;
                     }
                     if !compact {
-                        composer_selectors(ui, chat, &mut tests, p);
+                        composer_selectors(ui, chat, &mut tests, &models, p);
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 8.;
@@ -2548,10 +2697,19 @@ impl RelayApp {
                 });
                 if compact {
                     ui.add_space(4.);
-                    ui.horizontal_wrapped(|ui| composer_selectors(ui, chat, &mut tests, p));
+                    ui.horizontal_wrapped(|ui| composer_selectors(ui, chat, &mut tests, &models, p));
                 }
             });
         let current = (chat.model.clone(), chat.mode.clone(), chat.effort.clone());
+        // With the server host, model and mode switch even while Claude is answering.
+        if live && chat.busy {
+            if previous.0 != current.0 {
+                self.controller.send(&server.id, json!({"op":"control","sid":chat.sid,"action":"model","value":current.0}));
+            }
+            if previous.1 != current.1 {
+                self.controller.send(&server.id, json!({"op":"control","sid":chat.sid,"action":"mode","value":current.1}));
+            }
+        }
         if previous.1 != current.1 {
             self.controller.send(&server.id,json!({"op":"_desktop_policy","sid":chat.sid,"auto":server.local_control && current.1=="auto"}));
         }
@@ -3601,7 +3759,7 @@ impl RelayApp {
         }
         if self.close_confirm {
             let modal=egui::Modal::new(egui::Id::new("close-confirm")).area(egui::Modal::default_area(egui::Id::new("close-confirm" )).anchor(egui::Align2::CENTER_CENTER,Vec2::new(0.,(1.-modal_t)*9.))).frame(egui::Frame::new().fill(p.surface).corner_radius(14.).inner_margin(22.)).show(ctx,|ui|{
-            ui.set_width(440.);label(ui,"Есть незавершённые задачи",18.,p.text);ui.add_space(12.);label(ui,"Можно остаться или остановить ответы и удалить неотправленную очередь. Сессии на сервере сохранятся.",14.,p.muted);ui.add_space(20.);ui.horizontal(|ui|{if design::button(ui,"Остаться",None,Kind::Secondary,p,Vec2::new(130.,34.)).clicked(){self.close_confirm=false;}if design::button(ui,"Остановить и закрыть",None,Kind::Primary,p,Vec2::new(240.,34.)).clicked(){ctx.send_viewport_cmd(egui::ViewportCommand::Close);self.close_confirm=false;for chat in self.chats.values_mut(){chat.busy=false;chat.queue.clear();}}});
+            ui.set_width(440.);label(ui,"Есть незавершённые задачи",18.,p.text);ui.add_space(12.);label(ui,"Неотправленная очередь сообщений будет удалена. На серверах с новым помощником Claude доведёт начатые ответы без приложения, на старых — ответы остановятся.",14.,p.muted);ui.add_space(20.);ui.horizontal(|ui|{if design::button(ui,"Остаться",None,Kind::Secondary,p,Vec2::new(130.,34.)).clicked(){self.close_confirm=false;}if design::button(ui,"Закрыть",None,Kind::Primary,p,Vec2::new(240.,34.)).clicked(){ctx.send_viewport_cmd(egui::ViewportCommand::Close);self.close_confirm=false;for chat in self.chats.values_mut(){chat.busy=false;chat.queue.clear();}}});
         });
             if modal.should_close() {
                 self.close_confirm = false;
@@ -3647,6 +3805,21 @@ impl RelayApp {
                 sessions_retries: 0,
                 sessions_error: String::new(),
                 sessions_polled: None,
+                protocol: 4,
+                running: std::collections::HashSet::new(),
+                models: serde_json::from_value(json!([
+                    {"value":"default","displayName":"Default (recommended)","description":"Opus 5.5 · Best for everyday, complex tasks"},
+                    {"value":"opus","displayName":"Opus 5.5","description":"For complex work and everyday tasks"},
+                    {"value":"sonnet","displayName":"Sonnet 5.5","description":"Most efficient for simpler tasks"},
+                    {"value":"claude-fable-5-2","displayName":"Fable 5.2","description":"For your toughest challenges"},
+                    {"value":"haiku","displayName":"Haiku 5.5","description":"Fastest for quick answers"}
+                ])).unwrap_or_default(),
+                commands: serde_json::from_value(json!([
+                    {"name":"compact","description":"Сжать историю разговора","hint":"[что сохранить]"},
+                    {"name":"context","description":"Показать, чем занят контекст","hint":""},
+                    {"name":"model","description":"Сменить модель","hint":"[модель]"},
+                    {"name":"code-review","description":"Проверить изменения","hint":""}
+                ])).unwrap_or_default(),
                 folders: vec![
                     crate::model::SessionFolder { id: "f-ships".into(), name: "Корабли".into() },
                     crate::model::SessionFolder { id: "f-site".into(), name: "Сайт и лаунчер".into() },
@@ -3712,7 +3885,55 @@ impl RelayApp {
         self.chats.insert(key(&s.id, &c.sid), c);
     }
 }
-fn composer_selectors(ui: &mut egui::Ui, chat: &mut Chat, tests: &mut String, p: Palette) {
+/// Commands for the `/` popup: the draft is a single word starting with `/`.
+fn slash_matches<'a>(draft: &str, commands: &'a [crate::model::CommandInfo]) -> Vec<&'a crate::model::CommandInfo> {
+    let Some(typed) = draft.strip_prefix('/') else {
+        return vec![];
+    };
+    if typed.contains(char::is_whitespace) {
+        return vec![];
+    }
+    let typed = typed.to_lowercase();
+    let mut found: Vec<_> = commands.iter().filter(|c| c.name.to_lowercase().starts_with(&typed)).collect();
+    found.extend(commands.iter().filter(|c| !c.name.to_lowercase().starts_with(&typed) && c.name.to_lowercase().contains(&typed)));
+    if found.len() == 1 && found[0].name == typed {
+        return vec![];
+    }
+    found
+}
+
+/// `fable`, `Fable 5.2` or a full id → the value Claude Code accepts.
+fn resolve_model(models: &[crate::model::ModelInfo], typed: &str) -> Option<String> {
+    let t = typed.to_lowercase();
+    if models.is_empty() {
+        return Some(typed.to_owned());
+    }
+    models
+        .iter()
+        .find(|m| m.value.to_lowercase() == t || m.display_name.to_lowercase() == t)
+        .or_else(|| models.iter().find(|m| m.display_name.to_lowercase().starts_with(&t) || m.value.to_lowercase().starts_with(&t)))
+        .map(|m| m.value.clone())
+}
+
+fn model_label(models: &[crate::model::ModelInfo], value: &str) -> String {
+    if value == "default" {
+        return "Модель: авто".into();
+    }
+    models
+        .iter()
+        .find(|m| m.value == value)
+        .map(|m| m.display_name.clone())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| match value {
+            "opus" => "Opus".into(),
+            "sonnet" => "Sonnet".into(),
+            "haiku" => "Haiku".into(),
+            "fable" => "Fable".into(),
+            other => other.into(),
+        })
+}
+
+fn composer_selectors(ui: &mut egui::Ui, chat: &mut Chat, tests: &mut String, models: &[crate::model::ModelInfo], p: Palette) {
     ui.scope(|ui| {
         ui.spacing_mut().button_padding = Vec2::new(8., 5.);
         ui.spacing_mut().interact_size.y = 28.;
@@ -3730,23 +3951,22 @@ fn composer_selectors(ui: &mut egui::Ui, chat: &mut Chat, tests: &mut String, p:
         v.widgets.open.weak_bg_fill = p.line;
         egui::ComboBox::from_id_salt("model-selector")
             .selected_text(
-                RichText::new(match chat.model.as_str() {
-                    "opus" => "Opus",
-                    "sonnet" => "Sonnet",
-                    _ => "Модель: авто",
-                })
+                RichText::new(model_label(models, &chat.model))
                 .size(12.5)
                 .color(p.muted),
             )
             .width(0.)
             .icon(design::combo_icon)
             .show_ui(ui, |ui| {
-                for (id, name) in [
-                    ("default", "Модель сервера"),
-                    ("sonnet", "Sonnet"),
-                    ("opus", "Opus"),
-                ] {
-                    ui.selectable_value(&mut chat.model, id.into(), name);
+                if models.is_empty() {
+                    for (id, name) in [("default", "Модель сервера"), ("fable", "Fable"), ("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku")] {
+                        ui.selectable_value(&mut chat.model, id.into(), name);
+                    }
+                }
+                for m in models {
+                    let name = if m.value == "default" { format!("Авто · {}", m.description) } else { m.display_name.clone() };
+                    ui.selectable_value(&mut chat.model, m.value.clone(), name)
+                        .on_hover_text(&m.description);
                 }
             });
         egui::ComboBox::from_id_salt("mode-selector")
@@ -4380,7 +4600,11 @@ impl eframe::App for RelayApp {
         }
         if !self.demo
             && ctx.input(|i| i.viewport().close_requested())
-            && self.chats.values().any(|c| c.busy || !c.queue.is_empty())
+            && self.chats.iter().any(|(k, c)| {
+                // Hosted servers keep answering without the app; only unsent messages would be lost.
+                let hosted = k.split_once('/').and_then(|(server, _)| self.remote.get(server)).is_some_and(|r| r.protocol >= 4);
+                (c.busy && !hosted) || !c.queue.is_empty()
+            })
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.close_confirm = true;
@@ -4466,6 +4690,25 @@ impl eframe::App for RelayApp {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn slash_popup_and_model_names() {
+        let commands: Vec<crate::model::CommandInfo> = serde_json::from_value(json!([
+            {"name":"compact","description":"","hint":""},{"name":"context"},{"name":"code-review"}
+        ])).unwrap();
+        let names = |d: &str| slash_matches(d, &commands).iter().map(|c| c.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names("/co"), ["compact", "context", "code-review"]);
+        assert_eq!(names("/review"), ["code-review"]);
+        assert!(names("/compact").is_empty() && names("/compact now").is_empty() && names("compact").is_empty());
+        let models: Vec<crate::model::ModelInfo> = serde_json::from_value(json!([
+            {"value":"default","displayName":"Default"},{"value":"claude-fable-5-2","displayName":"Fable 5.2"},{"value":"opus","displayName":"Opus 5.5"}
+        ])).unwrap();
+        assert_eq!(resolve_model(&models, "fable").as_deref(), Some("claude-fable-5-2"));
+        assert_eq!(resolve_model(&models, "Opus 5.5").as_deref(), Some("opus"));
+        assert_eq!(resolve_model(&models, "gpt"), None);
+        assert_eq!(model_label(&models, "claude-fable-5-2"), "Fable 5.2");
+        assert_eq!(model_label(&[], "fable"), "Fable");
+    }
+
     use super::*;
     #[test]
     fn short_and_multiline_messages_share_the_right_edge() {

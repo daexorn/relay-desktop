@@ -41,7 +41,34 @@ data class Session(
     val pinned: Double = 0.0,
     val folder: String = "",
     val autoTitle: String = "",
+    val running: Boolean = false,
 )
+
+/** A model or slash command exactly as the server's Claude Code lists it. */
+data class ModelInfo(val value: String, val name: String, val description: String)
+data class CommandInfo(val name: String, val description: String, val hint: String)
+
+fun modelLabel(models: List<ModelInfo>, value: String): String = when {
+    value == "default" -> "Модель: авто"
+    else -> models.firstOrNull { it.value == value }?.name?.takeIf { it.isNotEmpty() }
+        ?: value.replaceFirstChar { it.uppercase() }
+}
+
+/** `fable`, `Fable 5.2` or a full id → the value Claude Code accepts; null when unknown. */
+fun resolveModel(models: List<ModelInfo>, typed: String): String? {
+    val t = typed.lowercase()
+    if (models.isEmpty()) return typed
+    return (models.firstOrNull { it.value.lowercase() == t || it.name.lowercase() == t }
+        ?: models.firstOrNull { it.name.lowercase().startsWith(t) || it.value.lowercase().startsWith(t) })?.value
+}
+
+/** Commands for the `/` popup while the draft is one word starting with `/`. */
+fun slashMatches(draft: String, commands: List<CommandInfo>): List<CommandInfo> {
+    if (!draft.startsWith("/") || draft.any { it.isWhitespace() }) return emptyList()
+    val t = draft.drop(1).lowercase()
+    val found = commands.filter { it.name.lowercase().startsWith(t) } + commands.filter { !it.name.lowercase().startsWith(t) && it.name.lowercase().contains(t) }
+    return if (found.size == 1 && found[0].name == t) emptyList() else found
+}
 
 data class Folder(val id: String, val name: String)
 

@@ -37,7 +37,7 @@ class UiFlowTest {
         vm.handle(org.json.JSONObject().put("type", "hello").put("home", "/root"))
         vm.newChat()
         rule.setContent { RelayApp(vm) }
-        rule.onNodeWithText("Напиши задачу…").performTextInput("Привет")
+        rule.onNodeWithText("Напиши задачу… или / для команд").performTextInput("Привет")
         rule.waitForIdle()
         assertEquals("Привет", vm.chat()?.draft)
         rule.onNodeWithText("С чего начнём?").assertExists()

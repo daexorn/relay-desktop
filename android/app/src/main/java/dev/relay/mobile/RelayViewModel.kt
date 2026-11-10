@@ -31,6 +31,8 @@ class Chat(val sid: String, cwd: String, title: String, model: String, mode: Str
     var version by mutableIntStateOf(0)
     val transcript = Transcript()
     val permissions = mutableStateListOf<Permission>()
+    /** Sent while Claude was answering: Claude Code answers them in order, one after another. */
+    val queued = mutableStateListOf<String>()
     fun changed() {
         version++
     }
@@ -63,6 +65,15 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
     var folders by mutableStateOf<List<Folder>>(emptyList())
         private set
     var sessionsLoaded by mutableStateOf(false)
+        private set
+    /** 4 and later: Claude runs in a host process on the server and keeps working without the app. */
+    var protocol by mutableIntStateOf(0)
+        private set
+    var running by mutableStateOf<Set<String>>(emptySet())
+        private set
+    var models by mutableStateOf<List<ModelInfo>>(emptyList())
+        private set
+    var commands by mutableStateOf<List<CommandInfo>>(emptyList())
         private set
     var collapsed by mutableStateOf(store.collapsed)
         private set
@@ -195,6 +206,7 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
             "hello" -> {
                 link = Link.Online
                 home = value.optString("home", "~")
+                protocol = value.optInt("protocol", 0)
                 val c = current
                 if (c != null && c.fingerprint == null && bridge?.fingerprint != null) {
                     val trusted = c.copy(fingerprint = bridge?.fingerprint, cwd = if (c.cwd == "~") home else c.cwd)
@@ -209,8 +221,10 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                 val rows = value.optJSONArray("sessions") ?: JSONArray()
                 sessions = (0 until rows.length()).mapNotNull { rows.optJSONObject(it) }.map {
                     Session(it.optString("id"), it.optString("title"), it.optString("cwd"), it.optDouble("modified", 0.0),
-                        it.optDouble("pinned", 0.0).let { p -> if (p.isNaN()) 0.0 else p }, it.optString("folder"), it.optString("auto_title"))
-                }.filter { it.id.isNotEmpty() }
+                        it.optDouble("pinned", 0.0).let { p -> if (p.isNaN()) 0.0 else p }, it.optString("folder"), it.optString("auto_title"),
+                        it.optBoolean("running"))
+                }.filter { it.id.isNotEmpty() }.distinctBy { it.id }
+                if (protocol >= 4) running = sessions.filter { it.running }.map { it.id }.toSet()
                 val f = value.optJSONArray("folders")
                 if (f != null) folders = (0 until f.length()).mapNotNull { f.optJSONObject(it) }.map { Folder(it.optString("id"), it.optString("name")) }
                 sessionsLoaded = true
@@ -221,14 +235,51 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                     c.transcript.loadHistory(value.optJSONArray("messages") ?: JSONArray())
                     c.loading = false
                     c.loaded = true
+                    // Opened while Claude is still answering, maybe started from another device.
+                    if (sid in running) {
+                        c.transcript.busy = true
+                        c.transcript.userAt = c.transcript.messages.indexOfLast { it.role == "user" }.coerceAtLeast(0)
+                        c.transcript.status = "Работает"
+                    }
                     c.changed()
                 }
             }
             "claude" -> chats[sid]?.let { c ->
                 val data = value.optJSONObject("data") ?: return@let
                 c.transcript.reduce(data)
+                if (data.optString("type") == "result" && c.queued.isNotEmpty()) {
+                    // The next queued message is the one Claude answers now.
+                    c.transcript.userAt = c.transcript.messages.size
+                    c.transcript.messages.add(Message("user", c.queued.removeAt(0)))
+                    c.transcript.busy = true
+                    c.transcript.status = "Думает над ответом"
+                }
                 c.changed()
                 if (data.optString("type") == "result") send(JSONObject().put("op", "sessions"))
+            }
+            "catalog" -> {
+                models = value.optJSONArray("models")?.let { a -> (0 until a.length()).mapNotNull { a.optJSONObject(it) }.map {
+                    ModelInfo(it.optString("value"), it.optString("displayName"), it.optString("description"))
+                } }.orEmpty().filter { it.value.isNotEmpty() }
+                commands = value.optJSONArray("commands")?.let { a -> (0 until a.length()).mapNotNull { a.optJSONObject(it) }.map {
+                    CommandInfo(it.optString("name"), it.optString("description"), it.optString("hint"))
+                } }.orEmpty().filter { it.name.isNotEmpty() }
+            }
+            "run_state" -> {
+                val busy = value.optBoolean("busy")
+                running = if (busy) running + sid else running - sid
+                chats[sid]?.let { c ->
+                    if (busy && !c.transcript.busy && c.loaded) {
+                        c.transcript.busy = true
+                        if (c.transcript.status.isEmpty()) c.transcript.status = "Работает"
+                        c.changed()
+                    } else if (!busy && c.transcript.busy) {
+                        c.transcript.busy = false
+                        c.transcript.status = ""
+                        c.queued.clear()
+                        c.changed()
+                    }
+                }
             }
             "permission" -> chats[sid]?.permissions?.add(
                 Permission(value.optString("id"), value.optString("tool", "Действие"), value.optJSONObject("input") ?: JSONObject())
@@ -241,6 +292,7 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                 c.transcript.busy = false
                 c.transcript.status = ""
                 c.permissions.clear()
+                c.queued.clear()
                 c.changed()
             }
             "error" -> {
@@ -304,15 +356,59 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         screen = Screen.Chat
     }
 
+    /** Can a message go now? While Claude answers, only a server with the host queues it. */
+    fun canSend(c: Chat) = link == Link.Online && (!c.transcript.busy || protocol >= 4)
+
+    /** `/model`, `/mode` and `/stop` act at once, also mid-answer; other commands go to Claude Code. */
+    private fun localCommand(c: Chat, text: String): Boolean {
+        val name = text.substringBefore(' ')
+        val arg = text.substringAfter(' ', "").trim()
+        when {
+            name == "/model" && arg.isNotEmpty() -> {
+                val value = resolveModel(models, arg)
+                if (value == null) {
+                    c.transcript.error = "Нет такой модели: $arg. Доступны: " + models.joinToString { it.value }
+                } else {
+                    c.model = value
+                    send(JSONObject().put("op", "control").put("sid", c.sid).put("action", "model").put("value", value))
+                    notice = "Модель: " + modelLabel(models, value)
+                }
+            }
+            name == "/mode" && arg.isNotEmpty() -> {
+                c.mode = when (arg) { "auto", "авто" -> "auto"; "plan", "план" -> "plan"; "edits", "acceptEdits", "правки" -> "acceptEdits"; else -> "manual" }
+                send(JSONObject().put("op", "control").put("sid", c.sid).put("action", "mode").put("value", c.mode))
+            }
+            name == "/stop" -> stop()
+            else -> return false
+        }
+        c.draft = ""
+        c.changed()
+        return true
+    }
+
+    /** Model or mode picked while Claude answers: switch it live. */
+    fun liveChange(c: Chat) {
+        if (protocol >= 4 && c.transcript.busy) {
+            send(JSONObject().put("op", "control").put("sid", c.sid).put("action", "model").put("value", c.model))
+            send(JSONObject().put("op", "control").put("sid", c.sid).put("action", "mode").put("value", c.mode))
+        }
+    }
+
     fun submit() {
         val c = chat() ?: return
         val text = c.draft.trim()
-        if (text.isEmpty() || c.transcript.busy || link != Link.Online) return
+        if (text.isEmpty() || link != Link.Online) return
+        if (localCommand(c, text)) return
+        if (!canSend(c)) return
         c.transcript.error = ""
-        c.transcript.userAt = c.transcript.messages.size
-        c.transcript.messages.add(Message("user", text))
-        c.transcript.busy = true
-        c.transcript.status = "Отправляем"
+        if (c.transcript.busy) {
+            c.queued.add(text)
+        } else {
+            c.transcript.userAt = c.transcript.messages.size
+            c.transcript.messages.add(Message("user", text))
+            c.transcript.busy = true
+            c.transcript.status = "Отправляем"
+        }
         if (c.title == "Новая сессия") c.title = text.take(60)
         c.draft = ""
         c.changed()

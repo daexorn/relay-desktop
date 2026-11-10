@@ -22,6 +22,7 @@ class BridgeProtocolTest {
         val home = Files.createTempDirectory("relay-home").toFile()
         val process = ProcessBuilder("sh", "-c", Bridge.command(helper.size)).apply {
             environment()["HOME"] = home.path
+            environment()["RELAY_IN_PROCESS"] = "1"
             environment()["RELAY_BOARD_DIR"] = File(home, "board").path
             redirectErrorStream(false)
         }.start()
