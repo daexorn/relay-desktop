@@ -153,6 +153,10 @@ struct Trust {
     answer: tokio::sync::oneshot::Sender<bool>,
 }
 pub struct RelayApp {
+    /// Drafts and queued messages from the last run, not yet put back into a chat.
+    pending: crate::model::PendingStore,
+    pending_saved: crate::model::PendingStore,
+    pending_checked: Option<Instant>,
     #[cfg(test)]
     test_no_save: bool,
     settings: Settings,
@@ -258,6 +262,9 @@ impl RelayApp {
             capture_at: 0.0,
             capture_requested: false,
             close_confirm: false,
+            pending: if demo { Default::default() } else { storage::load_private_json("pending-messages.json") },
+            pending_saved: Default::default(),
+            pending_checked: None,
             desktop_requests: vec![],
             game_tests: vec![],
             board_open: false,
@@ -612,7 +619,45 @@ impl RelayApp {
                 chat.model = s.model.clone();
                 chat.effort = s.effort.clone();
                 chat
-            })
+            });
+        // What was typed or queued here before Relay was closed comes back.
+        if let Some(saved) = self.pending.chats.remove(&key(&s.id, &session.id)) {
+            let chat = self.chats.get_mut(&key(&s.id, &session.id)).unwrap();
+            if chat.draft.is_empty() {
+                chat.draft = saved.draft;
+            }
+            for text in saved.queue {
+                if !chat.queue.iter().any(|q| q.text == text) {
+                    chat.queue.push_back(QueuedPrompt { text, files: vec![] });
+                }
+            }
+        }
+        self.chats.get_mut(&key(&s.id, &session.id)).unwrap()
+    }
+
+    /// Writes drafts and the unsent queue to disk when they change (at most once a second).
+    fn persist_pending(&mut self, force: bool) {
+        if self.demo {
+            return;
+        }
+        if !force && self.pending_checked.is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
+            return;
+        }
+        self.pending_checked = Some(Instant::now());
+        let mut store = self.pending.clone();
+        for (k, c) in &self.chats {
+            let queue: Vec<String> = c.queue.iter().map(|q| q.text.clone()).filter(|t| !t.trim().is_empty()).collect();
+            if c.draft.trim().is_empty() && queue.is_empty() {
+                store.chats.remove(k);
+            } else {
+                store.chats.insert(k.clone(), crate::model::PendingChat { draft: c.draft.clone(), queue });
+            }
+        }
+        if store != self.pending_saved {
+            if storage::save_private_json("pending-messages.json", &store).is_ok() {
+                self.pending_saved = store;
+            }
+        }
     }
     fn prefetch(&mut self, server: &str, session: &Session) {
         if self.demo
@@ -3973,6 +4018,16 @@ impl RelayApp {
         self.chats.insert(key(&s.id, &c.sid), c);
     }
 }
+/// `cd` into the session's folder and resume it: Claude Code finds sessions by working folder.
+fn resume_command(cwd: &str, sid: &str) -> String {
+    let quoted = if cwd.chars().all(|c| c.is_ascii_alphanumeric() || "/._-~".contains(c)) {
+        cwd.to_owned()
+    } else {
+        format!("'{}'", cwd.replace('\'', "'\\''"))
+    };
+    format!("cd {quoted} && claude --resume {sid}")
+}
+
 /// Commands for the `/` popup: the draft is a single word starting with `/`.
 fn slash_matches<'a>(draft: &str, commands: &'a [crate::model::CommandInfo]) -> Vec<&'a crate::model::CommandInfo> {
     let Some(typed) = draft.strip_prefix('/') else {
@@ -4317,6 +4372,13 @@ fn session_menu(
         if ui.button("Переименовать").on_hover_text("Название увидят все, кто подключается к серверу").clicked() {
             action = Some(RowAction::StartRename);
         }
+        if ui.button("Скопировать команду для терминала")
+            .on_hover_text("Чтобы продолжить эту сессию в Claude Code на сервере: вставь команду в SSH-терминал")
+            .clicked()
+        {
+            ui.ctx().copy_text(resume_command(&session.cwd, &session.id));
+            ui.close_menu();
+        }
         ui.menu_button("Переместить в папку", |ui| {
             ui.set_min_width(180.);
             for folder in folders {
@@ -4625,6 +4687,7 @@ fn reduce(c: &mut Chat, data: &Value) {
 }
 impl eframe::App for RelayApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.persist_pending(true);
         if !self.demo {
             for r in &mut self.cluster_store.runs {
                 r.recover();
@@ -4636,6 +4699,7 @@ impl eframe::App for RelayApp {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         self.theme(ctx);
         self.poll();
+        self.persist_pending(false);
         self.cluster_tick();
         self.drain_queues();
         if !self.demo {
@@ -4778,6 +4842,20 @@ impl eframe::App for RelayApp {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn resume_command_enters_the_folder() {
+        assert_eq!(resume_command("/root/relay-desktop", "0e33b7a5-123f"), "cd /root/relay-desktop && claude --resume 0e33b7a5-123f");
+        assert_eq!(resume_command("/root/мой проект", "x"), "cd '/root/мой проект' && claude --resume x");
+    }
+
+    #[test]
+    fn pending_store_round_trips() {
+        let mut store = crate::model::PendingStore::default();
+        store.chats.insert("srv/sid".into(), crate::model::PendingChat { draft: "черновик".into(), queue: vec!["потом проверь логи".into()] });
+        let back: crate::model::PendingStore = serde_json::from_str(&serde_json::to_string(&store).unwrap()).unwrap();
+        assert!(back == store);
+    }
+
     #[test]
     fn slash_popup_and_model_names() {
         let commands: Vec<crate::model::CommandInfo> = serde_json::from_value(json!([

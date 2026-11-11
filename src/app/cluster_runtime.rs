@@ -721,6 +721,9 @@ mod tests {
         };
         let mut app = RelayApp {
             test_no_save: true,
+            pending: Default::default(),
+            pending_saved: Default::default(),
+            pending_checked: None,
             settings: Settings {
                 servers: vec![a.clone(), b.clone()],
                 selected: Some(a.id.clone()),

@@ -45,7 +45,7 @@ pub fn save(settings: &Settings) -> Result<()> {
     Ok(())
 }
 pub fn save_private_json(name: &str, value: &impl serde::Serialize) -> Result<()> {
-    anyhow::ensure!(name == "cluster-sessions.json", "Unknown store");
+    anyhow::ensure!(name == "cluster-sessions.json" || name == "pending-messages.json", "Unknown store");
     let dir = directory();
     fs::create_dir_all(&dir)?;
     #[cfg(unix)]
@@ -59,7 +59,7 @@ pub fn save_private_json(name: &str, value: &impl serde::Serialize) -> Result<()
         "История кластера превышает 64 МБ."
     );
     let path = dir.join(name);
-    let temp = dir.join("cluster-sessions.pending");
+    let temp = dir.join(format!("{name}.tmp"));
     fs::write(&temp, bytes)?;
     #[cfg(unix)]
     {
@@ -68,11 +68,18 @@ pub fn save_private_json(name: &str, value: &impl serde::Serialize) -> Result<()
     }
     #[cfg(windows)]
     if path.exists() {
-        fs::copy(&path, dir.join("cluster-sessions.backup.json"))?;
+        fs::copy(&path, dir.join(format!("{name}.backup")))?;
         fs::remove_file(&path)?;
     }
     fs::rename(temp, path)?;
     Ok(())
+}
+/// A store written by save_private_json; missing or unreadable gives the default.
+pub fn load_private_json<T: serde::de::DeserializeOwned + Default>(name: &str) -> T {
+    fs::read(directory().join(name))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
 }
 fn entry(id: &str) -> Result<keyring::Entry> {
     Ok(keyring::Entry::new("dev.relay.desktop", id)?)

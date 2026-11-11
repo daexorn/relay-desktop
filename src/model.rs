@@ -116,6 +116,19 @@ pub struct Settings {
     #[serde(default)]
     pub collapsed_folders: Vec<String>,
 }
+/// Drafts and unsent queued messages, kept on disk so closing Relay loses nothing.
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct PendingStore {
+    /// Keyed by "server/session".
+    pub chats: std::collections::BTreeMap<String, PendingChat>,
+}
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct PendingChat {
+    #[serde(default)]
+    pub draft: String,
+    #[serde(default)]
+    pub queue: Vec<String>,
+}
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Appearance {
