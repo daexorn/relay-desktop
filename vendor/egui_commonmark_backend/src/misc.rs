@@ -277,6 +277,11 @@ impl CodeBlock {
         options: &CommonMarkOptions,
         max_width: f32,
     ) {
+        // In a list item the text before the block ends mid-row; the block's own ui must start
+        // on a fresh row, at the item's left edge, not where that text stopped.
+        if ui.layout().main_wrap {
+            ui.end_row();
+        }
         ui.scope(|ui| {
             Self::pre_syntax_highlighting(cache, options, ui);
 

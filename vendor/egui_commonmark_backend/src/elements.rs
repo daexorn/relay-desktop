@@ -107,10 +107,21 @@ pub fn code_block<'t>(
     // Laid out by hand rather than through TextEdit: the block is exactly the column wide,
     // the code sits inside even padding, and the right side is kept free for the copy button.
     let (pad_x, pad_y, button_room) = (10.0_f32, 7.0_f32, 30.0_f32);
-    let width = max_width.max(80.0);
+    // Inside a list item the text runs in a wrapping row: the block starts on a row of its own
+    // and takes only the room left there, so it never sits beside the text or widens the answer.
+    if ui.layout().main_wrap {
+        ui.end_row();
+    }
+    // In a list item the wrapping row's own rect can start further right than its text does:
+    // line the block up with the text, up to the row's right edge.
+    let left = ui.min_rect().left().min(ui.max_rect().left());
+    let width = (ui.max_rect().right() - left).min(max_width).max(80.0);
     let galley = layouter(ui, text, (width - pad_x - button_room).max(40.0));
     let height = galley.size().y.max(ui.fonts(|f| f.row_height(&egui::TextStyle::Monospace.resolve(ui.style())))) + pad_y * 2.0;
-    let (frame_rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+    // An exact rect from the row's left edge: a wrapping row would otherwise place the block
+    // wherever its layout decides, partly off the column.
+    let frame_rect = egui::Rect::from_min_size(egui::pos2(left, ui.cursor().top()), egui::vec2(width, height));
+    ui.allocate_rect(frame_rect, egui::Sense::hover());
     ui.painter().rect(
         frame_rect,
         egui::CornerRadius::same(8),
@@ -177,6 +188,9 @@ pub fn code_block<'t>(
     }
     // Blocks one after another do not touch.
     ui.add_space(4.0);
+    if ui.layout().main_wrap {
+        ui.end_row();
+    }
 }
 
 // Stripped down version of egui's Checkbox. The only difference is that this
