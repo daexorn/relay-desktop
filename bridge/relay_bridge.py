@@ -590,6 +590,19 @@ def command(binary, sid, resume, model, mode, effort="default"):
     return args
 
 
+IDLE_CLAUDE_SECONDS = 15 * 60
+
+
+def credential_stamp():
+    """Notice another CLI/login replacing credentials without reading any secrets."""
+    config = Path(os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")).expanduser()
+    try:
+        st = (config / ".credentials.json").stat()
+        return st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size
+    except OSError:
+        return None
+
+
 class Run:
     def __init__(self, owner, sid, cwd, model, mode, resume, effort="default"):
         self.owner, self.sid, self.cwd = owner, sid, cwd
@@ -603,6 +616,9 @@ class Run:
         self.turns = 0  # Prompts sent and not yet answered: Claude Code answers queued ones in order.
         self.background = []  # Commands Claude left running; it carries on when they finish.
         self.closed = False
+        self.auth_failed = False
+        self.auth_stamp = credential_stamp()
+        self.last_activity = time.monotonic()
         self.ready = threading.Event()
         self.pending = {}
         self.error = collections.deque(maxlen=8)
@@ -671,6 +687,20 @@ class Run:
                 except ValueError:
                     continue
                 kind = data.get("type")
+                if kind == "assistant" and data.get("error") == "authentication_failed":
+                    self.auth_failed = True
+                    # The host's private log gets fixed fields, never stderr/message bodies or tokens.
+                    print(json.dumps({"event": "claude_auth_failed", "time": int(time.time()),
+                                      "credentials_changed": credential_stamp() != self.auth_stamp,
+                                      "live_runs": sum(not r.closed and r.process.poll() is None for r in list(self.owner.runs.values())),
+                                      "busy_runs": len(self.owner.running())}), file=sys.stderr, flush=True)
+                if kind == "result" and self.auth_failed:
+                    # Some CLI versions put the failure in an assistant message but return a
+                    # successful result. Never drain the user's queue into a broken login.
+                    data = dict(data, is_error=True, errors=[
+                        "Claude Code на сервере потерял авторизацию. История сохранена. "
+                        "Войди в Claude на этом сервере и отправь следующее сообщение; "
+                        "Relay продолжит ту же сессию."])
                 if kind == "rate_limit_event":
                     if self.owner.usage.observe(data):
                         self.owner.send(self.owner.usage.snapshot())
@@ -721,6 +751,7 @@ class Run:
                     self.turns = 1
                     self.busy = True
                     self.owner.run_state(self)
+                self.last_activity = time.monotonic()
                 self.owner.send({"type": "claude", "sid": self.sid, "data": data})
                 if kind == "result":
                     self.turns = max(0, self.turns - 1)
@@ -757,6 +788,7 @@ class Run:
         self.write(message)
         self.turns += 1
         self.busy = True
+        self.last_activity = time.monotonic()
         self.owner.run_state(self)
 
     def control(self, subtype, **fields):
@@ -914,29 +946,46 @@ class Bridge:
 
     def probe_catalog(self):
         """Start Claude Code once without a prompt just to read its models and commands."""
-        if self.catalog or self.catalog_probe:
-            return
-        self.catalog_probe = True
+        with self.run_lock:
+            if self.catalog or self.catalog_probe:
+                return
+            self.catalog_probe = True
         def run():
             try:
-                env = dict(os.environ); env.pop("CLAUDECODE", None)
-                process = subprocess.Popen([self.binary, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"],
-                    cwd=str(Path.home()), env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                    text=True, encoding="utf-8", errors="replace", start_new_session=True)
-                timer = threading.Timer(40, process.kill); timer.start()
-                try:
-                    process.stdin.write(json.dumps({"type": "control_request", "request_id": "relay-catalog", "request": {"subtype": "initialize", "hooks": None}}) + "\n")
-                    process.stdin.flush()
-                    for line in process.stdout:
-                        try: data = json.loads(line)
-                        except ValueError: continue
-                        if data.get("type") == "control_response":
-                            self.learn_catalog((data.get("response") or {}).get("response") or {})
-                            break
-                finally:
-                    timer.cancel()
-                    process.kill()
-                    process.wait()
+                # A metadata-only CLI still touches OAuth at startup. Do not launch it
+                # alongside a real conversation; initialize already supplies its catalog.
+                with self.run_lock:
+                    if self.catalog or any(not r.closed and r.process.poll() is None for r in self.runs.values()):
+                        return
+                    env = dict(os.environ); env.pop("CLAUDECODE", None)
+                    process = subprocess.Popen([self.binary, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"],
+                        cwd=str(Path.home()), env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                        text=True, encoding="utf-8", errors="replace", start_new_session=True)
+                    timer = threading.Timer(40, process.terminate); timer.start()
+                    kill_timer = threading.Timer(45, process.kill); kill_timer.start()
+                    try:
+                        process.stdin.write(json.dumps({"type": "control_request", "request_id": "relay-catalog", "request": {"subtype": "initialize", "hooks": None}}) + "\n")
+                        process.stdin.flush()
+                        for line in process.stdout:
+                            try: data = json.loads(line)
+                            except ValueError: continue
+                            if data.get("type") == "control_response":
+                                self.learn_catalog((data.get("response") or {}).get("response") or {})
+                                break
+                    finally:
+                        # EOF lets Claude finish its own cleanup instead of SIGKILL
+                        # immediately after initialize, possibly during an OAuth write.
+                        try:
+                            process.stdin.close()
+                            process.wait(timeout=3)
+                        except (OSError, subprocess.TimeoutExpired):
+                            process.terminate()
+                            try: process.wait(timeout=2)
+                            except subprocess.TimeoutExpired:
+                                process.kill(); process.wait()
+                        finally:
+                            timer.cancel(); kill_timer.cancel()
+                            process.stdout.close()
             except (OSError, ValueError):
                 pass
             finally:
@@ -1030,6 +1079,16 @@ class Bridge:
     def running(self):
         own = {sid for sid, run in list(self.runs.items()) if run.busy and not run.closed}
         return own | set(getattr(self, "peer_running", {}))
+
+    def reap_idle_runs(self):
+        """Drop only idle processes; their transcripts continue with the same --resume ID."""
+        now = time.monotonic()
+        with self.run_lock:
+            for sid, run in list(self.runs.items()):
+                # Closing a cluster leader revokes its workers even between answers.
+                if not run.cluster_context and not run.busy and not run.background and not run.pending and now - run.last_activity >= IDLE_CLAUDE_SECONDS:
+                    run.close()
+                    self.runs.pop(sid, None)
 
     def send_sessions(self):
         sessions = self.transcripts.sessions()
@@ -1177,7 +1236,7 @@ class Bridge:
                             run.control("set_model", model=None if model == "default" else model); run.model = model
                         if mode != run.mode:
                             run.control("set_permission_mode", mode=mode); run.mode = mode
-                    elif run and (run.closed or run.process.poll() is not None or (run.cwd, run.model, run.mode, run.effort, getattr(run,"desktop_enabled",False), getattr(run,"desktop_context",""), getattr(run,"agent_role",""), getattr(run,"custom_prompt",""), getattr(run,"cluster_context",{})) != (cwd, model, mode, effort, desktop_enabled, self.desktop_context, agent_role, custom_prompt, cluster_context)):
+                    elif run and (run.closed or run.process.poll() is not None or run.auth_failed or run.auth_stamp != credential_stamp() or (run.cwd, run.model, run.mode, run.effort, getattr(run,"desktop_enabled",False), getattr(run,"desktop_context",""), getattr(run,"agent_role",""), getattr(run,"custom_prompt",""), getattr(run,"cluster_context",{})) != (cwd, model, mode, effort, desktop_enabled, self.desktop_context, agent_role, custom_prompt, cluster_context)):
                         run.close()
                         self.runs.pop(sid, None)
                         run = None
@@ -1194,6 +1253,7 @@ class Bridge:
                         run = Run(self, sid, cwd, model, mode, bool(existing), effort)
                         self.runs[sid] = run
                     claimed = not steer and not run.busy
+                    run.last_activity = time.monotonic()
                 if decoded or uploaded:
                     saved = store_files(sid, decoded) if decoded else []
                     saved.extend(uploaded)
@@ -1588,6 +1648,7 @@ class Host:
                 try:
                     conn, _ = listener.accept()
                 except socket.timeout:
+                    self.bridge.reap_idle_runs()
                     if self.idle():
                         break
                     # Claude Code updates itself only between answers, never under a running session.

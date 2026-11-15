@@ -431,6 +431,135 @@ class ProtocolTests(unittest.TestCase):
         self.assertIn('--resume='+self.sid,second.process.args)
         self.assertEqual(second.process.args[second.process.args.index('--effort')+1],'high')
 
+    def save_transcript(self):
+        project=self.host.transcripts.root/'project';project.mkdir(parents=True,exist_ok=True)
+        (project/(self.sid+'.jsonl')).write_text(json.dumps({'type':'user','uuid':'first','cwd':str(self.root),'message':{'content':'test'}})+'\n')
+
+    def finish_permission(self):
+        event=self.wait('permission')
+        self.host.dispatch({'op':'permission','sid':self.sid,'id':event['id'],'allow':True})
+        self.wait('claude');self.wait('claude')
+
+    def test_external_login_change_restarts_only_idle_process_and_resumes_history(self):
+        with mock.patch.object(bridge,'credential_stamp',return_value=('original',)) as stamp:
+            self.prompt();self.finish_permission()
+            first=self.host.runs[self.sid]
+            self.save_transcript()
+            stamp.return_value=('new-login',)
+            self.prompt();self.wait('permission')
+            second=self.host.runs[self.sid]
+            self.assertTrue(first.closed)
+            self.assertNotEqual(first.process.pid,second.process.pid)
+            self.assertIn('--resume='+self.sid,second.process.args)
+            self.assertEqual(second.turns,1)
+            for stream in (first.process.stdin,first.process.stdout,first.process.stderr):stream.close()
+
+    def test_external_login_change_does_not_interrupt_an_active_answer(self):
+        with mock.patch.object(bridge,'credential_stamp',return_value=('original',)) as stamp:
+            self.prompt();self.wait('permission')
+            first=self.host.runs[self.sid]
+            stamp.return_value=('new-login',)
+            self.prompt();self.wait('permission')
+            self.assertIs(self.host.runs[self.sid],first)
+            self.assertFalse(first.closed)
+            self.assertIsNone(first.process.poll())
+
+    def test_auth_error_pauses_even_a_successful_cli_result_without_retrying(self):
+        self.cli.write_text(FAKE.replace("elif r.get('type')=='user':", """elif r.get('type')=='user':
+  if r['message']['content'][0].get('text')=='auth-failure':
+   send({'type':'assistant','error':'authentication_failed','message':{'model':'<synthetic>','content':[{'type':'text','text':'OAuth session expired and could not be refreshed'}]}})
+   send({'type':'result','is_error':False,'result':'done'})
+   continue"""))
+        self.host.dispatch({'op':'prompt','sid':self.sid,'cwd':str(self.root),'text':'auth-failure'})
+        self.wait('claude')
+        result=self.wait('claude')['data']
+        first=self.host.runs[self.sid]
+        self.assertTrue(result['is_error'])
+        self.assertIn('История сохранена',result['errors'][0])
+        self.assertTrue(first.auth_failed)
+        self.assertFalse(first.busy)
+        self.assertEqual(len(self.host.runs),1)
+        # No automatic repeat. Only the next explicit user prompt starts a fresh CLI.
+        self.save_transcript()
+        self.prompt();self.wait('permission')
+        second=self.host.runs[self.sid]
+        self.assertTrue(first.closed)
+        self.assertNotEqual(first.process.pid,second.process.pid)
+        self.assertIn('--resume='+self.sid,second.process.args)
+        for stream in (first.process.stdin,first.process.stdout,first.process.stderr):stream.close()
+
+    def test_idle_cleanup_keeps_active_background_pending_and_cluster_work(self):
+        self.prompt();permission=self.wait('permission')
+        run=self.host.runs[self.sid]
+        run.last_activity=time.monotonic()-bridge.IDLE_CLAUDE_SECONDS-1
+        self.host.reap_idle_runs()
+        self.assertFalse(run.closed)
+        self.host.dispatch({'op':'permission','sid':self.sid,'id':permission['id'],'allow':True})
+        self.wait('claude');self.wait('claude')
+        run.last_activity=time.monotonic()-bridge.IDLE_CLAUDE_SECONDS-1
+        for field,value in [('background',['task']),('pending',{'p':{}}),('cluster_context',{'role':'leader'})]:
+            original=getattr(run,field);setattr(run,field,value)
+            self.host.reap_idle_runs();self.assertFalse(run.closed)
+            setattr(run,field,original)
+        self.save_transcript()
+        self.host.reap_idle_runs()
+        self.assertTrue(run.closed)
+        self.assertNotIn(self.sid,self.host.runs)
+        self.prompt();self.wait('permission')
+        self.assertIn('--resume='+self.sid,self.host.runs[self.sid].process.args)
+        for stream in (run.process.stdin,run.process.stdout,run.process.stderr):stream.close()
+
+    def test_catalog_probe_never_starts_alongside_a_conversation(self):
+        self.prompt();self.wait('permission')
+        with mock.patch.object(bridge.subprocess,'Popen') as popen:
+            self.host.probe_catalog()
+            end=time.monotonic()+3
+            while self.host.catalog_probe and time.monotonic()<end:time.sleep(.01)
+            self.assertFalse(self.host.catalog_probe)
+            popen.assert_not_called()
+
+    def test_catalog_probe_finishes_with_eof_without_killing_claude(self):
+        process=mock.Mock()
+        process.stdin=io.StringIO()
+        process.stdout=io.StringIO(json.dumps({'type':'control_response','response':{'response':{'models':[{'value':'opus'}]}}})+'\n')
+        with mock.patch.object(bridge.subprocess,'Popen',return_value=process):
+            self.host.probe_catalog()
+            self.wait('catalog')
+            end=time.monotonic()+3
+            while self.host.catalog_probe and time.monotonic()<end:time.sleep(.01)
+        self.assertFalse(self.host.catalog_probe)
+        self.assertTrue(process.stdin.closed)
+        process.terminate.assert_not_called();process.kill.assert_not_called()
+
+    def test_user_cli_start_waits_for_catalog_probe_to_finish(self):
+        started=threading.Event();release=threading.Event()
+        class ProbeOutput:
+            def __iter__(self):
+                started.set()
+                if not release.wait(3):raise RuntimeError('probe release timed out')
+                yield json.dumps({'type':'control_response','response':{'response':{'models':[{'value':'opus'}]}}})+'\n'
+            def close(self):pass
+        probe=mock.Mock();probe.stdin=io.StringIO();probe.stdout=ProbeOutput()
+        real_popen=bridge.subprocess.Popen
+        calls=[]
+        def popen(args,**kwargs):
+            calls.append(args)
+            return probe if len(calls)==1 else real_popen(args,**kwargs)
+        with mock.patch.object(bridge.subprocess,'Popen',side_effect=popen):
+            self.host.probe_catalog()
+            self.assertTrue(started.wait(3))
+            prompt=threading.Thread(target=self.prompt,daemon=True);prompt.start()
+            try:
+                prompt.join(.1)
+                self.assertTrue(prompt.is_alive())
+                self.assertEqual(len(calls),1)
+            finally:
+                release.set()
+            prompt.join(3)
+            self.assertFalse(prompt.is_alive())
+            self.wait('permission')
+        self.assertEqual(len(calls),2)
+
     def test_files_are_saved_outside_the_project_without_overwrite(self):
         files=bridge.decode_files([{'type':'file','name':'../../notes.txt','data':base64.b64encode(b'first').decode()},
                                   {'type':'file','name':'notes.txt','data':base64.b64encode(b'second').decode()}])
