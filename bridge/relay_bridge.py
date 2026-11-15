@@ -284,7 +284,10 @@ class Transcripts:
             title = next((visible_text(plain((r.get("message") if isinstance(r.get("message"),dict) else {}).get("content"))) for r in records(path, limit=8*1024*1024)
                           if r.get("type") == "user" and not r.get("isSidechain") and visible_text(plain((r.get("message") if isinstance(r.get("message"),dict) else {}).get("content")))), "Разговор от " + time.strftime("%d.%m", time.localtime(stat.st_mtime)))
         title = " ".join(str(title).split())[:100]
-        result = {"id": path.stem, "title": title, "cwd": cwd, "modified": stat.st_mtime, "messages": 0}
+        backend = next((r.get("relayBackend", "claude") for r in reversed(rows)
+                        if r.get("type") in ("user", "assistant") and not r.get("isSidechain")), "claude")
+        result = {"id": path.stem, "title": title, "cwd": cwd, "modified": stat.st_mtime, "messages": 0,
+                  "backend": backend if backend in ("api", "claude") else "claude"}
         self.cache[str(path)] = (key, result)
         return result
 
@@ -604,6 +607,7 @@ def credential_stamp():
 
 
 class Run:
+    backend = "claude"
     def __init__(self, owner, sid, cwd, model, mode, resume, effort="default"):
         self.owner, self.sid, self.cwd = owner, sid, cwd
         self.model, self.mode, self.effort = model, mode, effort
@@ -908,7 +912,12 @@ class Bridge:
     def __init__(self, send=emit, transcripts=None, binary=None):
         self.send = send
         self.transcripts = transcripts or Transcripts()
-        self.binary = binary or claude_binary()
+        try:self.binary = binary or claude_binary()
+        except ValueError:self.binary = None
+        api_source=globals().get('API_SOURCE') or Path(__file__).with_name('api_engine.py').read_text(encoding='utf-8')
+        self.api={'__name__':'relay_api'};exec(api_source,self.api)
+        self.api_records=records
+        self.last_backend='api' if globals().get('API_DEFAULT') else 'claude'
         self.runs = {}
         self.run_lock = threading.RLock()
         self.usage = UsageState()
@@ -947,7 +956,7 @@ class Bridge:
     def probe_catalog(self):
         """Start Claude Code once without a prompt just to read its models and commands."""
         with self.run_lock:
-            if self.catalog or self.catalog_probe:
+            if not self.binary or self.catalog or self.catalog_probe:
                 return
             self.catalog_probe = True
         def run():
@@ -993,6 +1002,7 @@ class Bridge:
         threading.Thread(target=run, daemon=True).start()
 
     def claude_version(self):
+        if not self.binary:return "API · Claude Code не установлен"
         try:
             return subprocess.check_output([self.binary, "--version"], text=True, timeout=15, stdin=subprocess.DEVNULL).strip()
         except (OSError, subprocess.SubprocessError):
@@ -1074,7 +1084,7 @@ class Bridge:
 
     def run_state(self, run):
         self.send({"type": "run_state", "sid": run.sid, "busy": bool(run.busy), "queued": max(0, run.turns - 1),
-                   "background": list(getattr(run, "background", []))})
+                   "background": list(getattr(run, "background", [])), "backend": getattr(run, "backend", "claude")})
 
     def running(self):
         own = {sid for sid, run in list(self.runs.items()) if run.busy and not run.closed}
@@ -1104,10 +1114,10 @@ class Bridge:
     def hello(self):
         version = self.claude_version()
         self.send({"type": "hello", "home": str(Path.home()), "hostname": os.uname().nodename,
-                   "version": version, "protocol": 4, "host": bool(globals().get("RELAY_HOSTED"))})
+                   "version": version, "protocol": 4, "api_available": True, "host": bool(globals().get("RELAY_HOSTED"))})
         if self.catalog:
             self.send(self.catalog)
-        else:
+        elif not globals().get('API_DEFAULT'):
             self.probe_catalog()
 
     def dispatch(self, req):
@@ -1159,6 +1169,11 @@ class Bridge:
             elif op == "usage":
                 self.send(self.usage.snapshot())
                 self.usage.refresh_async(self.send)
+            elif op == "api_models":
+                try:
+                    self.send({'type':'api_models','request':req.get('request'),'base_url':self.api['configuration']({**(req.get('api') or {}),'model':'catalog'})['base_url'],'models':self.api['models'](req.get('api'))})
+                except Exception as error:
+                    self.send({'type':'api_models','request':req.get('request'),'models':[],'error':self.api['clean_error'](error,(req.get('api') or {}).get('key',''))})
             elif op == "history":
                 sid = valid_id(req.get("sid"))
                 self.send({"type": "history", "sid": sid, "messages": self.transcripts.history(sid)})
@@ -1175,12 +1190,16 @@ class Bridge:
                 self.send({"type": "folders", "path": str(path), "parent": str(path.parent), "folders": children[:1000], "request": req.get("request", 0)})
             elif op == "prompt":
                 sid = valid_id(req.get("sid"))
+                backend=req.get('backend','claude')
+                if backend not in ('claude','api'):raise ValueError('Неизвестный источник модели.')
+                api=self.api['configuration'](req.get('api')) if backend=='api' else None
+                if backend=='claude' and not self.binary:raise ValueError('На сервере нет Claude Code. Выбери API или установи Claude Code.')
                 text = req.get("text")
                 images = req.get("images", [])
                 files = req.get("files", [])
                 if not isinstance(text, str) or (not text.strip() and not images and not files) or len(text.encode("utf-8")) > 1024 * 1024:
                     raise ValueError("Сообщение пустое или слишком длинное.")
-                if not images and not files and self.quick_command(sid, text):
+                if backend=='claude' and not images and not files and self.quick_command(sid, text):
                     return
                 validate_images(images)
                 if not isinstance(files, list) or any(not isinstance(f, dict) or f.get('type') not in ('file', 'uploaded_file') for f in files):
@@ -1229,6 +1248,8 @@ class Bridge:
                     self.actor=str(req.get("actor") or "")[:80]
                     self.desktop_context=json.dumps(req.get("desktop_context",{}),ensure_ascii=False)[:5000] if desktop_enabled else ""
                     run = self.runs.get(sid)
+                    if run and run.busy and not run.closed and getattr(run,'backend','claude')!=backend:
+                        raise ValueError('Дождись завершения ответа перед переключением между Claude Code и API.')
                     steer = bool(run and run.busy and run.turns > 0 and not run.closed and run.process.poll() is None)
                     if run and run.busy and not run.closed and run.process.poll() is None:
                         # Mid-answer: the message joins Claude's queue; model and mode switch live.
@@ -1236,7 +1257,7 @@ class Bridge:
                             run.control("set_model", model=None if model == "default" else model); run.model = model
                         if mode != run.mode:
                             run.control("set_permission_mode", mode=mode); run.mode = mode
-                    elif run and (run.closed or run.process.poll() is not None or run.auth_failed or run.auth_stamp != credential_stamp() or (run.cwd, run.model, run.mode, run.effort, getattr(run,"desktop_enabled",False), getattr(run,"desktop_context",""), getattr(run,"agent_role",""), getattr(run,"custom_prompt",""), getattr(run,"cluster_context",{})) != (cwd, model, mode, effort, desktop_enabled, self.desktop_context, agent_role, custom_prompt, cluster_context)):
+                    elif run and (run.closed or run.process.poll() is not None or getattr(run,'backend','claude')!=backend or (backend=='api' and not run.same_api(api)) or (backend=='claude' and (run.auth_failed or run.auth_stamp != credential_stamp())) or (run.cwd, run.model, run.mode, run.effort, getattr(run,"desktop_enabled",False), getattr(run,"desktop_context",""), getattr(run,"agent_role",""), getattr(run,"custom_prompt",""), getattr(run,"cluster_context",{})) != (cwd, model, mode, effort, desktop_enabled, self.desktop_context, agent_role, custom_prompt, cluster_context)):
                         run.close()
                         self.runs.pop(sid, None)
                         run = None
@@ -1250,8 +1271,9 @@ class Bridge:
                         existing = self.transcripts.find(sid)
                         if existing and self.transcripts.metadata(existing)["cwd"] != cwd:
                             raise ValueError("Открой исходную рабочую папку этой сессии.")
-                        run = Run(self, sid, cwd, model, mode, bool(existing), effort)
+                        run = self.api['ApiRun'](self,sid,cwd,model,mode,bool(existing),effort,api) if backend=='api' else Run(self, sid, cwd, model, mode, bool(existing), effort)
                         self.runs[sid] = run
+                    self.last_backend=backend
                     claimed = not steer and not run.busy
                     run.last_activity = time.monotonic()
                 if decoded or uploaded:
@@ -1563,7 +1585,7 @@ class Host:
         for run in list(self.bridge.runs.values()):
             if run.busy and not run.closed:
                 client.send({"type": "run_state", "sid": run.sid, "busy": True, "queued": max(0, run.turns - 1),
-                             "background": list(run.background)})
+                             "background": list(run.background), "backend": getattr(run, "backend", "claude")})
                 for ident, req in list(run.pending.items()):
                     client.send({"type": "permission", "sid": run.sid, "id": ident,
                                  "tool": req.get("tool_name", "Действие"), "input": req.get("input", {})})
@@ -1594,6 +1616,9 @@ class Host:
                     continue
                 peer = self.peer_for(req.get("sid")) if req.get("op") in ("permission", "stop", "control", "prompt") else None
                 if peer is not None:
+                    if req.get('op')=='prompt' and req.get('backend')=='api':
+                        client.send({'type':'error','op':'prompt','sid':req.get('sid'),'message':'Этот разговор ещё работает в другом подключении. Дождись ответа перед переключением на API.'})
+                        continue
                     # The answer is running in the older host: it gets the reply, the stop or the follow-up.
                     try:
                         peer.send(req)
@@ -1652,7 +1677,7 @@ class Host:
                     if self.idle():
                         break
                     # Claude Code updates itself only between answers, never under a running session.
-                    if time.time() >= next_update and not self.bridge.running():
+                    if time.time() >= next_update and not self.bridge.running() and self.bridge.last_backend!='api':
                         next_update = time.time() + UPDATE_EVERY
                         threading.Thread(target=self.bridge.update_claude, daemon=True).start()
                     continue

@@ -20,6 +20,8 @@ enum class Screen { Servers, Sessions, Chat, Settings }
 enum class Link { Off, Connecting, Online }
 
 class Chat(val sid: String, cwd: String, title: String, model: String, mode: String, effort: String) {
+    var api by mutableStateOf(false)
+    var apiModel by mutableStateOf("")
     var cwd by mutableStateOf(cwd)
     var title by mutableStateOf(title)
     var model by mutableStateOf(model)
@@ -77,6 +79,13 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var commands by mutableStateOf<List<CommandInfo>>(emptyList())
         private set
+    var apiModels by mutableStateOf<List<ModelInfo>>(emptyList())
+        private set
+    var apiError by mutableStateOf("")
+        private set
+    var apiChecking by mutableStateOf(false)
+        private set
+    private var apiRequest = ""
     var claudeVersion by mutableStateOf("")
         private set
     var updating by mutableStateOf(false)
@@ -103,6 +112,34 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun savedPassword(server: ServerProfile) = store.password(server.id)
+    fun savedApiKey(server: ServerProfile) = store.apiKey(server.id).orEmpty()
+    fun apiCatalog(): List<ModelInfo> = apiModels.ifEmpty { current?.api?.models.orEmpty().map { ModelInfo(it,it,"") } }
+    fun setApiSource(chat: Chat, enabled: Boolean) {
+        if (chat.transcript.busy) { notice = "Дождись завершения ответа перед сменой источника."; return }
+        chat.api = enabled
+        current?.let { s -> store.setApiSource(s.id,chat.sid,enabled);if (chat.apiModel.isBlank()) chat.apiModel = s.api.model }
+    }
+    fun saveApi(server: ServerProfile, profile: ApiProfile, key: String): Boolean {
+        profile.error()?.let { notice = it;return false }
+        if (current?.id == server.id && profile.enabled != server.api.enabled && chats.values.any { it.transcript.busy }) {
+            notice = "Дождись завершения работы перед сменой источника по умолчанию.";return false
+        }
+        if (store.setApiKey(server.id,key).isFailure) { notice = "Не удалось сохранить ключ в защищённом хранилище Android.";return false }
+        val updated = server.copy(api=profile)
+        saveServer(updated,null,false)
+        if (current?.id == server.id) {
+            current = updated
+            apiModels = profile.models.map { ModelInfo(it,it,"") }
+            chats.values.filter { it.apiModel.isBlank() }.forEach { it.apiModel = profile.model }
+        }
+        notice = "Настройки API сохранены"
+        return true
+    }
+    fun checkApi(server: ServerProfile, profile: ApiProfile, key: String) {
+        if (current?.id != server.id || link != Link.Online) { apiError = "Подключись к этому серверу для проверки API.";return }
+        apiRequest = UUID.randomUUID().toString();apiChecking = true;apiError = ""
+        send(JSONObject().put("op","api_models").put("request",apiRequest).put("api",profile.request(key)))
+    }
 
     fun saveServer(profile: ServerProfile, password: String?, remember: Boolean) {
         val list = servers.toMutableList()
@@ -118,6 +155,7 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         servers = servers.filter { it.id != profile.id }
         store.servers = servers
         store.setPassword(profile.id, null)
+        store.setApiKey(profile.id, "")
     }
 
     fun answerTrust(ok: Boolean) {
@@ -128,6 +166,7 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
     fun connect(profile: ServerProfile, password: String) {
         disconnect()
         current = profile
+        apiModels = profile.api.models.map { ModelInfo(it,it,"") };apiError = "";apiChecking = false
         link = Link.Connecting
         notice = ""
         sessions = emptyList()
@@ -282,7 +321,7 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                 sessions = (0 until rows.length()).mapNotNull { rows.optJSONObject(it) }.map {
                     Session(it.optString("id"), it.optString("title"), it.optString("cwd"), it.optDouble("modified", 0.0),
                         it.optDouble("pinned", 0.0).let { p -> if (p.isNaN()) 0.0 else p }, it.optString("folder"), it.optString("auto_title"),
-                        it.optBoolean("running"))
+                        it.optBoolean("running"), it.optString("backend"))
                 }.filter { it.id.isNotEmpty() }.distinctBy { it.id }
                 if (protocol >= 4) running = sessions.filter { it.running }.map { it.id }.toSet()
                 val f = value.optJSONArray("folders")
@@ -307,6 +346,7 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
             "claude" -> chats[sid]?.let { c ->
                 val data = value.optJSONObject("data") ?: return@let
                 c.transcript.reduce(data)
+                if (data.optString("type") == "result" && data.optBoolean("is_error")) c.queued.clear()
                 if (data.optString("type") == "result" && c.queued.isNotEmpty()) {
                     // The next queued message is the one Claude answers now.
                     c.transcript.userAt = c.transcript.messages.size
@@ -325,10 +365,20 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                     CommandInfo(it.optString("name"), it.optString("description"), it.optString("hint"))
                 } }.orEmpty().filter { it.name.isNotEmpty() }
             }
+            "api_models" -> {
+                if (value.optString("request") == apiRequest) {
+                    apiChecking = false;apiError = value.optString("error")
+                    if (apiError.isEmpty()) apiModels = value.optJSONArray("models")?.let { a -> (0 until a.length()).mapNotNull { a.optJSONObject(it) }.map { ModelInfo(it.optString("value"),it.optString("displayName"),it.optString("description")) } }.orEmpty()
+                }
+            }
             "run_state" -> {
                 val busy = value.optBoolean("busy")
                 running = if (busy) running + sid else running - sid
                 chats[sid]?.let { c ->
+                    if (busy && value.optString("backend") in listOf("api","claude")) {
+                        c.api = value.optString("backend") == "api"
+                        current?.let { store.setApiSource(it.id,sid,c.api) }
+                    }
                     val background = value.optJSONArray("background")?.let { a -> (0 until a.length()).map { a.optString(it) } }.orEmpty()
                     if (busy && !c.transcript.busy && c.loaded) {
                         c.transcript.busy = true
@@ -435,6 +485,8 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
     fun open(session: Session) {
         val s = current ?: return
         val c = chats.getOrPut(session.id) { Chat(session.id, session.cwd, session.title, s.model, s.mode, s.effort) }
+        c.api = store.apiSource(s.id,c.sid) ?: when (session.backend) { "api" -> true; "claude" -> false;else -> s.api.enabled }
+        if (c.apiModel.isBlank()) c.apiModel = s.api.model
         if (!c.transcript.busy) {
             c.loading = !c.loaded
             send(JSONObject().put("op", "history").put("sid", session.id))
@@ -447,6 +499,7 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         val s = current ?: return
         val sid = UUID.randomUUID().toString()
         val c = Chat(sid, if (s.cwd == "~") home else s.cwd, "Новая сессия", s.model, s.mode, s.effort)
+        c.api = s.api.enabled;c.apiModel = s.api.model
         c.loaded = true
         chats[sid] = c
         selected = sid
@@ -462,13 +515,14 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         val arg = text.substringAfter(' ', "").trim()
         when {
             name == "/model" && arg.isNotEmpty() -> {
-                val value = resolveModel(models, arg)
+                val catalog = if (c.api) apiCatalog() else models
+                val value = resolveModel(catalog, arg)
                 if (value == null) {
                     c.transcript.error = "Нет такой модели: $arg. Доступны: " + models.joinToString { it.value }
                 } else {
-                    c.model = value
+                    if (c.api) c.apiModel = value else c.model = value
                     send(JSONObject().put("op", "control").put("sid", c.sid).put("action", "model").put("value", value))
-                    notice = "Модель: " + modelLabel(models, value)
+                    notice = "Модель: " + modelLabel(catalog, value)
                 }
             }
             name == "/mode" && arg.isNotEmpty() -> {
@@ -486,7 +540,7 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
     /** Model or mode picked while Claude answers: switch it live. */
     fun liveChange(c: Chat) {
         if (protocol >= 4 && c.transcript.busy) {
-            send(JSONObject().put("op", "control").put("sid", c.sid).put("action", "model").put("value", c.model))
+            send(JSONObject().put("op", "control").put("sid", c.sid).put("action", "model").put("value", if (c.api) c.apiModel else c.model))
             send(JSONObject().put("op", "control").put("sid", c.sid).put("action", "mode").put("value", c.mode))
         }
     }
@@ -529,6 +583,8 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
 
     fun submit() {
         val c = chat() ?: return
+        val profile = current ?: return
+        if (c.api) profile.api.copy(model=c.apiModel.ifBlank { profile.api.model }).error()?.let { c.transcript.error = it;c.changed();return }
         val text = c.draft.trim()
         if ((text.isEmpty() && c.picked.isEmpty()) || link != Link.Online) return
         if (c.picked.isEmpty() && localCommand(c, text)) return
@@ -550,12 +606,12 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         if (c.title == "Новая сессия") c.title = text.ifEmpty { attached.firstOrNull()?.name.orEmpty() }.take(60)
         c.draft = ""
         c.changed()
-        send(
-            JSONObject().put("op", "prompt").put("sid", c.sid).put("cwd", c.cwd).put("text", text)
-                .put("images", images).put("files", files).put("model", c.model).put("mode", c.mode)
+        val request = JSONObject().put("op", "prompt").put("sid", c.sid).put("cwd", c.cwd).put("text", text)
+                .put("images", images).put("files", files).put("model", if (c.api) c.apiModel.ifBlank { profile.api.model } else c.model).put("mode", c.mode)
                 .put("effort", c.effort).put("actor", actor.ifBlank { "Relay Android" }).put("desktop_enabled", false)
                 .put("desktop_context", JSONObject())
-        )
+        if (c.api) request.put("backend","api").put("api",profile.api.request(store.apiKey(profile.id).orEmpty(),c.apiModel))
+        send(request)
         current?.let { s ->
             if (s.model != c.model || s.mode != c.mode || s.effort != c.effort) {
                 val updated = s.copy(model = c.model, mode = c.mode, effort = c.effort)

@@ -86,7 +86,7 @@ class Bridge(
                 onEvent(value)
             }
             if (!closed && exec.exitStatus > 0) {
-                error = "Не удалось запустить помощник на сервере. Нужны Python 3 и Claude Code."
+                error = "Не удалось запустить помощник на сервере. Нужен Python 3; для режима Claude Code — также сам Claude Code."
             }
         } catch (e: Throwable) {
             // Throwable, not Exception: a missing class on some Android version must not kill the app.
@@ -123,7 +123,7 @@ class Bridge(
     }
 
     private fun helperSource(): ByteArray =
-        helper { name -> context.assets.open("bridge/$name").readBytes().toString(Charsets.UTF_8) }
+        helper(server.api.enabled) { name -> context.assets.open("bridge/$name").readBytes().toString(Charsets.UTF_8) }
 
     /** Trust on first use: a remembered SHA256 fingerprint must match, an unknown one is asked. */
     private inner class Keys(private val expected: String?) : HostKeyRepository {
@@ -149,11 +149,13 @@ class Bridge(
             "ecdh-sha2-nistp521,diffie-hellman-group-exchange-sha256,diffie-hellman-group16-sha512,diffie-hellman-group14-sha256"
 
         /** DESKTOP_SOURCE = "...", ... then relay_bridge.py, exactly as the desktop builds it. */
-        fun helper(read: (String) -> String): ByteArray = buildString {
+        fun helper(apiDefault: Boolean = false, read: (String) -> String): ByteArray = buildString {
             append("DESKTOP_SOURCE = ").append(pythonString(read("desktop_mcp.py"))).append('\n')
             append("BOARD_SOURCE = ").append(pythonString(read("board.py"))).append('\n')
             append("CLUSTER_SOURCE = ").append(pythonString(read("cluster_mcp.py"))).append('\n')
             append("ATTACHMENTS_SOURCE = ").append(pythonString(read("attachments.py"))).append('\n')
+            append("API_SOURCE = ").append(pythonString(read("api_engine.py"))).append('\n')
+            append("API_DEFAULT = ").append(if (apiDefault) "True" else "False").append('\n')
             append(read("relay_bridge.py"))
         }.toByteArray(Charsets.UTF_8)
 

@@ -30,6 +30,37 @@ pub struct Server {
     /// In-game tests on this PC: "auto", "ask" or "off".
     #[serde(default = "default_tests")]
     pub tests: String,
+    #[serde(default)]
+    pub api: ApiProfile,
+}
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
+#[serde(default)]
+pub struct ApiProfile {
+    pub enabled: bool,
+    pub base_url: String,
+    pub model: String,
+    pub max_tokens: u32,
+    pub max_steps: u32,
+    pub models: Vec<String>,
+}
+impl Default for ApiProfile {
+    fn default() -> Self {
+        Self { enabled: false, base_url: String::new(), model: String::new(), max_tokens: 8192, max_steps: 80, models: vec![] }
+    }
+}
+impl ApiProfile {
+    pub fn validate(&mut self) -> anyhow::Result<()> {
+        self.base_url = self.base_url.trim().trim_end_matches('/').to_owned();
+        self.model = self.model.trim().to_owned();
+        anyhow::ensure!((self.base_url.starts_with("https://") || self.base_url.starts_with("http://")) && !self.base_url.chars().any(|c| c.is_whitespace() || c.is_control() || matches!(c, '@' | '?' | '#')), "Укажи базовый URL API, например https://tooken.club/v1.");
+        anyhow::ensure!(!self.model.is_empty() && self.model.len() <= 200 && !self.model.chars().any(char::is_control), "Укажи идентификатор модели API.");
+        self.max_tokens = self.max_tokens.clamp(256, 65536);
+        self.max_steps = self.max_steps.clamp(1, 256);
+        Ok(())
+    }
+    pub fn request(&self, key: String) -> Value {
+        serde_json::json!({"base_url":self.base_url,"model":self.model,"max_tokens":self.max_tokens,"max_steps":self.max_steps,"key":key})
+    }
 }
 fn default_tests() -> String {
     "ask".into()
@@ -59,6 +90,7 @@ impl Default for Server {
             local_workspace: None,
             local_control: false,
             tests: default_tests(),
+            api: ApiProfile::default(),
         }
     }
 }
@@ -115,6 +147,9 @@ pub struct Settings {
     /// Session folders folded in the sidebar (this computer only).
     #[serde(default)]
     pub collapsed_folders: Vec<String>,
+    /// Per-conversation override; server API settings supply the default.
+    #[serde(default)]
+    pub api_sessions: std::collections::BTreeMap<String, bool>,
 }
 /// Drafts and unsent queued messages, kept on disk so closing Relay loses nothing.
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -206,6 +241,8 @@ pub struct Session {
     /// Claude is answering in it right now (the server host keeps it running without the app).
     #[serde(default)]
     pub running: bool,
+    #[serde(default)]
+    pub backend: String,
 }
 /// A model exactly as the server's Claude Code lists it: `fable`, `opus`, a full id…
 #[derive(Clone, Default, Deserialize, Debug, PartialEq)]
@@ -316,6 +353,30 @@ mod tests {
     fn profiles_contain_no_password() {
         let s = serde_json::to_string(&Server::default()).unwrap();
         assert!(!s.contains("password"));
+    }
+    #[test]
+    fn existing_servers_gain_an_independent_disabled_api_profile() {
+        let mut server = Server::default();
+        server.api.enabled = true;server.api.base_url = "https://example.test/v1".into();server.api.model = "custom-model".into();
+        let mut old = serde_json::to_value(&server).unwrap();old.as_object_mut().unwrap().remove("api");
+        let restored: Server = serde_json::from_value(old).unwrap();
+        assert!(!restored.api.enabled);assert!(restored.api.base_url.is_empty());
+        assert_eq!(restored.host, server.host);assert_eq!(restored.cwd, server.cwd);
+        let public = serde_json::to_string(&server).unwrap();
+        assert!(!public.contains("api_key"));assert!(!public.contains("\"key\""));
+        assert_eq!(server.api.request("fixture-only-key".into())["key"], "fixture-only-key");
+    }
+    #[test]
+    fn api_profile_rejects_credentials_in_the_url_and_preserves_custom_model_ids() {
+        let mut api = ApiProfile::default();api.model = "vendor/model-1".into();
+        for bad in ["file:///tmp/model", "https://key@example.test/v1", "https://example.test/v1?key=secret", "https://example.test/v1\n"] {
+            api.base_url = bad.into();
+            // A trailing newline is trimmed; embedded whitespace must still be rejected.
+            if bad.ends_with('\n') { api.base_url = "https://example.test/\nv1".into(); }
+            assert!(api.validate().is_err());
+        }
+        api.base_url = "http://127.0.0.1:8000/v1/".into();api.validate().unwrap();
+        assert_eq!(api.model,"vendor/model-1");assert_eq!(api.base_url,"http://127.0.0.1:8000/v1");
     }
     #[test]
     fn validates_addresses_without_shell_interpretation() {

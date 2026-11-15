@@ -756,6 +756,7 @@ mod tests {
             folder_creating: None,
             search: String::new(),
             editor: None,
+            api_editor: None,
             trust: None,
             folder_open: false,
             folder_path: String::new(),
@@ -842,6 +843,53 @@ mod tests {
             "Changed src/file.rs; 3 checks passed"
         );
         assert!(app.cluster_store.runs[0].tasks[0].delivered);
+    }
+
+    #[test]
+    fn a_worker_uses_its_hosts_direct_api_while_the_leader_uses_claude() {
+        let (mut app, a, b, config, mut rx_a, mut rx_b) = fixture();
+        let profile = app.settings.servers.iter_mut().find(|s| s.id == b.id).unwrap();
+        profile.api.enabled = true;profile.api.base_url = "https://provider.example/v1".into();
+        profile.api.model = "worker-api-model".into();
+        app.start_cluster(config, "Build and verify".into()).unwrap();
+        let lead = take(&mut rx_a,"prompt");assert_ne!(lead["backend"], "api");
+        let run = app.cluster_store.runs[0].id.clone();let sid = app.cluster_store.runs[0].leader_sid.clone();
+        app.data(a.id.clone(),json!({"type":"cluster_request","id":cluster::id(),"sid":sid,"run":run,"tool":"dispatch_task","input":{"worker":"worker","task":"Implement the assigned change"}}));
+        take(&mut rx_a,"cluster_reply");app.cluster_tick();
+        let work = take(&mut rx_b,"prompt");
+        assert_eq!(work["backend"],"api");assert_eq!(work["api"]["base_url"],"https://provider.example/v1");
+        assert_eq!(work["cluster_context"]["role"],"worker");assert_eq!(work["desktop_enabled"],false);
+    }
+
+    #[test]
+    fn a_shared_api_session_is_discovered_without_overriding_an_explicit_choice() {
+        let (mut app, a, _, _, _, _) = fixture();
+        let sid = cluster::id();let k = key(&a.id, &sid);
+        app.data(a.id.clone(),json!({"type":"sessions","sessions":[{"id":sid,"title":"Shared API","cwd":a.cwd,"modified":1.,"backend":"api"}]}));
+        assert!(app.api_for_chat(&a,&k));
+        app.settings.api_sessions.insert(k.clone(),false);
+        assert!(!app.api_for_chat(&a,&k));
+        app.data(a.id.clone(),json!({"type":"run_state","sid":sid,"busy":true,"backend":"api"}));
+        assert!(app.api_for_chat(&a,&k));
+    }
+
+    #[test]
+    fn switching_one_conversation_to_api_preserves_its_sid_and_the_other_chats_source() {
+        let (mut app, a, _, config, mut rx_a, _) = fixture();
+        app.start_cluster(config, "First turn".into()).unwrap();
+        let first = take(&mut rx_a,"prompt");let sid = first["sid"].as_str().unwrap().to_owned();
+        send_result(&mut app,&a.id,&sid,"Native answer");
+        let k = key(&a.id,&sid);
+        app.settings.api_sessions.insert(k.clone(),true);
+        let profile = app.settings.servers.iter_mut().find(|s| s.id == a.id).unwrap();
+        profile.api.base_url = "https://provider.example/v1".into();profile.api.model = "fixture-api-model".into();
+        let server = profile.clone();
+        app.chats.get_mut(&k).unwrap().draft = "Continue with API".into();
+        app.send_to_chat(server.clone(),k.clone());
+        let second = take(&mut rx_a,"prompt");
+        assert_eq!(first["sid"],second["sid"]);assert_eq!(second["backend"],"api");
+        assert!(app.chats[&k].messages.iter().any(|m| m.text=="Native answer"));
+        assert!(!app.api_for_chat(&server,"another-chat"));
     }
     #[test]
     fn completed_work_wakes_an_idle_leader_without_replacing_the_users_draft() {

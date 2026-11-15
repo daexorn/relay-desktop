@@ -95,3 +95,35 @@ pub fn forget(id: &str) {
         let _ = e.delete_credential();
     }
 }
+
+/// Kept separately from shareable settings and always restricted to this OS user.
+pub fn api_key(id: &str) -> Option<String> {
+    let keys: std::collections::BTreeMap<String, String> = serde_json::from_slice(&fs::read(directory().join("api-keys.json")).ok()?).ok()?;
+    keys.get(id).cloned().filter(|v| !v.is_empty())
+}
+pub fn remember_api_key(id: &str, key: &str) -> Result<()> {
+    let dir = directory();
+    fs::create_dir_all(&dir)?;
+    #[cfg(unix)] {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
+    }
+    let path = dir.join("api-keys.json");
+    let mut keys: std::collections::BTreeMap<String, String> = if path.exists() {
+        serde_json::from_slice(&fs::read(&path)?).context("Не удалось прочитать хранилище API-ключей.")?
+    } else { Default::default() };
+    if key.is_empty() { keys.remove(id); } else { keys.insert(id.to_owned(), key.to_owned()); }
+    let temporary = dir.join(format!("api-keys-{}.pending", uuid::Uuid::new_v4()));
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)] {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    use std::io::Write;
+    let mut file = options.open(&temporary)?;
+    file.write_all(&serde_json::to_vec(&keys)?)?;file.sync_all()?;drop(file);
+    #[cfg(windows)] if path.exists() { fs::remove_file(&path)?; }
+    fs::rename(temporary, path)?;
+    Ok(())
+}

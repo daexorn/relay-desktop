@@ -252,11 +252,13 @@ async fn run(
     drop(password);
     let mut channel = session.channel_open_session().await?;
     let helper = format!(
-        "DESKTOP_SOURCE = {}\nBOARD_SOURCE = {}\nCLUSTER_SOURCE = {}\nATTACHMENTS_SOURCE = {}\n{}",
+        "DESKTOP_SOURCE = {}\nBOARD_SOURCE = {}\nCLUSTER_SOURCE = {}\nATTACHMENTS_SOURCE = {}\nAPI_SOURCE = {}\nAPI_DEFAULT = {}\n{}",
         serde_json::to_string(include_str!("../bridge/desktop_mcp.py"))?,
         serde_json::to_string(include_str!("../bridge/board.py"))?,
         serde_json::to_string(include_str!("../bridge/cluster_mcp.py"))?,
         serde_json::to_string(include_str!("../bridge/attachments.py"))?,
+        serde_json::to_string(include_str!("../bridge/api_engine.py"))?,
+        if server.api.enabled { "True" } else { "False" },
         include_str!("../bridge/relay_bridge.py")
     );
     channel
@@ -308,7 +310,7 @@ async fn run(
                 if desktop.local(&value){continue;}
                 let mut encoded=serde_json::to_vec(&value)?;encoded.push(b'\n');channel.data(&encoded[..]).await?;
             },
-            _=&mut deadline, if !greeted => anyhow::bail!("Не удалось запустить помощник. На сервере нужны Python 3 и Claude Code."),
+            _=&mut deadline, if !greeted => anyhow::bail!("Не удалось запустить помощник. На сервере нужен Python 3; для режима Claude Code также нужен сам Claude Code."),
             request=requests.recv()=>match request {
                 Some(value)=>{
                     if value["op"]=="_disconnect"{let _=channel.eof().await;break;}

@@ -241,8 +241,9 @@ fun ServersScreen(vm: RelayViewModel) {
     val p = LocalPalette.current
     var editing by remember { mutableStateOf<ServerProfile?>(null) }
     var asking by remember { mutableStateOf<ServerProfile?>(null) }
+    var apiEditing by remember { mutableStateOf<ServerProfile?>(null) }
     Column(Modifier.fillMaxSize()) {
-        TopBar("Relay", "Claude Code на твоих серверах") {
+        TopBar("Relay", "Claude Code и свой API на твоих серверах") {
             IconButton(Icons.Default.Settings, "Настройки") { vm.screen = Screen.Settings }
         }
         if (vm.notice.isNotEmpty()) Notice(vm.notice) { vm.notice = "" }
@@ -278,6 +279,7 @@ fun ServersScreen(vm: RelayViewModel) {
                         Label("${s.user}@${s.host}" + if (s.port != 22) ":${s.port}" else "", 12.sp, p.muted, maxLines = 1)
                     }
                     if (online) Box(Modifier.size(9.dp).clip(CircleShape).background(p.green))
+                    GhostButton("API", p.accent) { apiEditing = s }
                     IconButton(Icons.Default.MoreVert, "Изменить") { editing = s }
                 }
             }
@@ -287,6 +289,7 @@ fun ServersScreen(vm: RelayViewModel) {
         }
     }
     editing?.let { s -> ServerDialog(vm, s, vm.servers.any { it.id == s.id }) { editing = null } }
+    apiEditing?.let { s -> ApiDialog(vm,s) { apiEditing = null } }
     asking?.let { s ->
         var password by remember { mutableStateOf("") }
         var remember by remember { mutableStateOf(true) }
@@ -302,6 +305,41 @@ fun ServersScreen(vm: RelayViewModel) {
                     vm.connect(s, password)
                     asking = null
                 }
+            }
+        }
+    }
+}
+
+@Composable
+fun ApiDialog(vm: RelayViewModel, initial: ServerProfile, close: () -> Unit) {
+    val p = LocalPalette.current
+    var base by remember { mutableStateOf(initial.api.baseUrl.ifBlank { "https://tooken.club/v1" }) }
+    var model by remember { mutableStateOf(initial.api.model.ifBlank { "claude-sonnet-5-5" }) }
+    var key by remember { mutableStateOf(vm.savedApiKey(initial)) }
+    var enabled by remember { mutableStateOf(initial.api.enabled) }
+    var tokens by remember { mutableStateOf(initial.api.maxTokens.toString()) }
+    var steps by remember { mutableStateOf(initial.api.maxSteps.toString()) }
+    val catalog = if (vm.current?.id == initial.id) vm.apiCatalog() else initial.api.models.map { ModelInfo(it,it,"") }
+    fun profile() = ApiProfile(enabled,base.trim().trimEnd('/'),model.trim(),(tokens.toIntOrNull() ?: 8192).coerceIn(256,65536),(steps.toIntOrNull() ?: 80).coerceIn(1,256),catalog.map { it.value })
+    Sheet(close) {
+        Label("API · ${initial.name.ifBlank { initial.host }}", 19.sp, p.text, FontWeight.Medium)
+        Spacer(Modifier.height(12.dp))
+        Column(Modifier.heightIn(max=520.dp).verticalScroll(rememberScrollState()), verticalArrangement=Arrangement.spacedBy(9.dp)) {
+            Check("API по умолчанию для сессий",enabled) { enabled = it }
+            Field(base,{ base = it },"Адрес API")
+            Field(key,{ key = it },"API-ключ",password=true)
+            Field(model,{ model = it },"Идентификатор модели")
+            val models = catalog.filterNot { it.value.contains("image") }
+            if (models.isNotEmpty()) Selector(modelLabel(models,model),models.map { it.value to modelLabel(models,it.value) }) { model = it }
+            Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                Field(tokens,{ tokens = it.filter(Char::isDigit).take(5) },"Токенов на ответ",number=true,modifier=Modifier.weight(1f))
+                Field(steps,{ steps = it.filter(Char::isDigit).take(3) },"Шагов",number=true,modifier=Modifier.weight(1f))
+            }
+            GhostButton(if (vm.apiChecking) "Проверяю…" else "Проверить и загрузить модели",p.accent) { vm.checkApi(initial,profile(),key) }
+            if (vm.apiError.isNotEmpty()) Label(vm.apiError,12.sp,p.red)
+            Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.End) {
+                GhostButton("Отмена",onClick=close)
+                PrimaryButton("Сохранить",base.isNotBlank() && model.isNotBlank()) { if (vm.saveApi(initial,profile(),key)) close() }
             }
         }
     }
@@ -963,6 +1001,8 @@ fun Composer(vm: RelayViewModel, chat: Chat) {
     val busy = chat.version >= 0 && chat.transcript.busy
     for (t in vm.transfers.take(3)) key(t.id) { TransferCard(vm, t) }
     val online = vm.link == Link.Online
+    var apiSettings by remember { mutableStateOf(false) }
+    if (apiSettings) vm.current?.let { server -> ApiDialog(vm,server) { apiSettings = false } }
     val suggestions = slashMatches(chat.draft, vm.commands)
     if (chat.queued.isNotEmpty()) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp).padding(top = 6.dp).clip(RoundedCornerShape(12.dp)).background(p.side).border(1.dp, p.line, RoundedCornerShape(12.dp)).padding(10.dp)) {
@@ -1014,8 +1054,14 @@ fun Composer(vm: RelayViewModel, chat: Chat) {
         Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(Icons.Default.Add, "Прикрепить файлы или фото") { picker.launch("*/*") }
             FlowRow(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                val models = vm.models.ifEmpty { listOf(ModelInfo("default", "Модель сервера", ""), ModelInfo("fable", "Fable", ""), ModelInfo("opus", "Opus", ""), ModelInfo("sonnet", "Sonnet", ""), ModelInfo("haiku", "Haiku", "")) }
-                Selector(modelLabel(vm.models, chat.model), models.map { it.value to if (it.value == "default") "Авто · ${it.description}".trimEnd(' ', '·') else it.name }) { chat.model = it; vm.liveChange(chat) }
+                Selector(if (chat.api) "API" else "Claude Code",listOf("claude" to "Claude Code","api" to "Пользовательский API","settings" to "Настроить API…"),accent=chat.api) { source ->
+                    if (source == "settings") apiSettings = true else {
+                        vm.setApiSource(chat,source == "api")
+                        if (source == "api" && vm.current?.api?.baseUrl.isNullOrBlank()) apiSettings = true
+                    }
+                }
+                val models = if (chat.api) vm.apiCatalog() else vm.models.ifEmpty { listOf(ModelInfo("default", "Модель сервера", ""), ModelInfo("fable", "Fable", ""), ModelInfo("opus", "Opus", ""), ModelInfo("sonnet", "Sonnet", ""), ModelInfo("haiku", "Haiku", "")) }
+                Selector(modelLabel(models,if (chat.api) chat.apiModel else chat.model), models.map { it.value to if (it.value == "default") "Авто · ${it.description}".trimEnd(' ', '·') else modelLabel(models,it.value) }) { if (chat.api) chat.apiModel = it else chat.model = it; vm.liveChange(chat) }
                 Selector(when (chat.mode) { "auto" -> "Авто"; "acceptEdits" -> "Правки файлов"; "plan" -> "План"; else -> "С подтверждением" },
                     listOf("auto" to "Авто", "manual" to "С подтверждением", "acceptEdits" to "Правки файлов", "plan" to "Планирование"), accent = chat.mode == "auto") { chat.mode = it; vm.liveChange(chat) }
                 Selector("Глубина: " + if (chat.effort == "default") "авто" else chat.effort,

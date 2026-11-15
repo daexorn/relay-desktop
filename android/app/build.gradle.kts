@@ -7,17 +7,18 @@ plugins {
 android {
     namespace = "dev.relay.mobile"
     compileSdk = 35
+    buildToolsVersion = "35.0.0"
     defaultConfig {
         applicationId = "dev.relay.mobile"
         minSdk = 26
         targetSdk = 35
-        versionCode = 15
-        versionName = "0.2.8"
+        versionCode = 16
+        versionName = "0.3.0"
     }
     buildTypes {
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (providers.gradleProperty("relayUnsigned").orNull == "true") null else signingConfigs.getByName("debug")
         }
     }
     compileOptions {
@@ -36,7 +37,7 @@ android {
 
 val copyBridge by tasks.registering(Copy::class) {
     from(rootProject.file("../bridge")) {
-        include("relay_bridge.py", "desktop_mcp.py", "board.py", "cluster_mcp.py", "attachments.py")
+        include("relay_bridge.py", "desktop_mcp.py", "board.py", "cluster_mcp.py", "attachments.py", "api_engine.py")
     }
     into(layout.buildDirectory.dir("generated/bridge/bridge"))
 }

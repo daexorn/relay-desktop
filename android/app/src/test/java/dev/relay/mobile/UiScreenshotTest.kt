@@ -131,6 +131,15 @@ class UiScreenshotTest {
         shot("05-chat-actions")
     }
 
+    @Test fun apiChat() {
+        val vm = connected()
+        vm.attach(vm.current!!.copy(api = ApiProfile(enabled=true, baseUrl="https://example.test/v1", model="claude-sonnet-5-5", models=listOf("claude-sonnet-5-5","gpt-6.1-sol"))))
+        chat(vm)
+        vm.setApiSource(vm.chat()!!,true)
+        rule.setContent { RelayApp(vm) }
+        shot("08-api-chat")
+    }
+
     @Test fun permissionAndLightTheme() {
         val vm = connected("sand")
         chat(vm)

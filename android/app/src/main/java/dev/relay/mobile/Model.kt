@@ -18,10 +18,11 @@ data class ServerProfile(
     val model: String = "default",
     val mode: String = "auto",
     val effort: String = "default",
+    val api: ApiProfile = ApiProfile(),
 ) {
     fun json() = JSONObject().put("id", id).put("name", name).put("host", host).put("port", port)
         .put("user", user).put("cwd", cwd).put("fingerprint", fingerprint ?: JSONObject.NULL)
-        .put("model", model).put("mode", mode).put("effort", effort)
+        .put("model", model).put("mode", mode).put("effort", effort).put("api", api.json())
 
     companion object {
         fun from(o: JSONObject) = ServerProfile(
@@ -29,7 +30,22 @@ data class ServerProfile(
             o.optString("user", "root"), o.optString("cwd", "~"),
             o.optString("fingerprint").takeIf { it.isNotEmpty() && it != "null" },
             o.optString("model", "default"), o.optString("mode", "auto"), o.optString("effort", "default"),
+            ApiProfile.from(o.optJSONObject("api")),
         )
+    }
+}
+
+data class ApiProfile(val enabled: Boolean = false, val baseUrl: String = "", val model: String = "", val maxTokens: Int = 8192, val maxSteps: Int = 80, val models: List<String> = emptyList()) {
+    fun json() = JSONObject().put("enabled",enabled).put("base_url",baseUrl).put("model",model).put("max_tokens",maxTokens).put("max_steps",maxSteps).put("models",JSONArray(models))
+    fun request(key: String, selectedModel: String = model) = json().put("key",key).put("model",selectedModel.ifBlank { model })
+    fun error(): String? {
+        val uri = runCatching { java.net.URI(baseUrl.trim()) }.getOrNull()
+        if (uri == null || uri.scheme !in listOf("http","https") || uri.host.isNullOrBlank() || uri.userInfo != null || uri.query != null || uri.fragment != null) return "Укажи базовый URL API, например https://tooken.club/v1."
+        if (model.isBlank() || model.length > 200 || model.any(Char::isISOControl)) return "Укажи идентификатор модели API."
+        return null
+    }
+    companion object {
+        fun from(o: JSONObject?) = if (o == null) ApiProfile() else ApiProfile(o.optBoolean("enabled"),o.optString("base_url"),o.optString("model"),o.optInt("max_tokens",8192).coerceIn(256,65536),o.optInt("max_steps",80).coerceIn(1,256),o.optJSONArray("models")?.let { a -> (0 until a.length().coerceAtMost(500)).map { a.optString(it) }.filter(String::isNotBlank) }.orEmpty())
     }
 }
 
@@ -42,6 +58,7 @@ data class Session(
     val folder: String = "",
     val autoTitle: String = "",
     val running: Boolean = false,
+    val backend: String = "",
 )
 
 /** A model or slash command exactly as the server's Claude Code lists it. */
@@ -50,8 +67,8 @@ data class CommandInfo(val name: String, val description: String, val hint: Stri
 
 fun modelLabel(models: List<ModelInfo>, value: String): String = when {
     value == "default" -> "Модель: авто"
-    else -> models.firstOrNull { it.value == value }?.name?.takeIf { it.isNotEmpty() }
-        ?: value.replaceFirstChar { it.uppercase() }
+    else -> models.firstOrNull { it.value == value }?.name?.takeIf { it.isNotEmpty() && it != value }
+        ?: value.removePrefix("claude-").replace('-', ' ').replaceFirstChar { it.uppercase() }.let { if (it.length > 28) it.take(27) + "…" else it }
 }
 
 /** `fable`, `Fable 5.2` or a full id → the value Claude Code accepts; null when unknown. */
@@ -131,6 +148,12 @@ class Store(context: Context) {
     fun setPassword(id: String, value: String?) {
         runCatching { secrets.edit().apply { if (value == null) remove(id) else putString(id, value) }.apply() }
     }
+    fun apiKey(id: String): String? = runCatching { secrets.getString("api:$id",null) }.getOrNull()
+    fun setApiKey(id: String, value: String): Result<Unit> = runCatching {
+        check(secrets.edit().apply { if (value.isBlank()) remove("api:$id") else putString("api:$id",value) }.commit()) { "Не удалось сохранить API-ключ" }
+    }
+    fun apiSource(server: String, sid: String): Boolean? = if (prefs.contains("api:$server/$sid")) prefs.getBoolean("api:$server/$sid",false) else null
+    fun setApiSource(server: String, sid: String, enabled: Boolean) { prefs.edit().putBoolean("api:$server/$sid",enabled).apply() }
 }
 
 /** Port of the desktop `reduce`: folds Claude's stream events into the message list. */

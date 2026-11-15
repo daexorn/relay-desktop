@@ -1,6 +1,7 @@
 mod cluster_runtime;
 mod cluster_view;
 mod session_actions;
+mod api_settings;
 mod workspace;
 
 use crate::{
@@ -42,6 +43,8 @@ struct Remote {
     /// Sessions Claude is answering in right now, on any computer.
     running: std::collections::HashSet<String>,
     models: Vec<crate::model::ModelInfo>,
+    api_models: Vec<crate::model::ModelInfo>,
+    api_tokens: (u64, u64),
     commands: Vec<crate::model::CommandInfo>,
     /// `claude update` is running on the server.
     updating: bool,
@@ -174,6 +177,7 @@ pub struct RelayApp {
     folder_creating: Option<(String, Option<String>)>,
     search: String,
     editor: Option<Editor>,
+    api_editor: Option<api_settings::Editor>,
     trust: Option<Trust>,
     folder_open: bool,
     folder_path: String,
@@ -245,6 +249,7 @@ impl RelayApp {
             folder_creating: None,
             search: String::new(),
             editor: None,
+            api_editor: None,
             trust: None,
             folder_open: false,
             folder_path: String::new(),
@@ -289,6 +294,15 @@ impl RelayApp {
             app.settings = Settings::default();
             app.notice.clear();
             app.seed_demo();
+            if args.iter().any(|a| a == "--demo-api" || a == "--demo-api-settings") {
+                let profile = &mut app.settings.servers[0];
+                profile.api.enabled = true;profile.api.base_url = "https://tooken.club/v1".into();
+                profile.api.model = "claude-sonnet-5-5".into();
+                profile.api.models = vec!["claude-sonnet-5-5".into(), "claude-opus-5-5".into(), "gpt-6.1-sol".into()];
+                if args.iter().any(|a| a == "--demo-api-settings") {
+                    let server = profile.clone();app.open_api_settings(&server);
+                }
+            }
             if args.iter().any(|a| a == "--demo-connect") {
                 app.editor = Some(Editor {
                     server: Server {
@@ -1001,7 +1015,8 @@ impl RelayApp {
                     }
                 }
                 self.controller.send(&server, json!({"op":"sessions"}));
-                self.controller.send(&server, json!({"op":"usage"}));
+                let via_api = self.settings.servers.iter().find(|s| s.id == server).is_some_and(|s| self.selected_chat.get(&server).map(|sid| self.api_for_chat(s,&key(&server,sid))).unwrap_or(s.api.enabled));
+                if !via_api { self.controller.send(&server, json!({"op":"usage"})); }
                 let workspace = self
                     .settings
                     .servers
@@ -1035,6 +1050,7 @@ impl RelayApp {
                 r.models = serde_json::from_value(value["models"].clone()).unwrap_or_default();
                 r.commands = serde_json::from_value(value["commands"].clone()).unwrap_or_default();
             }
+            "api_models" => self.api_models_reply(&server, &value),
             "model_changed" | "mode_changed" | "notice" => {
                 let sid = value["sid"].as_str().unwrap_or("");
                 if let Some(c) = self.chats.get_mut(&key(&server, sid)) {
@@ -1068,6 +1084,11 @@ impl RelayApp {
             "run_state" => {
                 let sid = value["sid"].as_str().unwrap_or("").to_owned();
                 let busy = value["busy"] == true;
+                if busy {
+                    if let Some(backend @ ("api" | "claude")) = value["backend"].as_str() {
+                        self.settings.api_sessions.insert(key(&server, &sid), backend == "api");
+                    }
+                }
                 let r = self.remote.entry(server.clone()).or_default();
                 if busy {
                     r.running.insert(sid.clone());
@@ -1194,6 +1215,11 @@ impl RelayApp {
                         "claude" => {
                             reduce(c, &value["data"]);
                             if value["data"]["type"] == "result" {
+                                if value["data"]["relay_backend"] == "api" {
+                                    let remote = self.remote.entry(server.clone()).or_default();
+                                    remote.api_tokens.0 += value["data"]["usage"]["input_tokens"].as_u64().unwrap_or(0);
+                                    remote.api_tokens.1 += value["data"]["usage"]["output_tokens"].as_u64().unwrap_or(0);
+                                }
                                 self.controller.send(&server, json!({"op":"sessions"}));
                             }
                         }
@@ -1250,12 +1276,13 @@ impl RelayApp {
         }
     }
     fn send_prompt(&mut self) {
-        let Some(server) = self.server() else {
+        let Some(mut server) = self.server() else {
             return;
         };
         let Some(k) = self.current_key() else {
             return;
         };
+        server.api.enabled = self.api_for_chat(&server, &k);
         if let Some(run_id) = self.cluster_for_chat(&server.id, &self.chats[&k].sid) {
             if let Some(r) = self.cluster_store.runs.iter().find(|r| r.id == run_id) {
                 if r.leader_sid != self.chats[&k].sid {
@@ -1269,7 +1296,7 @@ impl RelayApp {
         }
         let live = self.remote.get(&server.id).is_some_and(|r| r.protocol >= 4);
         let c = self.chats.get_mut(&k).unwrap();
-        if c.busy && !live {
+        if c.busy && (!live || server.api.enabled) {
             c.enqueue_draft();
             return;
         }
@@ -1280,7 +1307,7 @@ impl RelayApp {
     /// Commands that act at once, also in the middle of an answer: `/model`, `/mode`, `/stop`.
     /// Every other `/command` goes to Claude Code like a message.
     fn local_command(&mut self, server: &Server, k: &str) -> bool {
-        let models = self.remote.get(&server.id).map(|r| r.models.clone()).unwrap_or_default();
+        let models = if server.api.enabled { self.api_model_catalog(server) } else { self.remote.get(&server.id).map(|r| r.models.clone()).unwrap_or_default() };
         let Some(c) = self.chats.get_mut(k) else {
             return false;
         };
@@ -1289,9 +1316,13 @@ impl RelayApp {
         let done = match name {
             "/model" if !arg.is_empty() => match resolve_model(&models, arg) {
                 Some(value) => {
-                    c.model = value.clone();
-                    self.controller.send(&server.id, json!({"op":"control","sid":c.sid,"action":"model","value":value}));
-                    self.notice = format!("Модель: {}", model_label(&models, &c.model));
+                    if server.api.enabled {
+                        if let Some(profile) = self.settings.servers.iter_mut().find(|s| s.id == server.id) { profile.api.model = value.clone(); }
+                    } else {
+                        c.model = value.clone();
+                        self.controller.send(&server.id, json!({"op":"control","sid":c.sid,"action":"model","value":value}));
+                    }
+                    self.notice = format!("Модель: {}", model_label(&models, &value));
                     true
                 }
                 None => {
@@ -1321,9 +1352,19 @@ impl RelayApp {
         if done {
             c.draft.clear();
         }
+        if done && server.api.enabled { self.save(); }
         done
     }
-    fn send_to_chat(&mut self, server: Server, k: String) {
+    fn send_to_chat(&mut self, mut server: Server, k: String) {
+        server.api.enabled = self.api_for_chat(&server, &k);
+        if server.api.enabled {
+            let mut profile = server.api.clone();
+            if let Err(error) = profile.validate() {
+                if let Some(chat) = self.chats.get_mut(&k) { chat.error = error.to_string();chat.queue_paused = true; }
+                self.open_api_settings(&server);
+                return;
+            }
+        }
         if self
             .delete_chat
             .as_ref()
@@ -1350,6 +1391,8 @@ impl RelayApp {
             .and_then(|id| self.cluster_store.runs.iter().find(|r| r.id == id))
             .is_some_and(|r| r.leader_sid != self.chats[&k].sid);
         let live = self.remote.get(&server.id).is_some_and(|r| r.protocol >= 4);
+        let mut api_request = json!({"model":if self.chats[&k].cluster_context.is_object() { self.chats[&k].model.as_str() } else { "default" }});
+        self.apply_api_request(&server, &mut api_request);
         let c = self.chats.get_mut(&k).unwrap();
         let steering = c.busy && live;
         if (c.busy && !live) || c.loading || (c.draft.trim().is_empty() && c.images.is_empty()) {
@@ -1373,7 +1416,12 @@ impl RelayApp {
             json!({"op":"_desktop_workspace","path":if server.local_control {server.local_workspace.clone()}else{None}}),
         );
         self.controller.send(&server.id,json!({"op":"_desktop_policy","sid":c.sid,"auto":server.local_control && c.mode=="auto"}));
-        let request = json!({"op":"prompt","sid":c.sid,"cwd":c.cwd,"text":text,"images":images,"files":files,"model":c.model,"mode":c.mode,"effort":c.effort,"agent_role":c.agent_role,"custom_prompt":c.custom_prompt,"cluster_context":c.cluster_context,"actor":self.settings.actor(),"desktop_enabled":!worker && ((server.local_control && server.local_workspace.is_some()) || server.tests!="off"),"desktop_context":{"os":std::env::consts::OS,"workspace":server.local_workspace,"downloads":dirs::download_dir(),"auto":c.mode=="auto","local":server.local_control && server.local_workspace.is_some(),"tests":server.tests}});
+        let mut request = json!({"op":"prompt","sid":c.sid,"cwd":c.cwd,"text":text,"images":images,"files":files,"model":c.model,"mode":c.mode,"effort":c.effort,"agent_role":c.agent_role,"custom_prompt":c.custom_prompt,"cluster_context":c.cluster_context,"actor":self.settings.actor(),"desktop_enabled":!worker && ((server.local_control && server.local_workspace.is_some()) || server.tests!="off"),"desktop_context":{"os":std::env::consts::OS,"workspace":server.local_workspace,"downloads":dirs::download_dir(),"auto":c.mode=="auto","local":server.local_control && server.local_workspace.is_some(),"tests":server.tests}});
+        if server.api.enabled {
+            request["backend"] = json!("api");
+            request["model"] = api_request["model"].take();
+            request["api"] = api_request["api"].take();
+        }
         if self.demo {
             c.error = "Это предпросмотр интерфейса. Добавь свой сервер для работы.".into();
             return;
@@ -1605,6 +1653,11 @@ impl RelayApp {
                 ui.horizontal(|ui| {
                     ui.add_space(6.);
                     label(ui, "Relay", 17., p.text);
+                    if let Some(server) = self.server() {
+                        if design::button(ui, "API", None, Kind::Ghost, p, Vec2::new(42., 28.)).on_hover_text("API этого сервера").clicked() {
+                            self.open_api_settings(&server);
+                        }
+                    }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if design::button(
                             ui,
@@ -1715,7 +1768,11 @@ impl RelayApp {
                                 if connected {
                                     if let Some(remote) = self.remote.get(&server.id) {
                                         ui.add_space(6.);
-                                        limits::show(ui, &remote.usage, p, connected);
+                                        let via_api = self.selected_chat.get(&server.id).is_some_and(|sid| self.api_for_chat(&server, &key(&server.id,sid))) || (self.selected_chat.get(&server.id).is_none() && server.api.enabled);
+                                        if via_api {
+                                            label(ui, "Пользовательский API", 12., p.muted);
+                                            if remote.api_tokens != (0, 0) { label(ui, format!("Токены: {} вход · {} выход",remote.api_tokens.0,remote.api_tokens.1), 11., p.muted); }
+                                        } else { limits::show(ui, &remote.usage, p, connected); }
                                         if remote.protocol >= 4 {
                                             ui.add_space(4.);
                                             let text = if remote.updating {
@@ -2523,6 +2580,11 @@ impl RelayApp {
         });
         ui.add_space(4.);
         let mut tests = server.tests.clone();
+        let mut use_api = self.api_for_chat(&server, k);
+        let previous_api = use_api;
+        let mut api_model = server.api.model.clone();
+        let mut configure_api = false;
+        let api_models = self.api_model_catalog(&server);
         self.game_test_cards(ui, &server.id, p);
         let (models, commands, live) = self
             .remote
@@ -2777,7 +2839,7 @@ impl RelayApp {
                     send = true;
                 }
                 let compact =
-                    ui.available_width() < if chat.mode == "manual" { 720. } else { 650. };
+                    ui.available_width() < if chat.mode == "manual" { 820. } else { 740. };
                 ui.add_space(4.);
                 ui.horizontal(|ui| {
                     ui.add_space(-6.);
@@ -2788,7 +2850,8 @@ impl RelayApp {
                         attach = true;
                     }
                     if !compact {
-                        composer_selectors(ui, chat, &mut tests, &models, p);
+                        api_settings::source_picker(ui, &mut use_api, &mut configure_api, chat.busy, p);
+                        composer_selectors(ui, chat, &mut tests, if use_api { &api_models } else { &models }, if use_api { Some(&mut api_model) } else { None }, p);
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 8.;
@@ -2801,7 +2864,7 @@ impl RelayApp {
                                 p,
                                 true,
                             )
-                            .on_hover_text(if chat.busy && live {
+                            .on_hover_text(if chat.busy && live && !use_api {
                                 "Отправить сейчас · Claude учтёт по ходу работы"
                             } else if chat.busy {
                                 "В очередь · текущий ответ продолжится"
@@ -2829,13 +2892,16 @@ impl RelayApp {
                 });
                 if compact {
                     ui.add_space(4.);
-                    ui.horizontal_wrapped(|ui| composer_selectors(ui, chat, &mut tests, &models, p));
+                    ui.horizontal_wrapped(|ui| {
+                        api_settings::source_picker(ui, &mut use_api, &mut configure_api, chat.busy, p);
+                        composer_selectors(ui, chat, &mut tests, if use_api { &api_models } else { &models }, if use_api { Some(&mut api_model) } else { None }, p);
+                    });
                 }
             });
         let current = (chat.model.clone(), chat.mode.clone(), chat.effort.clone());
         // With the server host, model and mode switch even while Claude is answering.
         if live && chat.busy {
-            if previous.0 != current.0 {
+            if previous.0 != current.0 && !use_api {
                 self.controller.send(&server.id, json!({"op":"control","sid":chat.sid,"action":"model","value":current.0}));
             }
             if previous.1 != current.1 {
@@ -2875,6 +2941,17 @@ impl RelayApp {
             self.controller
                 .send(&server.id, json!({"op":"_tests_policy","mode":tests}));
             self.save();
+        }
+        if use_api != previous_api || api_model != server.api.model {
+            self.settings.api_sessions.insert(k.to_owned(), use_api);
+            if let Some(profile) = self.settings.servers.iter_mut().find(|s| s.id == server.id) {
+                profile.api.model = api_model;
+            }
+            if use_api && server.api.base_url.is_empty() { configure_api = true; }
+            self.save();
+        }
+        if configure_api {
+            if let Some(profile) = self.settings.servers.iter().find(|s| s.id == server.id).cloned() { self.open_api_settings(&profile); }
         }
         if send {
             self.send_prompt();
@@ -3211,6 +3288,7 @@ impl RelayApp {
         }
     }
     fn dialogs(&mut self, ctx: &egui::Context) {
+        self.api_dialog(ctx);
         let p = design::animated_palette(ctx, self.settings.light);
         if let Some((server, request)) = self.desktop_requests.first().cloned() {
             let mut decision = None;
@@ -3578,6 +3656,7 @@ impl RelayApp {
                 self.controller.disconnect(&editor.server.id);
                 self.settings.servers.retain(|s| s.id != editor.server.id);
                 storage::forget(&editor.server.id);
+                let _ = storage::remember_api_key(&editor.server.id, "");
                 if self.settings.selected.as_deref() == Some(&editor.server.id) {
                     self.settings.selected = self.settings.servers.first().map(|s| s.id.clone());
                 }
@@ -3919,6 +3998,8 @@ impl RelayApp {
         self.remote.insert(
             s.id.clone(),
             Remote {
+                api_models: vec![],
+                api_tokens: (0, 0),
                 connected: true,
                 connecting: false,
                 version: "Claude Code".into(),
@@ -4062,7 +4143,7 @@ fn model_label(models: &[crate::model::ModelInfo], value: &str) -> String {
     if value == "default" {
         return "Модель: авто".into();
     }
-    models
+    let mut name = models
         .iter()
         .find(|m| m.value == value)
         .map(|m| m.display_name.clone())
@@ -4073,11 +4154,20 @@ fn model_label(models: &[crate::model::ModelInfo], value: &str) -> String {
             "haiku" => "Haiku".into(),
             "fable" => "Fable".into(),
             other => other.into(),
-        })
+        });
+    if let Some(tail) = name.strip_prefix("claude-") {
+        if let Some((family,version)) = tail.split_once('-') {
+            let family = match family { "opus" => "Opus", "sonnet" => "Sonnet", "haiku" => "Haiku", "fable" => "Fable", other => other };
+            name = format!("{family} {}",version.replace('-',"."));
+        }
+    }
+    model::shorten(&name, 28)
 }
 
-fn composer_selectors(ui: &mut egui::Ui, chat: &mut Chat, tests: &mut String, models: &[crate::model::ModelInfo], p: Palette) {
+fn composer_selectors(ui: &mut egui::Ui, chat: &mut Chat, tests: &mut String, models: &[crate::model::ModelInfo], api_model: Option<&mut String>, p: Palette) {
     ui.scope(|ui| {
+        let is_api = api_model.is_some();
+        let selected_model = api_model.unwrap_or(&mut chat.model);
         ui.spacing_mut().button_padding = Vec2::new(8., 5.);
         ui.spacing_mut().interact_size.y = 28.;
         ui.spacing_mut().icon_width = 10.;
@@ -4094,21 +4184,22 @@ fn composer_selectors(ui: &mut egui::Ui, chat: &mut Chat, tests: &mut String, mo
         v.widgets.open.weak_bg_fill = p.line;
         egui::ComboBox::from_id_salt("model-selector")
             .selected_text(
-                RichText::new(model_label(models, &chat.model))
+                RichText::new(model_label(models, selected_model))
                 .size(12.5)
                 .color(p.muted),
             )
             .width(0.)
             .icon(design::combo_icon)
             .show_ui(ui, |ui| {
-                if models.is_empty() {
+                if models.is_empty() && !is_api {
                     for (id, name) in [("default", "Модель сервера"), ("fable", "Fable"), ("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku")] {
-                        ui.selectable_value(&mut chat.model, id.into(), name);
+                        ui.selectable_value(selected_model, id.into(), name);
                     }
                 }
+                if models.is_empty() && is_api { ui.add(egui::TextEdit::singleline(selected_model).hint_text("Идентификатор модели API")); }
                 for m in models {
                     let name = if m.value == "default" { format!("Авто · {}", m.description) } else { m.display_name.clone() };
-                    ui.selectable_value(&mut chat.model, m.value.clone(), name)
+                    ui.selectable_value(selected_model, m.value.clone(), name)
                         .on_hover_text(&m.description);
                 }
             });
@@ -4165,6 +4256,7 @@ fn composer_selectors(ui: &mut egui::Ui, chat: &mut Chat, tests: &mut String, mo
             })
             .response
             .on_hover_text("Применяется к следующему сообщению");
+        if is_api { return; }
         egui::ComboBox::from_id_salt("tests-selector")
             .selected_text(
                 RichText::new(format!(
@@ -4704,8 +4796,9 @@ impl eframe::App for RelayApp {
         self.drain_queues();
         if !self.demo {
             if let Some(server) = self.settings.selected.as_ref() {
+                let via_api = self.settings.servers.iter().find(|s| &s.id == server).is_some_and(|s| self.selected_chat.get(server).map(|sid| self.api_for_chat(s,&key(server,sid))).unwrap_or(s.api.enabled));
                 if let Some(remote) = self.remote.get_mut(server).filter(|r| r.connected) {
-                    if remote
+                    if !via_api && remote
                         .usage_requested
                         .is_none_or(|at| at.elapsed() >= Duration::from_secs(60))
                     {
