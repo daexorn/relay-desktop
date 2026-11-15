@@ -827,7 +827,7 @@ class Run:
 
     def close(self):
         if getattr(self.owner,"cluster",None):self.owner.cluster.cancel(self.sid,revoke=True)
-        if getattr(self.owner,"desktop",None):self.owner.desktop.cancel(self.sid)
+        if getattr(self.owner,"desktop",None):self.owner.desktop.cancel(self.sid,revoke=True)
         self.closed = True
         if self.process.poll() is None:
             try:

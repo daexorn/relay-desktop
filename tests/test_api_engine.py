@@ -43,8 +43,8 @@ class ApiTests(unittest.TestCase):
         self.host.close()
         for run in self.host.runs.values():
             if getattr(run,'backend','')=='api':run.worker.join(3)
-    def prompt(self,text='hello',mode='auto'):
-        self.host.dispatch({'op':'prompt','backend':'api','api':self.api,'sid':self.sid,'cwd':str(self.root),'model':'fixture-model','mode':mode,'text':text})
+    def prompt(self,text='hello',mode='auto',**options):
+        self.host.dispatch({'op':'prompt','backend':'api','api':self.api,'sid':self.sid,'cwd':str(self.root),'model':'fixture-model','mode':mode,'text':text,**options})
     def wait(self,kind):
         end=time.monotonic()+7
         while time.monotonic()<end:
@@ -149,5 +149,25 @@ class ApiTests(unittest.TestCase):
         self.host.dispatch({'op':'prompt','sid':self.sid,'cwd':str(self.root),'text':'switch'})
         self.assertIn('переключением',self.wait('error')['message']);self.assertIs(self.host.runs[self.sid],run)
         self.host.dispatch({'op':'permission','sid':self.sid,'id':permission['id'],'allow':False});self.result()
+    def test_api_session_with_desktop_can_change_mode_and_keep_its_history(self):
+        desktop=(Path(__file__).parents[1]/'bridge/desktop_mcp.py').read_text()
+        with mock.patch.object(bridge,'DESKTOP_SOURCE',desktop,create=True):
+            self.responses.put(text_reply('First connected-PC response'))
+            self.prompt(desktop_enabled=True,desktop_context={'local':True});self.assertFalse(self.result()['is_error'])
+            first=self.host.runs[self.sid]
+            self.responses.put(text_reply('Second connected-PC response'))
+            self.prompt('continue',mode='manual',desktop_enabled=True,desktop_context={'local':True})
+            self.assertFalse(self.result()['is_error']);first.worker.join(3)
+        self.assertTrue(first.closed);self.assertFalse(first.worker.is_alive());self.assertIsNot(self.host.runs[self.sid],first)
+        self.assertEqual([m['text'] for m in self.host.transcripts.history(self.sid) if m['role'] in ('user','assistant')],
+                         ['hello','First connected-PC response','continue','Second connected-PC response'])
+        self.assertTrue(any(t['function']['name']=='mcp__relay_desktop__run_local_command' for t in self.requests[-1]['tools']))
+    def test_bridge_close_with_connected_api_desktop_finishes_cleanly(self):
+        desktop=(Path(__file__).parents[1]/'bridge/desktop_mcp.py').read_text()
+        with mock.patch.object(bridge,'DESKTOP_SOURCE',desktop,create=True):
+            self.responses.put(text_reply('Connected-PC fixture'))
+            self.prompt(desktop_enabled=True,desktop_context={'local':True});self.assertFalse(self.result()['is_error'])
+        run=self.host.runs[self.sid];self.host.close();run.worker.join(3)
+        self.assertTrue(run.closed);self.assertFalse(run.worker.is_alive());self.assertTrue(self.host.desktop.closed)
 
 if __name__=='__main__':unittest.main()

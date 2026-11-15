@@ -10,6 +10,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 SOURCE=Path(__file__).parents[1]/'bridge/desktop_mcp.py'
 spec=importlib.util.spec_from_file_location('desktop_mcp',SOURCE)
@@ -92,5 +93,43 @@ class DesktopTests(unittest.TestCase):
             self.service.result(event['id'],{'ok':False,'message':'test finished'});self.assertFalse(result.get(timeout=2)['ok'])
     def test_cancel_resolves_waiting_tool(self):
         result=self.call('run_local_command',{'command':'echo example'});self.events.get(timeout=2);self.service.cancel('test-session');self.assertFalse(result.get(timeout=2)['ok'])
+    def test_stop_keeps_the_connection_for_the_next_action(self):
+        result=self.call('run_local_command',{'command':'first fixture'})
+        self.events.get(timeout=2);self.service.cancel('test-session')
+        self.assertFalse(result.get(timeout=2)['ok']);self.events.get(timeout=2)
+        next_result=self.call('run_local_command',{'command':'second fixture'})
+        event=self.events.get(timeout=2);self.assertEqual(event['type'],'desktop_request')
+        self.service.result(event['id'],{'ok':True,'message':'fixture response'})
+        self.assertTrue(next_result.get(timeout=2)['ok'])
+    def test_revoke_cancels_waiter_and_rejects_old_token(self):
+        result=self.call('run_local_command',{'command':'fixture only'})
+        self.events.get(timeout=2);self.service.cancel('test-session',revoke=True)
+        self.assertFalse(result.get(timeout=2)['ok']);self.events.get(timeout=2)
+        rejected=self.call('run_local_command',{'command':'must never be forwarded'}).get(timeout=2)
+        self.assertFalse(rejected['ok']);self.assertIn('expired',rejected['message']);self.assertTrue(self.events.empty())
+    def test_revoking_one_session_preserves_the_other_connection(self):
+        other=json.loads(self.service.config('other-session'))['mcpServers']['relay_desktop']['env']['RELAY_DESKTOP_TOKEN']
+        self.service.cancel('test-session',revoke=True)
+        result=self.call('run_local_command',{'command':'other fixture'},token=other)
+        event=self.events.get(timeout=2);self.assertEqual(event['sid'],'other-session')
+        self.service.result(event['id'],{'ok':True});self.assertTrue(result.get(timeout=2)['ok'])
+    def test_revoke_all_rejects_both_sessions(self):
+        other=json.loads(self.service.config('other-session'))['mcpServers']['relay_desktop']['env']['RELAY_DESKTOP_TOKEN']
+        self.service.cancel(revoke=True)
+        for token in (self.token,other):
+            result=self.call('run_local_command',{'command':'fixture only'},token=token).get(timeout=2)
+            self.assertFalse(result['ok']);self.assertIn('expired',result['message'])
+        self.assertTrue(self.events.empty())
+    def test_revoke_during_validation_does_not_forward_a_late_request(self):
+        entered=threading.Event();release=threading.Event()
+        def validate(args):
+            entered.set();release.wait(2);return args,1
+        with mock.patch.object(self.service,'test_input',side_effect=validate):
+            result=self.call('minecraft_test',{'scenario':'fixture only'})
+            self.assertTrue(entered.wait(2))
+            try:self.service.cancel('test-session',revoke=True)
+            finally:release.set()
+            rejected=result.get(timeout=2)
+        self.assertFalse(rejected['ok']);self.assertIn('expired',rejected['message']);self.assertTrue(self.events.empty())
 
 if __name__=='__main__':unittest.main()

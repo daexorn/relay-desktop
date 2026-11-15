@@ -36,7 +36,7 @@ class RelayDesktop:
         threading.Thread(target=self.accept,daemon=True).start()
 
     def config(self,sid,tools=("download_file","run_local_command")):
-        self.cancel(sid)
+        self.cancel(sid,revoke=True)
         token=secrets.token_urlsafe(32)
         with self.lock:
             self.tokens={k:v for k,v in self.tokens.items() if v!=sid};self.tokens[token]=sid
@@ -81,6 +81,7 @@ class RelayDesktop:
                 if destination is not None:args["destination"]=destination
             ident=str(uuid.uuid4());item={"sid":sid,"tool":tool,"input":args,"event":threading.Event(),"result":None,"streaming":False,"streamed":set(),"uploads":{},"uploaded":0}
             with self.lock:
+                if self.closed or self.tokens.get(request.get("token"))!=sid:raise ValueError("Desktop connection expired")
                 if self.closed or len(self.pending)>=8:raise ValueError("Desktop is unavailable or busy")
                 self.pending[ident]=item
             self.send({"type":"desktop_request","id":ident,"sid":sid,"tool":tool,"input":args})
@@ -176,14 +177,15 @@ class RelayDesktop:
         except ValueError as error:
             self.send({"type":"desktop_end","id":ident,"error":str(error)})
 
-    def cancel(self,sid=None):
+    def cancel(self,sid=None,revoke=False):
         with self.lock:
             for item in self.pending.values():
                 if sid is None or item["sid"]==sid:
                     item["result"]={"ok":False,"message":"Desktop action cancelled"};item["event"].set()
+            if revoke:self.tokens={k:v for k,v in self.tokens.items() if sid is not None and v!=sid}
 
     def close(self):
-        self.closed=True;self.cancel();self.socket.close();self.temp.cleanup()
+        self.closed=True;self.cancel(revoke=True);self.socket.close();self.temp.cleanup()
 
 
 def mcp_main():
