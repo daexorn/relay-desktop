@@ -940,6 +940,9 @@ class Bridge:
         self.meta = SessionMeta()
         self.catalog = None
         self.catalog_probe = False
+        auth_source=globals().get('AUTH_SOURCE') or Path(__file__).with_name('auth_flow.py').read_text(encoding='utf-8')
+        auth={'__name__':'relay_auth'};exec(auth_source,auth)
+        self.auth=auth['AuthManager'](self.binary)
 
     def learn_catalog(self, info):
         """Models and slash commands exactly as this server's Claude Code reports them."""
@@ -1114,7 +1117,7 @@ class Bridge:
     def hello(self):
         version = self.claude_version()
         self.send({"type": "hello", "home": str(Path.home()), "hostname": os.uname().nodename,
-                   "version": version, "protocol": 4, "api_available": True, "host": bool(globals().get("RELAY_HOSTED"))})
+                   "version": version, "protocol": 4, "api_available": True, "auth_available": True, "host": bool(globals().get("RELAY_HOSTED"))})
         if self.catalog:
             self.send(self.catalog)
         elif not globals().get('API_DEFAULT'):
@@ -1124,7 +1127,14 @@ class Bridge:
         op = req.get("op")
         claimed = False
         try:
-            if op == "sessions":
+            if op == "auth_start":
+                owner=getattr(CLIENT,'value',None)
+                self.auth.start(req.get('id'),owner.send if owner is not None else self.send,owner)
+            elif op == "auth_input":
+                self.auth.input(req.get('id'),req.get('code'),getattr(CLIENT,'value',None))
+            elif op == "auth_cancel":
+                self.auth.cancel(req.get('id'),getattr(CLIENT,'value',None))
+            elif op == "sessions":
                 self.send_sessions()
             elif op == "session_meta":
                 sid = valid_id(req.get("sid"))
@@ -1331,6 +1341,9 @@ class Bridge:
             else:
                 raise ValueError("Обнови приложение: сервер не знает это действие.")
         except (ValueError, OSError, subprocess.SubprocessError, TypeError, AttributeError, UnicodeError) as error:
+            if op in ('auth_start','auth_input','auth_cancel'):
+                self.send({'type':'auth','id':req.get('id'),'state':'input_error' if op=='auth_input' else 'failed','message':str(error)[:500]})
+                return
             sid = req.get("sid", "")
             run = self.runs.get(sid)
             if op == "prompt" and run and claimed and run.turns == 0:
@@ -1339,6 +1352,7 @@ class Bridge:
             self.send({"type": "error", "sid": sid, "op": op, "message": str(error)[:1800]})
 
     def close(self):
+        self.auth.cancel(closing=True)
         for run in list(self.runs.values()):
             run.close()
         if self.cluster:self.cluster.close()
@@ -1635,6 +1649,7 @@ class Host:
             pass
         finally:
             client.close()
+            if getattr(self.bridge,'auth',None):self.bridge.auth.cancel_owner(client)
             with self.lock:
                 self.clients = [c for c in self.clients if c is not client]
                 if not self.clients:

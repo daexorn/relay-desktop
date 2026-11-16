@@ -4,6 +4,7 @@
 )]
 
 mod app;
+mod auth_browser;
 mod artifacts;
 mod board;
 mod cluster;
@@ -22,6 +23,10 @@ mod uploads;
 
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a|a=="--auth-browser" || a=="--auth-browser-smoke") {
+        return auth_browser::run(args.iter().any(|a|a=="--auth-browser-smoke"))
+            .map_err(|error|eframe::Error::AppCreation(error.into()));
+    }
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("Relay {}", env!("CARGO_PKG_VERSION"));
         return Ok(());

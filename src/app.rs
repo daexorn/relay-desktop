@@ -3,6 +3,7 @@ mod cluster_view;
 mod session_actions;
 mod api_settings;
 mod workspace;
+mod auth;
 
 use crate::{
     connection::{Controller, Event},
@@ -24,6 +25,7 @@ use zeroize::Zeroize;
 use crate::ui::{self as design, Icon, Kind, Palette, accent, GREEN};
 #[derive(Default)]
 struct Remote {
+    auth_available: bool,
     connected: bool,
     connecting: bool,
     version: String,
@@ -178,6 +180,7 @@ pub struct RelayApp {
     search: String,
     editor: Option<Editor>,
     api_editor: Option<api_settings::Editor>,
+    login: Option<auth::Login>,
     trust: Option<Trust>,
     folder_open: bool,
     folder_path: String,
@@ -250,6 +253,7 @@ impl RelayApp {
             search: String::new(),
             editor: None,
             api_editor: None,
+            login: None,
             trust: None,
             folder_open: false,
             folder_path: String::new(),
@@ -852,6 +856,7 @@ impl RelayApp {
                     self.remote.entry(server).or_default().connecting = false;
                 }
                 Event::Disconnected { server } => {
+                    self.login_disconnected(&server);
                     if let Some(dialog) = self.delete_chat.as_mut().filter(|d| d.server == server) {
                         dialog.pending = false;
                         dialog.error =
@@ -1004,6 +1009,7 @@ impl RelayApp {
                 r.connecting = false;
                 r.version = value["version"].as_str().unwrap_or("Claude Code").into();
                 r.protocol = value["protocol"].as_u64().unwrap_or(0);
+                r.auth_available = value["auth_available"] == true;
                 r.home = value["home"].as_str().unwrap_or("~").into();
                 r.usage_requested = Some(Instant::now());
                 r.sessions_requested = Some(Instant::now());
@@ -1051,6 +1057,7 @@ impl RelayApp {
                 r.commands = serde_json::from_value(value["commands"].clone()).unwrap_or_default();
             }
             "api_models" => self.api_models_reply(&server, &value),
+            "auth" => self.login_event(&server, &value),
             "model_changed" | "mode_changed" | "notice" => {
                 let sid = value["sid"].as_str().unwrap_or("");
                 if let Some(c) = self.chats.get_mut(&key(&server, sid)) {
@@ -1307,6 +1314,11 @@ impl RelayApp {
     /// Commands that act at once, also in the middle of an answer: `/model`, `/mode`, `/stop`.
     /// Every other `/command` goes to Claude Code like a message.
     fn local_command(&mut self, server: &Server, k: &str) -> bool {
+        if self.chats.get(k).is_some_and(|c|c.draft.trim()=="/login") {
+            self.start_login(server);
+            if let Some(c)=self.chats.get_mut(k){c.draft.clear();}
+            return true;
+        }
         let models = if server.api.enabled { self.api_model_catalog(server) } else { self.remote.get(&server.id).map(|r| r.models.clone()).unwrap_or_default() };
         let Some(c) = self.chats.get_mut(k) else {
             return false;
@@ -1788,6 +1800,9 @@ impl RelayApp {
                                             }
                                         }
                                     }
+                                }
+                                if connected && ui.small_button("Войти в Claude").clicked() {
+                                    self.start_login(&server);
                                 }
                                 if !connected && !connecting {
                                     ui.add_space(6.);
@@ -3288,6 +3303,7 @@ impl RelayApp {
         }
     }
     fn dialogs(&mut self, ctx: &egui::Context) {
+        self.login_dialog(ctx);
         self.api_dialog(ctx);
         let p = design::animated_palette(ctx, self.settings.light);
         if let Some((server, request)) = self.desktop_requests.first().cloned() {
@@ -3998,6 +4014,7 @@ impl RelayApp {
         self.remote.insert(
             s.id.clone(),
             Remote {
+                auth_available: true,
                 api_models: vec![],
                 api_tokens: (0, 0),
                 connected: true,
@@ -4779,6 +4796,7 @@ fn reduce(c: &mut Chat, data: &Value) {
 }
 impl eframe::App for RelayApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if let Some(login)=self.login.take(){self.controller.send(&login.server,json!({"op":"auth_cancel","id":login.id}));}
         self.persist_pending(true);
         if !self.demo {
             for r in &mut self.cluster_store.runs {

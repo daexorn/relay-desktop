@@ -252,12 +252,13 @@ async fn run(
     drop(password);
     let mut channel = session.channel_open_session().await?;
     let helper = format!(
-        "DESKTOP_SOURCE = {}\nBOARD_SOURCE = {}\nCLUSTER_SOURCE = {}\nATTACHMENTS_SOURCE = {}\nAPI_SOURCE = {}\nAPI_DEFAULT = {}\n{}",
+        "DESKTOP_SOURCE = {}\nBOARD_SOURCE = {}\nCLUSTER_SOURCE = {}\nATTACHMENTS_SOURCE = {}\nAPI_SOURCE = {}\nAUTH_SOURCE = {}\nAPI_DEFAULT = {}\n{}",
         serde_json::to_string(include_str!("../bridge/desktop_mcp.py"))?,
         serde_json::to_string(include_str!("../bridge/board.py"))?,
         serde_json::to_string(include_str!("../bridge/cluster_mcp.py"))?,
         serde_json::to_string(include_str!("../bridge/attachments.py"))?,
         serde_json::to_string(include_str!("../bridge/api_engine.py"))?,
+        serde_json::to_string(include_str!("../bridge/auth_flow.py"))?,
         if server.api.enabled { "True" } else { "False" },
         include_str!("../bridge/relay_bridge.py")
     );

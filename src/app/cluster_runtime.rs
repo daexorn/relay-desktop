@@ -757,6 +757,7 @@ mod tests {
             search: String::new(),
             editor: None,
             api_editor: None,
+            login: None,
             trust: None,
             folder_open: false,
             folder_path: String::new(),
@@ -1103,5 +1104,45 @@ mod tests {
         assert_ne!(app.cluster_store.runs[0].leader_sid, sid);
         assert!(app.cluster_store.runs[0].paused);
         assert_eq!(app.cluster_store.runs[0].title, "Goal");
+    }
+
+    #[test]
+    fn login_is_local_even_while_a_chat_is_busy_and_never_becomes_a_prompt() {
+        let (mut app,a,_,_,mut rx_a,mut rx_b)=fixture();
+        app.remote.get_mut(&a.id).unwrap().auth_available=true;
+        let sid=cluster::id();let k=key(&a.id,&sid);
+        let mut chat=Chat::new(sid.clone(),a.cwd.clone(),"Existing session".into());
+        chat.busy=true;chat.draft="/login".into();chat.messages.push(Message{role:"assistant".into(),text:"Keep this answer".into(),..Default::default()});
+        app.chats.insert(k.clone(),chat);
+        assert!(app.local_command(&a,&k));
+        let request=take(&mut rx_a,"auth_start");assert!(uuid::Uuid::parse_str(request["id"].as_str().unwrap()).is_ok());
+        assert!(rx_a.try_recv().is_err() && rx_b.try_recv().is_err());
+        assert!(app.chats[&k].busy && app.chats[&k].draft.is_empty());
+        assert_eq!(app.chats[&k].messages[0].text,"Keep this answer");assert_eq!(app.chats[&k].sid,sid);
+    }
+
+    #[test]
+    fn login_events_are_bound_to_host_and_request_and_do_not_replay_work() {
+        let (mut app,a,b,_,mut rx_a,_)=fixture();
+        app.remote.get_mut(&a.id).unwrap().auth_available=true;app.start_login(&a);
+        let request=take(&mut rx_a,"auth_start");
+        app.data(b.id.clone(),json!({"type":"auth","id":request["id"],"state":"success"}));
+        assert!(app.login.as_ref().unwrap().active());
+        app.data(a.id.clone(),json!({"type":"auth","id":cluster::id(),"state":"success"}));
+        assert!(app.login.as_ref().unwrap().active());
+        app.data(a.id.clone(),json!({"type":"auth","id":request["id"],"state":"success","message":"Signed in"}));
+        assert!(!app.login.as_ref().unwrap().active());
+        assert_eq!(take(&mut rx_a,"usage")["op"],"usage");assert!(rx_a.try_recv().is_err());
+    }
+
+    #[test]
+    fn changing_login_host_cancels_only_the_old_flow_and_disconnect_stops_ui_waiting() {
+        let (mut app,a,b,_,mut rx_a,mut rx_b)=fixture();
+        for id in [&a.id,&b.id]{app.remote.get_mut(id).unwrap().auth_available=true;}
+        app.start_login(&a);let first=take(&mut rx_a,"auth_start");
+        app.start_login(&b);assert_eq!(take(&mut rx_a,"auth_cancel")["id"],first["id"]);
+        let second=take(&mut rx_b,"auth_start");assert_ne!(first["id"],second["id"]);
+        app.login_disconnected(&a.id);assert!(app.login.as_ref().unwrap().active());
+        app.login_disconnected(&b.id);assert!(!app.login.as_ref().unwrap().active());
     }
 }

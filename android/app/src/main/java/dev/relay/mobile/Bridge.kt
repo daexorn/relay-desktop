@@ -155,6 +155,7 @@ class Bridge(
             append("CLUSTER_SOURCE = ").append(pythonString(read("cluster_mcp.py"))).append('\n')
             append("ATTACHMENTS_SOURCE = ").append(pythonString(read("attachments.py"))).append('\n')
             append("API_SOURCE = ").append(pythonString(read("api_engine.py"))).append('\n')
+            append("AUTH_SOURCE = ").append(pythonString(read("auth_flow.py"))).append('\n')
             append("API_DEFAULT = ").append(if (apiDefault) "True" else "False").append('\n')
             append(read("relay_bridge.py"))
         }.toByteArray(Charsets.UTF_8)
