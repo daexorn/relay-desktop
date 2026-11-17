@@ -6,7 +6,7 @@ pub fn accent() -> Color32 {
     let n = ACCENT_RGB.load(std::sync::atomic::Ordering::Relaxed);
     Color32::from_rgb((n >> 16) as u8, (n >> 8) as u8, n as u8)
 }
-pub const GREEN: Color32 = Color32::from_rgb(92, 184, 132);
+pub const GREEN: Color32 = Color32::from_rgb(112, 199, 165);
 pub const RED: Color32 = Color32::from_rgb(218, 116, 123);
 #[derive(Clone, Copy)]
 pub struct Palette {
@@ -75,19 +75,110 @@ pub fn animated_palette(ctx: &egui::Context, light: bool) -> Palette {
 /// Theme id, name, light or dark, and colours: base, side, rail, surface, line, text,
 /// muted, accent.
 pub const THEME_TABLE: [(&str, &str, bool, [u32; 8]); 13] = [
-    ("graphite", "Графит", false, [0x19191b, 0x131315, 0x0e0e10, 0x222225, 0x2e2e32, 0xececee, 0x8e8e96, 0x8ba6f2]),
-    ("midnight", "Полночь", false, [0x111722, 0x0e141f, 0x0b101a, 0x1b2433, 0x2a3547, 0xe5edf9, 0x95a5bd, 0x6ea8ff]),
-    ("forest", "Хвоя", false, [0x141c1a, 0x101714, 0x0d1310, 0x202d27, 0x304139, 0xe4eee8, 0x9aad9f, 0x6fcf97]),
-    ("plum", "Слива", false, [0x1b1721, 0x16121c, 0x120e18, 0x292331, 0x3b3246, 0xeee7f5, 0xab9bb8, 0xc39bff]),
-    ("ember", "Угли", false, [0x1d1816, 0x171311, 0x120f0d, 0x2a2320, 0x3d322d, 0xf3e9e4, 0xb0a097, 0xff8a5b]),
-    ("ocean", "Океан", false, [0x0f1b1e, 0x0c1619, 0x091214, 0x172a2e, 0x24393e, 0xe2f2f2, 0x8fadaf, 0x4fd1c5]),
-    ("nord", "Север", false, [0x2e3440, 0x292e39, 0x242933, 0x3b4252, 0x434c5e, 0xeceff4, 0x9aa5b8, 0x88c0d0]),
-    ("rose", "Роза", false, [0x1e1619, 0x181114, 0x130d10, 0x2c2024, 0x402e34, 0xf6e8ec, 0xb79aa3, 0xf28ba8]),
-    ("dracula", "Дракула", false, [0x282a36, 0x21222c, 0x1b1c24, 0x343746, 0x44475a, 0xf8f8f2, 0xa4a9c6, 0xbd93f9]),
-    ("oled", "OLED", false, [0x000000, 0x050506, 0x000000, 0x121214, 0x232327, 0xf2f2f4, 0x8a8a93, 0xa78bfa]),
-    ("paper", "Бумага", true, [0xfcfcfb, 0xf5f4f2, 0xedece9, 0xffffff, 0xe4e2de, 0x1e1e21, 0x78777e, 0x4a6fe3]),
-    ("sand", "Песок", true, [0xfbf7f0, 0xf4eee3, 0xece4d6, 0xfffdf9, 0xe3d8c6, 0x2b241c, 0x857865, 0xc2703d]),
-    ("mint", "Мята", true, [0xf6fbf8, 0xedf6f1, 0xe2efe8, 0xffffff, 0xd5e7dc, 0x17261e, 0x6c8478, 0x2f9e77]),
+    (
+        "graphite",
+        "Графит",
+        false,
+        [
+            0x10141a, 0x151b23, 0x0c1016, 0x1b242e, 0x2a3643, 0xe6edf3, 0x8d9cab, 0x83c4b3,
+        ],
+    ),
+    (
+        "midnight",
+        "Полночь",
+        false,
+        [
+            0x0f1520, 0x141d2b, 0x0b111b, 0x1b2739, 0x2b3b52, 0xe5edf9, 0x95a5bd, 0x89aef1,
+        ],
+    ),
+    (
+        "forest",
+        "Хвоя",
+        false,
+        [
+            0x111916, 0x17211c, 0x0c120f, 0x202e27, 0x2e4136, 0xe4eee8, 0x9aad9f, 0x83c6a9,
+        ],
+    ),
+    (
+        "plum",
+        "Слива",
+        false,
+        [
+            0x1b1721, 0x16121c, 0x120e18, 0x292331, 0x3b3246, 0xeee7f5, 0xab9bb8, 0xc39bff,
+        ],
+    ),
+    (
+        "ember",
+        "Угли",
+        false,
+        [
+            0x1d1816, 0x171311, 0x120f0d, 0x2a2320, 0x3d322d, 0xf3e9e4, 0xb0a097, 0xff8a5b,
+        ],
+    ),
+    (
+        "ocean",
+        "Океан",
+        false,
+        [
+            0x0f1b1e, 0x0c1619, 0x091214, 0x172a2e, 0x24393e, 0xe2f2f2, 0x8fadaf, 0x4fd1c5,
+        ],
+    ),
+    (
+        "nord",
+        "Север",
+        false,
+        [
+            0x2e3440, 0x292e39, 0x242933, 0x3b4252, 0x434c5e, 0xeceff4, 0x9aa5b8, 0x88c0d0,
+        ],
+    ),
+    (
+        "rose",
+        "Роза",
+        false,
+        [
+            0x1e1619, 0x181114, 0x130d10, 0x2c2024, 0x402e34, 0xf6e8ec, 0xb79aa3, 0xf28ba8,
+        ],
+    ),
+    (
+        "dracula",
+        "Дракула",
+        false,
+        [
+            0x282a36, 0x21222c, 0x1b1c24, 0x343746, 0x44475a, 0xf8f8f2, 0xa4a9c6, 0xbd93f9,
+        ],
+    ),
+    (
+        "oled",
+        "OLED",
+        false,
+        [
+            0x000000, 0x050506, 0x000000, 0x121214, 0x232327, 0xf2f2f4, 0x8a8a93, 0xa78bfa,
+        ],
+    ),
+    (
+        "paper",
+        "Бумага",
+        true,
+        [
+            0xfcfcfb, 0xf5f4f2, 0xedece9, 0xffffff, 0xe4e2de, 0x1e1e21, 0x78777e, 0x4a6fe3,
+        ],
+    ),
+    (
+        "sand",
+        "Песок",
+        true,
+        [
+            0xfbf7f0, 0xf4eee3, 0xece4d6, 0xfffdf9, 0xe3d8c6, 0x2b241c, 0x857865, 0xc2703d,
+        ],
+    ),
+    (
+        "mint",
+        "Мята",
+        true,
+        [
+            0xf6fbf8, 0xedf6f1, 0xe2efe8, 0xffffff, 0xd5e7dc, 0x17261e, 0x6c8478, 0x2f9e77,
+        ],
+    ),
 ];
 pub const THEMES: [(&str, &str); 13] = {
     let mut out = [("", ""); 13];
@@ -99,7 +190,10 @@ pub const THEMES: [(&str, &str); 13] = {
     out
 };
 fn theme_row(name: &str) -> &'static (&'static str, &'static str, bool, [u32; 8]) {
-    THEME_TABLE.iter().find(|t| t.0 == name).unwrap_or(&THEME_TABLE[0])
+    THEME_TABLE
+        .iter()
+        .find(|t| t.0 == name)
+        .unwrap_or(&THEME_TABLE[0])
 }
 fn rgb(n: u32) -> Color32 {
     Color32::from_rgb((n >> 16) as u8, (n >> 8) as u8, n as u8)
@@ -160,6 +254,13 @@ fn rect_id(rect: Rect) -> egui::Id {
 }
 #[derive(Clone, Copy)]
 pub enum Icon {
+    Browser,
+    Key,
+    Back,
+    Forward,
+    Expand,
+    Collapse,
+    Chat,
     Plus,
     Settings,
     Search,
@@ -198,6 +299,49 @@ pub fn icon(p: &egui::Painter, r: Rect, which: Icon, color: Color32) {
         ));
     };
     match which {
+        Icon::Browser => {
+            p.circle_stroke(c, 8. * z, s);
+            line((-8., 0.), (8., 0.));
+            path(&[(0., -8.), (-3., -4.), (-4., 0.), (-3., 4.), (0., 8.)]);
+            path(&[(0., -8.), (3., -4.), (4., 0.), (3., 4.), (0., 8.)]);
+        }
+        Icon::Key => {
+            p.circle_stroke(v(-3., -3.), 4.5 * z, s);
+            path(&[(0., 0.), (7., 7.), (9., 5.)]);
+            line((4., 4.), (6., 2.));
+        }
+        Icon::Back => {
+            path(&[(1., -6.), (-5., 0.), (1., 6.)]);
+            line((-5., 0.), (8., 0.));
+        }
+        Icon::Forward => {
+            path(&[(-1., -6.), (5., 0.), (-1., 6.)]);
+            line((-8., 0.), (5., 0.));
+        }
+        Icon::Expand => {
+            path(&[(-8., -2.), (-8., -8.), (-2., -8.)]);
+            path(&[(2., 8.), (8., 8.), (8., 2.)]);
+            line((-8., -8.), (-2., -2.));
+            line((8., 8.), (2., 2.));
+        }
+        Icon::Collapse => {
+            path(&[(-8., -2.), (-2., -2.), (-2., -8.)]);
+            path(&[(2., 8.), (2., 2.), (8., 2.)]);
+        }
+        Icon::Chat => {
+            path(&[
+                (-8., -6.),
+                (8., -6.),
+                (8., 5.),
+                (-2., 5.),
+                (-7., 9.),
+                (-7., 5.),
+                (-8., 5.),
+                (-8., -6.),
+            ]);
+            line((-4., -2.), (4., -2.));
+            line((-4., 1.), (1., 1.));
+        }
         Icon::Cluster => {
             for (x, y) in [(0., -6.), (-6., 5.), (6., 5.)] {
                 p.circle_stroke(v(x, y), 3. * z, s);
@@ -260,12 +404,24 @@ pub fn icon(p: &egui::Painter, r: Rect, which: Icon, color: Color32) {
             (-8., -5.),
         ]),
         Icon::Terminal => {
-            p.rect_stroke(Rect::from_center_size(c, Vec2::new(18. * z, 15. * z)), 3. * z, s, egui::StrokeKind::Middle);
+            p.rect_stroke(
+                Rect::from_center_size(c, Vec2::new(18. * z, 15. * z)),
+                3. * z,
+                s,
+                egui::StrokeKind::Middle,
+            );
             path(&[(-5., -2.5), (-2., 0.5), (-5., 3.5)]);
             line((0., 3.5), (5., 3.5));
         }
         Icon::Pencil => {
-            path(&[(-7., 7.), (-6., 2.5), (4., -7.5), (7.5, -4.), (-2.5, 6.), (-7., 7.)]);
+            path(&[
+                (-7., 7.),
+                (-6., 2.5),
+                (4., -7.5),
+                (7.5, -4.),
+                (-2.5, 6.),
+                (-7., 7.),
+            ]);
             line((1.5, -5.), (5., -1.5));
         }
         Icon::File => {
@@ -364,44 +520,22 @@ pub enum Kind {
     Ghost,
 }
 pub fn action_button(ui: &mut egui::Ui, which: Icon, p: Palette, primary: bool) -> Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::splat(34.), Sense::click());
-    let hover = ui.ctx().animate_bool_with_time(
-        response.id.with("hover"),
-        response.hovered(),
-        duration(ui.ctx(), 0.18),
-    );
-    let enabled = ui.is_enabled();
-    let base = if primary && enabled {
-        accent()
-    } else {
-        p.surface
-    };
-    let over = if primary && enabled {
-        mix(accent(), Color32::WHITE, 0.14)
-    } else {
-        p.line
-    };
-    ui.painter().rect_filled(rect, 11., mix(base, over, hover));
-    ui.painter().rect_stroke(
-        rect,
-        11.,
-        Stroke::new(1.0_f32, if primary && enabled { accent() } else { p.line }),
-        egui::StrokeKind::Inside,
-    );
-    icon(
-        ui.painter(),
-        Rect::from_center_size(rect.center(), Vec2::splat(20.)),
-        which,
-        if primary && enabled {
-            Color32::from_rgb(23, 30, 48)
+    let response = button(
+        ui,
+        "",
+        Some(which),
+        if primary {
+            Kind::Primary
         } else {
-            p.text
+            Kind::Secondary
         },
+        p,
+        Vec2::splat(34.),
     );
     response.widget_info(|| {
         egui::WidgetInfo::labeled(
             egui::WidgetType::Button,
-            enabled,
+            ui.is_enabled(),
             if primary {
                 "Отправить"
             } else {
@@ -409,7 +543,7 @@ pub fn action_button(ui: &mut egui::Ui, which: Icon, p: Palette, primary: bool) 
             },
         )
     });
-    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+    response
 }
 pub fn chip(ui: &mut egui::Ui, text: &str, which: Icon, p: Palette, active: bool) -> Response {
     let font = FontId::proportional(12.5);
@@ -428,24 +562,21 @@ pub fn chip(ui: &mut egui::Ui, text: &str, which: Icon, p: Palette, active: bool
     let hover = ui.ctx().animate_bool_with_time_and_easing(
         response.id.with("hover"),
         response.hovered(),
-        0.20,
+        duration(ui.ctx(), 0.20),
         egui::emath::easing::cubic_in_out,
     );
     let press = ui.ctx().animate_bool_with_time(
         response.id.with("press"),
         response.is_pointer_button_down_on(),
-        0.10,
+        duration(ui.ctx(), 0.10),
     );
     let painted = rect.shrink(press * 0.7);
-    ui.painter().rect_filled(
-        painted,
-        14.,
-        mix(Color32::TRANSPARENT, p.line, 0.35 + hover * 0.45),
-    );
+    ui.painter()
+        .rect_filled(painted, 7., mix(p.surface, p.line, 0.3 + hover * 0.45));
     ui.painter().rect_stroke(
         painted,
-        14.,
-        Stroke::new(1.0_f32, mix(p.line, accent(), hover * 0.4)),
+        7.,
+        Stroke::new(1.0_f32, mix(p.line, accent(), hover * 0.3)),
         egui::StrokeKind::Inside,
     );
     let icon_color = if active {
@@ -489,7 +620,7 @@ pub fn button(
     p: Palette,
     size: Vec2,
 ) -> Response {
-    let font = FontId::proportional(13.5);
+    let font = FontId::proportional(13.0);
     let galley = ui.painter().layout_no_wrap(text.into(), font, p.text);
     let icon_size = if text.is_empty() { 17. } else { 15. };
     let gap = if which.is_some() && !text.is_empty() {
@@ -498,22 +629,22 @@ pub fn button(
         0.
     };
     let inner = galley.size().x + gap + if which.is_some() { icon_size } else { 0. };
-    let width = if size.x > 0. { size.x } else { inner + 24. };
+    let width = if size.x > 0. { size.x } else { inner + 26. };
     let (r, response) = ui.allocate_exact_size(Vec2::new(width, size.y.max(28.)), Sense::click());
     let hovered = ui.ctx().animate_bool_with_time_and_easing(
         response.id.with("hover"),
         response.hovered(),
-        0.16,
+        duration(ui.ctx(), 0.16),
         egui::emath::easing::cubic_in_out,
     );
     let pressed = ui.ctx().animate_bool_with_time(
         response.id.with("press"),
         response.is_pointer_button_down_on(),
-        0.10,
+        duration(ui.ctx(), 0.10),
     );
     let active = ui.is_enabled();
     let (base, over) = match kind {
-        Kind::Primary if active => (accent(), mix(accent(), Color32::WHITE, 0.14)),
+        Kind::Primary if active => (accent(), mix(accent(), Color32::WHITE, 0.1)),
         Kind::Primary => (p.line, p.line),
         Kind::Secondary => (p.surface, mix(p.surface, p.line, 0.8)),
         Kind::Ghost => (
@@ -522,7 +653,7 @@ pub fn button(
         ),
     };
     let painted = r.shrink(pressed * 1.);
-    let radius = (r.height() / 2.).min(9.);
+    let radius = (r.height() / 2.).min(8.);
     ui.painter()
         .rect_filled(painted, radius, mix(base, over, hovered));
     if kind == Kind::Secondary {
@@ -544,7 +675,7 @@ pub fn button(
     let color = if !active {
         p.muted
     } else if kind == Kind::Primary {
-        Color32::WHITE
+        on_accent()
     } else if kind == Kind::Ghost && text.is_empty() {
         mix(p.muted, p.text, hovered)
     } else {
@@ -564,15 +695,213 @@ pub fn button(
         x += icon_size + gap;
     }
     if !text.is_empty() {
-        ui.painter().galley(
-            Pos2::new(x, r.center().y - galley.size().y / 2.),
-            galley,
-            color,
-        );
+        ui.painter()
+            .with_clip_rect(painted.shrink2(Vec2::new(8., 0.)))
+            .galley_with_override_text_color(
+                Pos2::new(x, r.center().y - galley.size().y / 2.),
+                galley,
+                color,
+            );
     }
     response
         .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), text));
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+pub fn on_accent() -> Color32 {
+    let c = accent();
+    if c.r() as u32 * 3 + c.g() as u32 * 6 + c.b() as u32 > 1350 {
+        Color32::from_rgb(15, 30, 28)
+    } else {
+        Color32::WHITE
+    }
+}
+
+/// ComboBox builds a child row before allocating its final width. Start a new
+/// row explicitly so its selected value never spills out of a wrapped toolbar.
+pub fn wrap_control(ui: &mut egui::Ui, text: &str) {
+    let width = ui
+        .painter()
+        .layout_no_wrap(
+            text.into(),
+            FontId::proportional(12.5),
+            Color32::PLACEHOLDER,
+        )
+        .size()
+        .x
+        + ui.spacing().icon_width
+        + ui.spacing().icon_spacing
+        + 2. * ui.spacing().button_padding.x;
+    if ui.layout().is_horizontal()
+        && ui.layout().main_wrap
+        && width > ui.available_rect_before_wrap().width()
+    {
+        ui.end_row();
+    }
+}
+
+pub fn service_action(
+    ui: &mut egui::Ui,
+    text: &str,
+    which: Icon,
+    active: bool,
+    p: Palette,
+) -> Response {
+    let (r, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 36.), Sense::click());
+    let hover = ui.ctx().animate_bool_with_time(
+        response.id.with("hover"),
+        response.hovered(),
+        duration(ui.ctx(), 0.16),
+    );
+    let fill = if active {
+        mix(p.surface, accent(), 0.13)
+    } else {
+        mix(p.surface, p.line, 0.55 * hover)
+    };
+    ui.painter().rect_filled(r, 8., fill);
+    icon(
+        ui.painter(),
+        Rect::from_center_size(egui::pos2(r.left() + 18., r.center().y), Vec2::splat(18.)),
+        which,
+        if active {
+            accent()
+        } else {
+            mix(p.muted, p.text, hover)
+        },
+    );
+    ui.painter().text(
+        egui::pos2(r.left() + 36., r.center().y),
+        egui::Align2::LEFT_CENTER,
+        text,
+        FontId::proportional(13.),
+        p.text,
+    );
+    chevron(
+        ui.painter(),
+        Rect::from_center_size(r.right_center() - Vec2::new(16., 0.), Vec2::splat(14.)),
+        0.,
+        p.muted,
+    );
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), text));
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+pub fn badge(ui: &mut egui::Ui, text: &str, color: Color32, p: Palette) {
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.into(), FontId::proportional(11.), color);
+    let (r, _) = ui.allocate_exact_size(Vec2::new(galley.size().x + 18., 24.), Sense::hover());
+    ui.painter().rect_filled(r, 6., mix(p.surface, color, 0.1));
+    ui.painter().galley(
+        egui::pos2(r.left() + 9., r.center().y - galley.size().y * 0.5),
+        galley,
+        color,
+    );
+}
+
+pub fn starter_card(
+    ui: &mut egui::Ui,
+    title: &str,
+    detail: &str,
+    which: Icon,
+    p: Palette,
+) -> Response {
+    let (r, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 64.), Sense::click());
+    let t = ui.ctx().animate_bool_with_time(
+        response.id.with("hover"),
+        response.hovered(),
+        duration(ui.ctx(), 0.16),
+    );
+    ui.painter().rect_filled(r, 10., mix(p.side, p.surface, t));
+    ui.painter().rect_stroke(
+        r,
+        10.,
+        Stroke::new(1.0_f32, mix(p.line, accent(), t * 0.35)),
+        egui::StrokeKind::Inside,
+    );
+    let tile = Rect::from_center_size(egui::pos2(r.left() + 30., r.center().y), Vec2::splat(34.));
+    ui.painter().rect_filled(tile, 8., p.surface);
+    icon(
+        ui.painter(),
+        tile.shrink(8.),
+        which,
+        mix(p.muted, accent(), t),
+    );
+    let painter = ui.painter().with_clip_rect(r.shrink2(Vec2::new(12., 0.)));
+    painter.text(
+        egui::pos2(r.left() + 58., r.top() + 21.),
+        egui::Align2::LEFT_CENTER,
+        title,
+        FontId::proportional(13.5),
+        p.text,
+    );
+    painter.text(
+        egui::pos2(r.left() + 58., r.top() + 43.),
+        egui::Align2::LEFT_CENTER,
+        detail,
+        FontId::proportional(11.5),
+        p.muted,
+    );
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+pub fn preference(
+    ui: &mut egui::Ui,
+    value: &mut bool,
+    title: &str,
+    detail: &str,
+    p: Palette,
+) -> Response {
+    let (r, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 54.), Sense::click());
+    if response.clicked() {
+        *value = !*value;
+    }
+    let t = ui.ctx().animate_bool_with_time(
+        response.id.with("switch"),
+        *value,
+        duration(ui.ctx(), 0.18),
+    );
+    let painter = ui
+        .painter()
+        .with_clip_rect(Rect::from_min_max(r.min, r.max - Vec2::new(60., 0.)));
+    painter.text(
+        egui::pos2(r.left(), r.top() + 17.),
+        egui::Align2::LEFT_CENTER,
+        title,
+        FontId::proportional(13.),
+        p.text,
+    );
+    painter.text(
+        egui::pos2(r.left(), r.top() + 37.),
+        egui::Align2::LEFT_CENTER,
+        detail,
+        FontId::proportional(11.5),
+        p.muted,
+    );
+    let track = Rect::from_center_size(r.right_center() - Vec2::new(20., 0.), Vec2::new(34., 20.));
+    ui.painter()
+        .rect_filled(track, 10., mix(p.line, accent(), t));
+    ui.painter().circle_filled(
+        egui::pos2(track.left() + 10. + 14. * t, track.center().y),
+        7.,
+        mix(p.muted, on_accent(), t),
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Checkbox, ui.is_enabled(), title)
+    });
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+pub fn card(p: Palette) -> egui::Frame {
+    egui::Frame::new()
+        .fill(p.surface)
+        .corner_radius(12.)
+        .stroke(Stroke::new(1.0_f32, mix(p.side, p.line, 0.7)))
+        .inner_margin(16)
 }
 pub fn mark(ui: &mut egui::Ui, size: f32) {
     let (r, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
@@ -587,9 +916,9 @@ pub fn field(ui: &mut egui::Ui, value: &mut String, hint: &str, password: bool) 
         .animate_bool_with_time(id.with("field-focus"), focused, 0.24);
     egui::Frame::new()
         .fill(p.base)
-        .corner_radius(8.)
+        .corner_radius(9.)
         .stroke(Stroke::new(1.0_f32, mix(p.line, accent(), t)))
-        .inner_margin(egui::Margin::symmetric(11, 7))
+        .inner_margin(egui::Margin::symmetric(12, 9))
         .show(ui, |ui| {
             ui.add(
                 egui::TextEdit::singleline(value)
@@ -633,7 +962,8 @@ pub fn toggle(ui: &mut egui::Ui, value: &mut bool, text: &str, p: Palette) -> Re
         egui::pos2(r.left() + 16., r.center().y),
         Vec2::new(32., 19.),
     );
-    ui.painter().rect_filled(track, 10., mix(p.line, accent(), t));
+    ui.painter()
+        .rect_filled(track, 10., mix(p.line, accent(), t));
     ui.painter().circle_filled(
         egui::pos2(track.left() + 9.5 + t * 13., track.center().y),
         6.5,
@@ -658,7 +988,10 @@ pub fn column(ui: &mut egui::Ui, visible: f32, max_width: f32, add: impl FnOnce(
         ui.vertical(|ui| {
             ui.set_width(w);
             ui.set_max_width(w);
-            let clip = ui.clip_rect().intersect(egui::Rect::from_min_size(ui.min_rect().min - egui::vec2(8., 10000.), egui::vec2(w + 16., f32::INFINITY)));
+            let clip = ui.clip_rect().intersect(egui::Rect::from_min_size(
+                ui.min_rect().min - egui::vec2(8., 10000.),
+                egui::vec2(w + 16., f32::INFINITY),
+            ));
             ui.set_clip_rect(clip);
             add(ui);
         });
@@ -730,11 +1063,15 @@ pub fn fonts() -> egui::FontDefinitions {
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
         "inter".into(),
-        std::sync::Arc::new(egui::FontData::from_static(include_bytes!("../assets/InterVariable.ttf"))),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+            "../assets/InterVariable.ttf"
+        ))),
     );
     fonts.font_data.insert(
         "noto-emoji".into(),
-        std::sync::Arc::new(egui::FontData::from_static(include_bytes!("../assets/NotoEmoji.ttf"))),
+        std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+            "../assets/NotoEmoji.ttf"
+        ))),
     );
     for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
         let list = fonts.families.entry(family.clone()).or_default();
@@ -742,7 +1079,10 @@ pub fn fonts() -> egui::FontDefinitions {
             list.insert(0, "inter".into());
         }
         // Before egui's own, older emoji font, after the text fonts.
-        let at = list.iter().position(|f| f.contains("Emoji") || f.contains("emoji")).unwrap_or(list.len());
+        let at = list
+            .iter()
+            .position(|f| f.contains("Emoji") || f.contains("emoji"))
+            .unwrap_or(list.len());
         list.insert(at, "noto-emoji".into());
     }
     fonts
@@ -759,8 +1099,14 @@ mod font_tests {
         let _ = ctx.run(Default::default(), |_| {});
         let font = egui::FontId::proportional(14.);
         // Unicode 6 to 15: classics, skin tones are separate, newer faces and objects.
-        for emoji in ["😀", "🚀", "🔥", "✅", "❤", "🤖", "🥲", "🫠", "🫡", "🪄", "🧪", "🦀", "🛠", "📌", "🗂", "⚓", "🐉"] {
-            assert!(ctx.fonts(|f| f.has_glyphs(&font, emoji)), "no glyph for {emoji}");
+        for emoji in [
+            "😀", "🚀", "🔥", "✅", "❤", "🤖", "🥲", "🫠", "🫡", "🪄", "🧪", "🦀", "🛠", "📌", "🗂",
+            "⚓", "🐉",
+        ] {
+            assert!(
+                ctx.fonts(|f| f.has_glyphs(&font, emoji)),
+                "no glyph for {emoji}"
+            );
         }
         assert!(ctx.fonts(|f| f.has_glyphs(&egui::FontId::monospace(13.), "🦀✅")));
     }

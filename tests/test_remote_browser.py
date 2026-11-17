@@ -1,5 +1,7 @@
 import importlib.util
 import io
+import os
+import threading
 from pathlib import Path
 import unittest
 from unittest import mock
@@ -76,3 +78,20 @@ class BrowserTests(unittest.TestCase):
         self.browser.spawn=mock.Mock(side_effect=OSError('fixture'))
         with self.assertRaises(OSError):self.browser.selection()
         self.assertEqual(calls,[('clipboard',''),('key','ctrl+c')])
+
+    def test_paste_waits_for_clipboard_ownership_instead_of_racing_process_startup(self):
+        reader,writer=os.pipe();spawned=threading.Event();errors=[]
+        process=mock.Mock();process.stdin=io.BytesIO();process.stderr=os.fdopen(reader,'rb');process.poll.return_value=None
+        def spawn(*args,**kwargs):spawned.set();return process
+        self.browser.spawn=spawn;self.browser.paste=browser.RemoteBrowser.paste.__get__(self.browser)
+        def paste():
+            try:self.browser.paste('public-test-fixture')
+            except Exception as error:errors.append(error)
+        with mock.patch.object(browser,'stop_process'):
+            thread=threading.Thread(target=paste);thread.start()
+            try:
+                self.assertTrue(spawned.wait(1));self.assertNotIn(('key','--clearmodifiers','ctrl+v'),self.calls)
+                os.write(writer,b'Waiting for selection requests, Control-C to quit\n');thread.join(2)
+                self.assertFalse(thread.is_alive());self.assertFalse(errors)
+                self.assertIn(('key','--clearmodifiers','ctrl+v'),self.calls)
+            finally:os.close(writer);thread.join(4)

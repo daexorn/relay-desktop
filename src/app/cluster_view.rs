@@ -179,7 +179,7 @@ impl RelayApp {
         let mut stop = false;
         egui::CentralPanel::default().frame(egui::Frame::new().fill(p.base).inner_margin(24)).show(ctx,|ui| {
             ui.horizontal_wrapped(|ui| {
-                label(ui,"Агентский кластер",26.,p.text);
+                label(ui,"Команда агентов",23.,p.text);
                 if self.demo{label(ui,"Предпросмотр",11.,p.muted);}
                 if design::button(ui,"Новая команда",Some(Icon::Plus),Kind::Secondary,p,Vec2::ZERO).clicked(){new_config=true;}
                 if config.is_some()&&design::button(ui,"Настроить",Some(Icon::Settings),Kind::Ghost,p,Vec2::ZERO).clicked(){edit=true;}

@@ -68,7 +68,7 @@ impl RelayApp {
         let p = design::animated_palette(ctx, self.settings.light);
         let mut save = false;let mut cancel = false;let mut test = false;
         let response = egui::Modal::new(egui::Id::new("api-settings"))
-            .frame(egui::Frame::new().fill(p.surface).corner_radius(16.).inner_margin(22.).stroke(Stroke::new(1_f32, p.line)))
+            .frame(egui::Frame::new().fill(p.side).corner_radius(16.).inner_margin(24.).stroke(Stroke::new(1_f32, p.line)))
             .show(ctx, |ui| {
                 ui.set_width((ctx.screen_rect().width() - 64.).clamp(260., 500.));
                 ui.spacing_mut().interact_size.y = 32.;
@@ -79,10 +79,10 @@ impl RelayApp {
                     ui.checkbox(&mut editor.profile.enabled, "API по умолчанию для сессий этого сервера");
                     ui.add_space(10.);
                     label(ui, "Адрес API", 12., p.muted);
-                    ui.add(egui::TextEdit::singleline(&mut editor.profile.base_url).margin(Vec2::new(10.,8.)).desired_width(f32::INFINITY).hint_text("https://tooken.club/v1"));
+                    design::field(ui,&mut editor.profile.base_url,"https://tooken.club/v1",false);
                     ui.add_space(8.);
                     label(ui, "API-ключ", 12., p.muted);
-                    ui.add(egui::TextEdit::singleline(&mut editor.key).margin(Vec2::new(10.,8.)).password(true).desired_width(f32::INFINITY).hint_text("Ключ этого API"));
+                    design::field(ui,&mut editor.key,"Ключ этого API",true);
                     ui.add_space(8.);
                     label(ui, "Модель", 12., p.muted);
                     if !editor.profile.models.is_empty() {
@@ -96,10 +96,10 @@ impl RelayApp {
                             });
                     }
                     if editor.profile.models.is_empty() {
-                        ui.add(egui::TextEdit::singleline(&mut editor.profile.model).margin(Vec2::new(10.,8.)).desired_width(f32::INFINITY).hint_text("Идентификатор модели"));
+                        design::field(ui,&mut editor.profile.model,"Идентификатор модели",false);
                     } else {
                         egui::CollapsingHeader::new("Свой идентификатор модели").show(ui, |ui| {
-                            ui.add(egui::TextEdit::singleline(&mut editor.profile.model).margin(Vec2::new(10.,8.)).desired_width(f32::INFINITY));
+                            design::field(ui,&mut editor.profile.model,"Модель",false);
                         });
                     }
                     ui.add_space(10.);
@@ -146,7 +146,10 @@ impl RelayApp {
 }
 
 pub(super) fn source_picker(ui: &mut egui::Ui, api: &mut bool, configure: &mut bool, busy: bool, p: Palette) {
-    egui::ComboBox::from_id_salt("source-selector").width(0.)
+    let previous_style=ui.style().clone();
+    ui.spacing_mut().button_padding=Vec2::new(8.,5.);ui.spacing_mut().interact_size.y=28.;
+    design::wrap_control(ui,if *api{"API"}else{"Claude Code"});
+    egui::ComboBox::from_id_salt("source-selector").width(0.).wrap_mode(egui::TextWrapMode::Truncate)
         .selected_text(RichText::new(if *api { "API" } else { "Claude Code" }).size(12.5).color(if *api { accent() } else { p.muted }))
         .icon(design::combo_icon).show_ui(ui, |ui| {
             ui.add_enabled_ui(!busy, |ui| {
@@ -156,4 +159,5 @@ pub(super) fn source_picker(ui: &mut egui::Ui, api: &mut bool, configure: &mut b
             ui.separator();
             if ui.button("Настроить API…").clicked() { *configure = true;ui.close_menu(); }
         });
+    ui.set_style(previous_style);
 }

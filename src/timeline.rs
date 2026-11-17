@@ -163,14 +163,14 @@ pub fn show(
             .openness(ui.ctx())
         })
         .sum();
-    let (r, response) = ui.allocate_exact_size(egui::vec2(width, 38.), egui::Sense::click());
+    let (r, response) = ui.allocate_exact_size(egui::vec2(width, 40.), egui::Sense::click());
     let hover = ui.ctx().animate_bool_with_time(
         response.id.with("hover"),
         response.hovered(),
         design::duration(ui.ctx(), 0.2),
     );
     ui.painter()
-        .rect_filled(r, 10., design::mix(p.base, p.surface, 0.55 + 0.4 * hover));
+        .rect_filled(r, 10., design::mix(p.side, p.surface, 0.55 + 0.4 * hover));
     ui.painter().rect_stroke(
         r,
         10.,
@@ -180,7 +180,7 @@ pub fn show(
     design::icon(
         ui.painter(),
         egui::Rect::from_min_size(r.min + egui::vec2(11., 10.), egui::vec2(18., 18.)),
-        design::Icon::Server,
+        design::Icon::Terminal,
         if busy { accent() } else { p.muted },
     );
     let text = format!(
@@ -188,7 +188,7 @@ pub fn show(
         if busy {
             "В работе"
         } else {
-            "Действия"
+            "Активность"
         },
         action_count(rows.len()),
         if errors > 0 {
@@ -224,8 +224,9 @@ pub fn show(
     state.show_body_unindented(ui, |ui| {
         egui::Frame::new()
             .fill(p.side)
-            .corner_radius(12.)
-            .inner_margin(10)
+            .stroke(egui::Stroke::new(1.0_f32,p.line))
+            .corner_radius(10.)
+            .inner_margin(12)
             .show(ui, |ui| {
                 ui.set_width((width - 20.).max(80.));
                 egui::ScrollArea::vertical()

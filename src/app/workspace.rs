@@ -9,6 +9,13 @@ impl RelayApp {
                 self.settings.light = design::is_light(name);
             }
         }
+        if args.iter().any(|a| a == "--demo-empty") {
+            if let Some(k) = self.current_key() {
+                let chat = self.chats.get_mut(&k).unwrap();
+                chat.messages.clear();
+                chat.busy = false;
+            }
+        }
         self.settings_open = args.iter().any(|a| a == "--demo-settings");
         self.cluster_open = args.iter().any(|a| a == "--demo-cluster");
         if args.iter().any(|a| a == "--demo-delete") {
@@ -107,50 +114,227 @@ impl RelayApp {
         let p = design::animated_palette(ctx, self.settings.light);
         let before = serde_json::to_string(&self.settings.appearance).unwrap_or_default();
         let mut open = true;
-        egui::Window::new("Настройки Relay").id(egui::Id::new("preferences"))
-            .open(&mut open).default_width(610.).default_height(640.).default_pos(egui::pos2(((ctx.screen_rect().width()-650.)/2.).max(12.),((ctx.screen_rect().height()-700.)/2.).max(12.))).resizable(true).collapsible(false).show(ctx,|ui| {
-            egui::ScrollArea::vertical().max_height((ctx.screen_rect().height()-150.).max(240.)).show(ui,|ui| {
-                label(ui,"Твоя рабочая среда",22.,p.text);
-                label(ui,"Оформление и поведение приложения",12.,p.muted);
-                ui.add_space(18.);
-                label(ui,"Цветовая тема",13.,p.text);
-                ui.horizontal_wrapped(|ui| {
-                    for (id,name) in design::THEMES {
-                        let selected=self.settings.theme()==id;
-                        let colors=design::theme_palette(id);
-                        let (r,response)=ui.allocate_exact_size(Vec2::new(104.,75.),egui::Sense::click());
-                        ui.painter().rect_filled(r,10.,colors.base);
-                        ui.painter().rect_filled(egui::Rect::from_min_size(r.min+Vec2::new(7.,7.),Vec2::new(18.,34.)),5.,colors.rail);
-                        ui.painter().rect_filled(egui::Rect::from_min_size(r.min+Vec2::new(31.,7.),Vec2::new(65.,18.)),4.,colors.surface);
-                        ui.painter().line_segment([r.min+Vec2::new(32.,32.),r.min+Vec2::new(82.,32.)],Stroke::new(2_f32,colors.muted));
-                        ui.painter().rect_filled(egui::Rect::from_min_size(r.min+Vec2::new(31.,38.),Vec2::new(30.,6.)),3.,design::theme_accent(id));
-                        ui.painter().text(r.center_bottom()-Vec2::new(0.,15.),egui::Align2::CENTER_CENTER,name,FontId::proportional(12.),colors.text);
-                        ui.painter().rect_stroke(r,10.,Stroke::new(if selected{2_f32}else{1_f32},if selected{accent()}else{p.line}),egui::StrokeKind::Inside);
-                        if response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked(){self.settings.appearance.theme=id.into();self.settings.light=design::is_light(id);}
-                    }
-                });
-                ui.add_space(16.);
-                let a=&mut self.settings.appearance;
-                ui.spacing_mut().slider_width=170.;
-                ui.add(egui::Slider::new(&mut a.scale,0.8..=1.35).trailing_fill(true).text("Масштаб интерфейса").suffix("×").fixed_decimals(2));
-                ui.add(egui::Slider::new(&mut a.chat_width,560. ..=1160.).trailing_fill(true).text("Ширина разговора").suffix(" px").step_by(20.));
-                ui.checkbox(&mut a.compact,"Компактные отступы");
-                ui.checkbox(&mut a.animations,"Плавные переходы панелей и тем");
-                ui.add_space(16.);ui.separator();ui.add_space(8.);
-                label(ui,"Общение и команды",15.,p.text);
-                ui.checkbox(&mut a.send_on_enter,"Enter отправляет, Shift+Enter добавляет строку");
-                if !a.send_on_enter {label(ui,"Отправка по Ctrl+Enter",12.,p.muted);}
-                ui.checkbox(&mut a.wrap_output,"Переносить длинные строки в выводе команд");
-                ui.checkbox(&mut a.open_errors,"Раскрывать действия с ошибками");
-                label(ui,"Во время ответа новые сообщения добавляются в очередь. Их можно изменить, удалить или поставить на паузу.",12.,p.muted);
-                ui.add_space(16.);ui.separator();ui.add_space(8.);
+        let mut close = false;
+        let width = (ctx.screen_rect().width() - 64.).clamp(320., 660.);
+        egui::Window::new("Настройки Relay")
+            .id(egui::Id::new("preferences"))
+            .open(&mut open)
+            .title_bar(false)
+            .default_width(width)
+            .max_width(width)
+            .default_height((ctx.screen_rect().height() - 80.).min(800.))
+            .min_height(420.)
+            .max_height(ctx.screen_rect().height() - 32.)
+            .resizable(true)
+            .collapsible(false)
+            .frame(
+                egui::Frame::new()
+                    .fill(p.side)
+                    .corner_radius(18.)
+                    .stroke(Stroke::new(1.0_f32, p.line))
+                    .inner_margin(22),
+            )
+            .default_pos(egui::pos2(
+                ((ctx.screen_rect().width() - width) / 2.).max(16.),
+                32.,
+            ))
+            .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    label(ui,format!("Relay {}",env!("CARGO_PKG_VERSION")),12.,p.muted);
-                    if design::button(ui,"Сбросить оформление",None,Kind::Secondary,p,Vec2::ZERO).clicked(){self.settings.appearance=Appearance::default();self.settings.light=false;}
+                    ui.vertical(|ui| {
+                        label(ui, "Настройки", 23., p.text);
+                        label(ui, "Рабочее пространство под тебя", 12., p.muted);
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if design::button(
+                            ui,
+                            "",
+                            Some(Icon::Close),
+                            Kind::Ghost,
+                            p,
+                            Vec2::splat(30.),
+                        )
+                        .on_hover_text("Закрыть настройки")
+                        .clicked()
+                        {
+                            close = true;
+                        }
+                    });
                 });
+                ui.add_space(18.);
+                egui::ScrollArea::vertical()
+                    .max_height((ctx.screen_rect().height() - 200.).max(220.))
+                    .show(ui, |ui| {
+                        label(ui, "Оформление", 14., p.text);
+                        ui.add_space(10.);
+                        let columns = if ui.available_width() < 480. { 3. } else { 4. };
+                        let tile_width =
+                            ((ui.available_width() - 8. * (columns - 1.)) / columns).max(70.);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = Vec2::splat(8.);
+                            for (id, name) in design::THEMES {
+                                let colors = design::theme_palette(id);
+                                let selected = self.settings.theme() == id;
+                                let (r, response) = ui.allocate_exact_size(
+                                    Vec2::new(tile_width, 84.),
+                                    egui::Sense::click(),
+                                );
+                                ui.painter().rect_filled(r, 10., colors.base);
+                                let inner = r.shrink2(Vec2::new(9., 10.));
+                                ui.painter().rect_filled(
+                                    egui::Rect::from_min_size(inner.min, Vec2::new(16., 36.)),
+                                    4.,
+                                    colors.side,
+                                );
+                                ui.painter().rect_filled(
+                                    egui::Rect::from_min_size(
+                                        inner.min + Vec2::new(23., 0.),
+                                        Vec2::new((inner.width() - 23.).max(20.), 16.),
+                                    ),
+                                    4.,
+                                    colors.surface,
+                                );
+                                ui.painter().line_segment(
+                                    [
+                                        inner.min + Vec2::new(24., 26.),
+                                        inner.min + Vec2::new((inner.width() - 12.).max(30.), 26.),
+                                    ],
+                                    Stroke::new(2.0_f32, colors.line),
+                                );
+                                ui.painter().rect_filled(
+                                    egui::Rect::from_min_size(
+                                        inner.min + Vec2::new(23., 34.),
+                                        Vec2::new(22., 5.),
+                                    ),
+                                    2.,
+                                    design::theme_accent(id),
+                                );
+                                ui.painter().text(
+                                    egui::pos2(r.left() + 10., r.bottom() - 15.),
+                                    egui::Align2::LEFT_CENTER,
+                                    name,
+                                    FontId::proportional(11.5),
+                                    colors.text,
+                                );
+                                if selected {
+                                    design::icon(
+                                        ui.painter(),
+                                        egui::Rect::from_center_size(
+                                            r.right_bottom() - Vec2::splat(15.),
+                                            Vec2::splat(13.),
+                                        ),
+                                        Icon::Check,
+                                        design::theme_accent(id),
+                                    );
+                                }
+                                ui.painter().rect_stroke(
+                                    r,
+                                    10.,
+                                    Stroke::new(
+                                        if selected { 1.5_f32 } else { 1.0_f32 },
+                                        if selected { accent() } else { p.line },
+                                    ),
+                                    egui::StrokeKind::Inside,
+                                );
+                                if response
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                    .clicked()
+                                {
+                                    self.settings.appearance.theme = id.into();
+                                    self.settings.light = design::is_light(id);
+                                }
+                            }
+                        });
+                        ui.add_space(18.);
+                        design::card(p).show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.spacing_mut().slider_width = 160.;
+                            let a = &mut self.settings.appearance;
+                            label(ui, "Размер и отступы", 14., p.text);
+                            ui.add_space(8.);
+                            ui.add(
+                                egui::Slider::new(&mut a.scale, 0.8..=1.35)
+                                    .trailing_fill(true)
+                                    .text("Масштаб")
+                                    .suffix("×")
+                                    .fixed_decimals(2),
+                            );
+                            ui.add(
+                                egui::Slider::new(&mut a.chat_width, 560. ..=1160.)
+                                    .trailing_fill(true)
+                                    .text("Ширина чата")
+                                    .suffix(" px")
+                                    .step_by(20.),
+                            );
+                            design::preference(
+                                ui,
+                                &mut a.compact,
+                                "Компактные отступы",
+                                "Больше содержимого на одном экране",
+                                p,
+                            );
+                            design::preference(
+                                ui,
+                                &mut a.animations,
+                                "Плавные переходы",
+                                "Мягкое появление панелей и сообщений",
+                                p,
+                            );
+                        });
+                        ui.add_space(12.);
+                        design::card(p).show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            let a = &mut self.settings.appearance;
+                            label(ui, "Чат и команды", 14., p.text);
+                            ui.add_space(4.);
+                            design::preference(
+                                ui,
+                                &mut a.send_on_enter,
+                                "Отправлять по Enter",
+                                "Shift+Enter добавляет строку; иначе Ctrl+Enter",
+                                p,
+                            );
+                            design::preference(
+                                ui,
+                                &mut a.wrap_output,
+                                "Переносить вывод команд",
+                                "Длинные строки остаются в границах панели",
+                                p,
+                            );
+                            design::preference(
+                                ui,
+                                &mut a.open_errors,
+                                "Раскрывать ошибки",
+                                "Показывать подробности неудачных действий",
+                                p,
+                            );
+                        });
+                        ui.add_space(16.);
+                        ui.horizontal(|ui| {
+                            label(
+                                ui,
+                                format!("Relay {}", env!("CARGO_PKG_VERSION")),
+                                11.5,
+                                p.muted,
+                            );
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if design::button(
+                                    ui,
+                                    "Сбросить оформление",
+                                    Some(Icon::Refresh),
+                                    Kind::Ghost,
+                                    p,
+                                    Vec2::ZERO,
+                                )
+                                .clicked()
+                                {
+                                    self.settings.appearance = Appearance::default();
+                                    self.settings.light = false;
+                                }
+                            });
+                        });
+                    });
             });
-        });
-        self.settings_open = open;
+        self.settings_open = open && !close;
         if serde_json::to_string(&self.settings.appearance).unwrap_or_default() != before {
             self.save();
         }

@@ -1160,4 +1160,52 @@ mod tests {
         let login=take(&mut rx_a,"auth_start");assert_ne!(login["id"],browser["id"]);
         assert!(rx_a.try_recv().is_err());
     }
+
+    #[test]
+    fn hiding_the_browser_keeps_the_flow_and_pauses_frames_until_reopened() {
+        use base64::Engine;
+        let (mut app,a,_,_,mut rx_a,_)=fixture();
+        app.remote.get_mut(&a.id).unwrap().auth_available=true;
+        app.start_browser(&a);let request=take(&mut rx_a,"browser_open");
+        app.data(a.id.clone(),json!({"type":"auth_browser","id":request["id"],"connected":true,"native":true}));
+        let mut jpeg=Vec::new();image::codecs::jpeg::JpegEncoder::new(&mut jpeg).encode(&[30,40,50],1,1,image::ExtendedColorType::Rgb8).unwrap();
+        let frame=|sequence|json!({"type":"auth_frame","id":request["id"],"frame":sequence,"width":1,"height":1,"data":base64::engine::general_purpose::STANDARD.encode(&jpeg)});
+        app.data(a.id.clone(),frame(1));assert_eq!(take(&mut rx_a,"auth_browser_ack")["frame"],1);
+        app.hide_browser();assert!(!app.browser_visible());
+        let release=take(&mut rx_a,"auth_browser_input");assert_eq!(release["input"]["kind"],"modifiers");assert_eq!(release["input"]["modifiers"],0);
+        app.data(a.id.clone(),frame(2));assert!(rx_a.try_recv().is_err());assert!(app.login.as_ref().unwrap().active());
+        app.start_browser(&a);assert!(app.browser_visible());
+        let resume=take(&mut rx_a,"auth_browser_ack");assert_eq!(resume["id"],request["id"]);assert_eq!(resume["frame"],2);
+        assert!(rx_a.try_recv().is_err());
+    }
+
+    #[test]
+    fn browser_button_reveals_an_existing_login_without_cancelling_it() {
+        let (mut app,a,_,_,mut rx_a,_)=fixture();
+        app.remote.get_mut(&a.id).unwrap().auth_available=true;
+        app.start_login(&a);let login=take(&mut rx_a,"auth_start");app.hide_browser();
+        app.start_browser(&a);assert!(app.browser_visible());
+        assert_eq!(app.login.as_ref().unwrap().id,login["id"]);
+        assert!(rx_a.try_recv().is_err());
+    }
+
+    #[test]
+    fn expanded_browser_keeps_its_session_button_visible_at_different_window_sizes() {
+        for width in [680.,954.,1680.] {
+            let (mut app,a,_,_,_,_)=fixture();
+            let ctx=app.controller.bus.ctx.clone();
+            let screen=egui::Rect::from_min_size(egui::Pos2::ZERO,Vec2::new(width,720.));
+            let _=ctx.run(egui::RawInput{screen_rect:Some(screen),..Default::default()}, |_|{});
+            app.remote.get_mut(&a.id).unwrap().auth_available=true;
+            app.start_browser(&a);
+            assert_eq!(app.browser_expanded(),width<1100.);
+            app.login.as_mut().unwrap().expanded=true;
+            let output=ctx.run(egui::RawInput{screen_rect:Some(screen),..Default::default()},|ctx|app.browser_panel(ctx));
+            let text=output.shapes.iter().find_map(|shape|match &shape.shape {
+                egui::Shape::Text(text) if text.galley.job.text=="Сессии"=>Some(egui::Rect::from_min_size(text.pos,text.galley.size())),
+                _=>None,
+            }).expect("The session action must be present");
+            assert!(screen.expand(0.5).contains_rect(text),"Session button outside the {width}px window: {text:?}");
+        }
+    }
 }

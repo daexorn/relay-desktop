@@ -114,7 +114,7 @@ class RemoteBrowser:
         return value
 
     def spawn(self,args,**kwargs):
-        return subprocess.Popen(self.prefix+args,env=self.env,start_new_session=True,stderr=subprocess.DEVNULL,**kwargs)
+        return subprocess.Popen(self.prefix+args,env=self.env,start_new_session=True,stderr=kwargs.pop('stderr',subprocess.DEVNULL),**kwargs)
 
     def prepare(self):
         info=browser_info()
@@ -157,7 +157,7 @@ class RemoteBrowser:
     def open(self,url):
         try:
             binary,profile=self.prepare()
-            self.process=self.spawn([binary,'--no-first-run','--no-default-browser-check','--disable-dev-shm-usage',
+            self.process=self.spawn([binary,'--force-dark-mode','--no-first-run','--no-default-browser-check','--disable-dev-shm-usage',
                                      '--start-maximized','--window-size='+str(WIDTH)+','+str(HEIGHT),'--user-data-dir='+str(profile),'--new-window',url],stdout=subprocess.DEVNULL)
             end=time.monotonic()+10
             while time.monotonic()<end:
@@ -211,8 +211,21 @@ class RemoteBrowser:
 
     def set_clipboard(self,text):
         stop_process(self.clipboard)
-        self.clipboard=self.spawn([shutil.which('xclip'),'-selection','clipboard','-in','-quiet'],stdin=subprocess.PIPE,stdout=subprocess.DEVNULL)
-        self.clipboard.stdin.write(text.encode('utf-8'));self.clipboard.stdin.close();time.sleep(.04)
+        process=self.spawn([shutil.which('xclip'),'-selection','clipboard','-in','-quiet'],stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
+        self.clipboard=process;ready=threading.Event()
+        def drain():
+            try:
+                while True:
+                    line=process.stderr.readline(4096)
+                    if not line:break
+                    if b'Waiting for selection requests' in line:ready.set()
+            finally:process.stderr.close()
+        threading.Thread(target=drain,daemon=True).start()
+        process.stdin.write(text.encode('utf-8'));process.stdin.close()
+        # Forking and connecting to X11 can take longer under load. A fixed sleep
+        # allowed Ctrl+V to arrive before xclip owned the selection.
+        if not ready.wait(3) or process.poll() is not None:
+            stop_process(process);raise OSError('Не удалось подготовить буфер серверного браузера.')
 
     def paste(self,text):
         self.set_clipboard(text);self.shortcut('ctrl+v');time.sleep(.04)
@@ -236,7 +249,7 @@ class RemoteBrowser:
 
     def navigate(self,url):
         with self.input_lock:
-            self.shortcut('ctrl+l');self.paste(url);self.xdo('key','Return')
+            self.shortcut('ctrl+l');self.paste(url);time.sleep(.15);self.xdo('key','Return')
 
     def input(self,value):
         if not isinstance(value,dict):raise ValueError('Некорректный ввод браузера.')
@@ -306,7 +319,7 @@ def probe_browser(send,ident):
             self.send_response(200);self.send_header('Content-Type','text/html; charset=utf-8');self.end_headers()
             page='two' if self.path.startswith('/two') else 'one'
             script="let page="+json.dumps(page)+";function report(value){fetch('/event',{method:'POST',body:JSON.stringify({page,value})})}addEventListener('pageshow',()=>report(''));document.addEventListener('visibilitychange',()=>{if(!document.hidden)report('')})"
-            html="<!doctype html><meta charset=utf-8><title>Relay "+page+"</title><style>body{background:#171a24;color:#e2e6f3;font:24px sans-serif;padding:40px}input{position:fixed;left:30px;right:30px;top:170px;height:400px;font:26px sans-serif}</style><h1>Relay — браузер на сервере</h1><p>"+socket.gethostname()+"</p><input autofocus oninput=\"report(this.value)\"><script>"+script+"</script>"
+            html="<!doctype html><meta charset=utf-8><title>Relay "+page+"</title><style>body{background:#171a24;color:#e2e6f3;font:24px sans-serif;padding:40px}input{position:fixed;box-sizing:border-box;width:calc(100% - 60px);left:30px;right:30px;top:170px;height:400px;font:26px sans-serif;background:#1b242e;color:#e6edf3;border:1px solid #32414d;border-radius:12px;padding:20px}</style><h1>Relay — браузер на сервере</h1><p>"+socket.gethostname()+"</p><input autofocus oninput=\"report(this.value)\"><script>"+script+"</script>"
             self.wfile.write(html.encode())
         def do_POST(self):
             try:state.update(json.loads(self.rfile.read(min(16384,int(self.headers.get('Content-Length','0'))))))
@@ -327,7 +340,8 @@ def probe_browser(send,ident):
         while time.monotonic()<end:
             if state.get(key)==value:return
             time.sleep(.1)
-        raise ValueError('Не прошла проверка браузера: '+key)
+        if frames:send(frames[-1])
+        raise ValueError('Не прошла проверка браузера: '+key+'; expected='+str(value)+'; actual='+str(state.get(key)))
     try:
         browser.open(url+'/one');wait_state('page','one')
         for kind in ('down','up'):browser.input({'kind':kind,'button':'left','x':400,'y':400})
@@ -342,7 +356,11 @@ def probe_browser(send,ident):
         browser.input({'kind':'navigate','url':url+'/two'});wait_state('page','two')
         browser.input({'kind':'back'});wait_state('page','one')
         browser.input({'kind':'forward'});wait_state('page','two')
-        browser.input({'kind':'new_tab'});browser.input({'kind':'navigate','url':url+'/one'});wait_state('page','one')
+        title=browser.xdo('getactivewindow','getwindowname')
+        browser.input({'kind':'new_tab'});end=time.monotonic()+10
+        while time.monotonic()<end and browser.xdo('getactivewindow','getwindowname')==title:time.sleep(.1)
+        time.sleep(.25)
+        browser.input({'kind':'navigate','url':url+'/one'});wait_state('page','one')
         browser.input({'kind':'switch_tab','index':0});wait_state('page','two')
         browser.input({'kind':'close_tab','index':1});time.sleep(.2)
         report.update(navigation_history=True,tabs=True)
