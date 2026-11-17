@@ -19,6 +19,8 @@ pub(super) struct Login {
     address: String,
     address_focused: bool,
     tabs: Vec<Value>,
+    native: bool,
+    remote_modifiers: u8,
 }
 impl Login {
     pub(super) fn active(&self) -> bool {
@@ -82,6 +84,8 @@ impl RelayApp {
             address: "https://claude.ai/".into(),
             address_focused: false,
             tabs: Vec::new(),
+            native: false,
+            remote_modifiers: 0,
         });
         if available {
             self.controller
@@ -129,6 +133,7 @@ impl RelayApp {
                 );
             }
             "auth_browser" => {
+                login.native = value["native"] == true;
                 login.origin = value["origin"]
                     .as_str()
                     .unwrap_or("")
@@ -258,7 +263,7 @@ impl RelayApp {
                         }
                     }
                 });
-                if login.standalone && login.active(){
+                if login.standalone && login.active() && !login.native{
                     if !login.tabs.is_empty(){
                         ui.horizontal_wrapped(|ui|{
                             for tab in &login.tabs {
@@ -294,6 +299,7 @@ impl RelayApp {
                     let height=width*login.size[1] as f32/login.size[0] as f32;
                     let response=ui.add(egui::Image::new(texture).fit_to_exact_size(Vec2::new(width,height)).sense(egui::Sense::click_and_drag()));
                     if response.clicked() || response.drag_started(){response.request_focus();}
+                    if response.has_focus(){ui.memory_mut(|m|m.set_focus_lock_filter(response.id,egui::EventFilter{tab:true,horizontal_arrows:true,vertical_arrows:true,escape:true}));}
                     let events=ui.input(|i|i.events.clone());let has_paste=events.iter().any(|e|matches!(e,egui::Event::Paste(_)));
                     let mut pointer=None;
                     for event in events {
@@ -332,6 +338,13 @@ impl RelayApp {
                         if let Some(input)=input{self.controller.send(&login.server,json!({"op":"auth_browser_input","id":login.id,"input":input}));}
                     }
                     if let Some(input)=pointer{self.controller.send(&login.server,json!({"op":"auth_browser_input","id":login.id,"input":input}));}
+                    if login.native{
+                        let modifiers=if response.has_focus(){auth_browser::modifiers(ui.input(|i|i.modifiers))}else{0};
+                        if modifiers!=login.remote_modifiers{
+                            login.remote_modifiers=modifiers;
+                            self.controller.send(&login.server,json!({"op":"auth_browser_input","id":login.id,"input":{"kind":"modifiers","modifiers":modifiers}}));
+                        }
+                    }
                 }else if login.active() || login.preparing {
                     ui.add_space(30.);ui.spinner();label(ui,"Ждём изображение с сервера…",13.,p.muted);ui.add_space(30.);
                 }

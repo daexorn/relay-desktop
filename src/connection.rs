@@ -459,7 +459,7 @@ pub fn probe() -> Result<()> {
                 }
             }
             Ok(Event::Data { value,.. }) if value["type"]=="browser_probe" && browser_probe && value["id"]==browser_request => {
-                println!("{}",json!({"ok":value["ok"]==true && browser_frame_seen,"frame_seen":browser_frame_seen,"server":value["server"],"browser_uid":value["browser_uid"],"browser_egress_ip":value["browser_egress_ip"],"result":value["result"],"navigation_history":value["navigation_history"],"tabs":value["tabs"]}));
+                println!("{}",json!({"ok":value["ok"]==true && browser_frame_seen,"frame_seen":browser_frame_seen,"server":value["server"],"browser_uid":value["browser_uid"],"browser_egress_ip":value["browser_egress_ip"],"result":value["result"],"navigation_history":value["navigation_history"],"tabs":value["tabs"],"native":value["native"]}));
                 controller.disconnect(&profile.id);return Ok(());
             }
             Ok(Event::Data { value, .. }) if value["type"] == "sessions" => {

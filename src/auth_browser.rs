@@ -88,6 +88,10 @@ pub fn key(value: egui::Key, command: bool) -> Option<&'static str> {
         V if command => "v",
         X if command => "x",
         Z if command => "z",
+        L if command => "l",
+        T if command => "t",
+        W if command => "w",
+        R if command => "r",
         Y if command => "y",
         _ => return None,
     })

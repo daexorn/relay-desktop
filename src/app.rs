@@ -307,7 +307,9 @@ impl RelayApp {
                             let id=app.login.as_ref().unwrap().id.clone();
                             app.login_event(&server.id,&json!({"type":"auth","id":id,"state":"browser","message":"Браузер работает на сервере. Управляй изображением ниже."}));
                             app.login_event(&server.id,&json!({"type":"browser_navigation","id":id,"url":"https://example.com/","tabs":[{"id":"preview","title":"Проверка браузера сервера","active":true}]}));
-                            app.login_event(&server.id,&json!({"type":"auth_frame","id":id,"frame":1,"width":1200,"height":800,"data":base64::engine::general_purpose::STANDARD.encode(bytes)}));
+                            let (width,height)=image::load_from_memory(&bytes).map(|image|(image.width(),image.height())).unwrap_or((1200,800));
+                            app.login_event(&server.id,&json!({"type":"auth_browser","id":id,"connected":true,"native":true}));
+                            app.login_event(&server.id,&json!({"type":"auth_frame","id":id,"frame":1,"width":width,"height":height,"data":base64::engine::general_purpose::STANDARD.encode(bytes)}));
                         }
                     }
                 }
