@@ -18,10 +18,14 @@ jobs:
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config libxkbcommon-dev libwayland-dev libgl1-mesa-dev
       - run: cargo test --locked
+      - run: cargo test --locked --no-default-features --features tui --bin relay-tui --lib
       - run: cargo test --locked -p egui_commonmark --lib
       - run: python -m unittest discover -s tests -v
         if: runner.os == 'Linux'
-      - run: cargo build --release --locked
+      - run: cargo build --release --locked --bin relay
+      - run: cargo build --release --locked --no-default-features --features tui --bin relay-tui
+      - run: python tools/check-tui.py --binary target/release/relay-tui
+        if: runner.os == 'Linux'
       - run: python tools/package.py
       - uses: actions/upload-artifact@v4
         with:

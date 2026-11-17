@@ -4,22 +4,15 @@
 )]
 
 mod app;
-mod auth_browser;
 mod artifacts;
 mod board;
-mod cluster;
-mod connection;
-mod desktop;
-mod gametest;
-mod images;
 mod limits;
 mod math;
-mod model;
-mod storage;
-mod templates;
 mod timeline;
 mod ui;
-mod uploads;
+use relay_desktop::{
+    auth_browser, cluster, connection, gametest, images, model, storage, templates, uploads,
+};
 
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().collect();

@@ -725,7 +725,7 @@ mod tests {
     #[test]
     fn transfers_require_approval_and_verify_the_hash_before_replacing() {
         let (controller, _events) =
-            crate::connection::Controller::new(eframe::egui::Context::default());
+            crate::connection::Controller::headless();
         let (sender, mut outgoing) = tokio::sync::mpsc::unbounded_channel();
         let mut manager = Desktop::new(sender, controller.bus.clone(), "test".into());
         let folder = std::env::temp_dir().join(format!("relay-transfer-{}", uuid::Uuid::new_v4()));
@@ -761,7 +761,7 @@ mod tests {
     }
     #[test]
     fn commands_never_run_from_network_events_without_local_approval() {
-        let (controller, _) = crate::connection::Controller::new(eframe::egui::Context::default());
+        let (controller, _) = crate::connection::Controller::headless();
         let (sender, mut outgoing) = tokio::sync::mpsc::unbounded_channel();
         let mut manager = Desktop::new(sender, controller.bus.clone(), "test".into());
         let id = uuid::Uuid::new_v4().to_string();
@@ -781,7 +781,7 @@ mod tests {
     #[test]
     fn automatic_commands_require_a_local_policy_for_the_exact_session() {
         let (controller, events) =
-            crate::connection::Controller::new(eframe::egui::Context::default());
+            crate::connection::Controller::headless();
         let (sender, mut outgoing) = tokio::sync::mpsc::unbounded_channel();
         let mut manager = Desktop::new(sender, controller.bus.clone(), "test".into());
         manager.local(&json!({"op":"_desktop_workspace","path":std::env::temp_dir()}));
@@ -809,7 +809,7 @@ mod tests {
     #[test]
     fn automatic_download_can_target_an_absolute_path_outside_starting_directory() {
         let (controller, events) =
-            crate::connection::Controller::new(eframe::egui::Context::default());
+            crate::connection::Controller::headless();
         let (sender, mut outgoing) = tokio::sync::mpsc::unbounded_channel();
         let mut manager = Desktop::new(sender, controller.bus.clone(), "test".into());
         let folder = std::env::temp_dir().join(format!("relay-auto-{}", uuid::Uuid::new_v4()));
@@ -835,7 +835,7 @@ mod tests {
     #[test]
     fn card_download_works_without_pc_control_and_reports_saved_only_after_verification() {
         let (controller, events) =
-            crate::connection::Controller::new(eframe::egui::Context::default());
+            crate::connection::Controller::headless();
         let (sender, mut outgoing) = tokio::sync::mpsc::unbounded_channel();
         let mut manager = Desktop::new(sender, controller.bus.clone(), "test".into());
         let folder = std::env::temp_dir().join(format!("relay-card-{}", uuid::Uuid::new_v4()));
@@ -863,7 +863,7 @@ mod tests {
     #[test]
     fn missing_artifact_is_an_error_and_unsolicited_info_is_ignored() {
         let (controller, events) =
-            crate::connection::Controller::new(eframe::egui::Context::default());
+            crate::connection::Controller::headless();
         let (sender, _) = tokio::sync::mpsc::unbounded_channel();
         let mut manager = Desktop::new(sender, controller.bus.clone(), "test".into());
         let id = uuid::Uuid::new_v4().to_string();

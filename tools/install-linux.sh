@@ -3,6 +3,10 @@ set -eu
 RELAY_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 install -Dm0755 "$RELAY_DIR/relay" "$HOME/.local/bin/relay.pending"
 mv -f "$HOME/.local/bin/relay.pending" "$HOME/.local/bin/relay"
+if [ -f "$RELAY_DIR/relay-tui" ]; then
+    install -Dm0755 "$RELAY_DIR/relay-tui" "$HOME/.local/bin/relay-tui.pending"
+    mv -f "$HOME/.local/bin/relay-tui.pending" "$HOME/.local/bin/relay-tui"
+fi
 install -Dm0644 "$RELAY_DIR/relay.svg" "$HOME/.local/share/icons/hicolor/scalable/apps/relay.svg"
 mkdir -p "$HOME/.local/share/applications"
 cat > "$HOME/.local/share/applications/relay.desktop" <<EOF

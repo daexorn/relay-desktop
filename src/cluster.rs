@@ -402,7 +402,8 @@ pub struct Store {
     pub revision: u64,
     #[serde(skip)]
     pub save_disabled: bool,
-    #[cfg(test)]
+    /// In-memory stores are also used by clients' integration tests.
+    #[doc(hidden)]
     #[serde(skip)]
     pub memory_only: bool,
 }
@@ -425,7 +426,6 @@ impl Store {
         Ok(store)
     }
     pub fn save(&mut self) -> Result<(), String> {
-        #[cfg(test)]
         if self.memory_only {
             if self.dirty {
                 self.revision = self.revision.wrapping_add(1);

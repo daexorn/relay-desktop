@@ -1,11 +1,11 @@
 use crate::model::Server;
 use anyhow::{Context, Result};
+#[cfg(feature = "desktop")]
 use eframe::egui;
 use russh::{client, ChannelMsg};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
-    io::BufRead,
     sync::{mpsc, Arc},
     time::Duration,
 };
@@ -39,6 +39,7 @@ pub enum Event {
         sid: String,
         paths: Vec<std::path::PathBuf>,
     },
+    #[cfg(feature = "desktop")]
     Images {
         server: String,
         sid: String,
@@ -53,6 +54,7 @@ pub enum Event {
 #[derive(Clone)]
 pub struct Bus {
     pub tx: mpsc::Sender<Event>,
+    #[cfg(feature = "desktop")]
     pub ctx: egui::Context,
     epoch: Option<(String, u64)>,
 }
@@ -68,6 +70,7 @@ impl Bus {
             event
         };
         let _ = self.tx.send(event);
+        #[cfg(feature = "desktop")]
         self.ctx.request_repaint();
     }
 }
@@ -78,13 +81,19 @@ pub struct Controller {
     generations: HashMap<String, u64>,
 }
 impl Controller {
-    #[cfg(test)]
+    #[doc(hidden)]
     pub fn mock_host(&mut self, id: &str) -> async_mpsc::UnboundedReceiver<Value> {
         let (tx, rx) = async_mpsc::unbounded_channel();
         self.channels.insert(id.into(), tx);
         rx
     }
+    #[cfg(feature = "desktop")]
     pub fn new(ctx: egui::Context) -> (Self, mpsc::Receiver<Event>) {
+        let (mut controller, rx) = Self::headless();
+        controller.bus.ctx = ctx;
+        (controller, rx)
+    }
+    pub fn headless() -> (Self, mpsc::Receiver<Event>) {
         let (tx, rx) = mpsc::channel();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -98,7 +107,8 @@ impl Controller {
                 generations: HashMap::new(),
                 bus: Bus {
                     tx,
-                    ctx,
+                    #[cfg(feature = "desktop")]
+                    ctx: egui::Context::default(),
                     epoch: None,
                 },
             },
@@ -135,6 +145,7 @@ impl Controller {
         )
         .then_some(id)
     }
+    #[cfg(feature = "desktop")]
     pub fn approve_desktop(&self, server: &str, request: &Value) {
         let Some(sender) = self.channels.get(server).cloned() else {
             return;
@@ -377,7 +388,9 @@ async fn run(
     Ok(())
 }
 /// Credentials come from stdin, never argv or files.
+#[cfg(feature = "desktop")]
 pub fn probe() -> Result<()> {
+    use std::io::BufRead;
     let mut line = String::new();
     std::io::stdin().lock().read_line(&mut line)?;
     let value: Value = serde_json::from_str(&line)?;

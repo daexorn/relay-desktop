@@ -1,6 +1,6 @@
 use crate::{
     connection::{Bus, Event},
-    images::MAX_ATTACHMENT_BYTES,
+    attachments::MAX_ATTACHMENT_BYTES,
 };
 use anyhow::{Context, Result};
 use russh::{client, Channel, ChannelMsg};

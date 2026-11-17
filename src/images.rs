@@ -5,9 +5,7 @@ use image::{DynamicImage, ImageReader};
 use serde_json::{json, Value};
 use std::{io::Cursor, path::Path};
 
-pub const MAX_ATTACHMENTS: usize = 8;
-pub const MAX_ATTACHMENT_BYTES: usize = 512 * 1024 * 1024;
-pub const MAX_INLINE_BYTES: usize = 16 * 1024 * 1024;
+pub use crate::attachments::{MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, MAX_INLINE_BYTES};
 
 #[derive(Clone)]
 pub struct Attachment {

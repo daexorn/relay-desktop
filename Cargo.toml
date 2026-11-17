@@ -1,6 +1,6 @@
 [package]
 name = "relay-desktop"
-version = "0.13.0"
+version = "0.14.0"
 edition = "2021"
 description = "A small native desktop for Claude Code on your servers"
 license = "MIT"
@@ -8,27 +8,42 @@ license = "MIT"
 [[bin]]
 name = "relay"
 path = "src/main.rs"
+required-features = ["desktop"]
+
+[[bin]]
+name = "relay-tui"
+path = "src/tui/main.rs"
+required-features = ["tui"]
+
+[features]
+default = ["desktop", "tui"]
+desktop = ["dep:eframe", "dep:egui_commonmark", "dep:arboard", "dep:rfd", "dep:ratex-parser", "dep:ratex-layout", "dep:ratex-types", "dep:ratex-render", "dep:ratex-unicode-font", "dep:ab_glyph"]
+tui = ["dep:ratatui", "dep:crossterm", "dep:unicode-width", "dep:unicode-segmentation", "dep:signal-hook"]
 
 [dependencies]
 anyhow = "1"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 dirs = "6"
-eframe = { version = "=0.31.1", default-features = false, features = ["glow", "wayland", "x11", "default_fonts"] }
-egui_commonmark = { version = "=0.20.0", default-features = false, features = ["pulldown_cmark"] }
+eframe = { version = "=0.31.1", optional = true, default-features = false, features = ["glow", "wayland", "x11", "default_fonts"] }
+egui_commonmark = { version = "=0.20.0", optional = true, default-features = false, features = ["pulldown_cmark"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
-arboard = { version = "3.6", default-features = false, features = ["image-data", "wayland-data-control"] }
-rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
+arboard = { version = "3.6", optional = true, default-features = false, features = ["image-data", "wayland-data-control"] }
+rfd = { version = "0.15", optional = true, default-features = false, features = ["xdg-portal", "tokio"] }
 russh = { version = "=0.65.0", default-features = false, features = ["ring", "rsa"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 pulldown-cmark = { version = "=0.12.2", default-features = false }
-ratex-parser = "=0.1.15"
-ratex-layout = "=0.1.15"
-ratex-types = "=0.1.15"
-ratex-render = { version = "=0.1.15", features = ["embed-fonts"] }
-ratex-unicode-font = "=0.1.15"
-ab_glyph = "0.2"
+ratex-parser = { version = "=0.1.15", optional = true }
+ratex-layout = { version = "=0.1.15", optional = true }
+ratex-types = { version = "=0.1.15", optional = true }
+ratex-render = { version = "=0.1.15", optional = true, features = ["embed-fonts"] }
+ratex-unicode-font = { version = "=0.1.15", optional = true }
+ab_glyph = { version = "0.2", optional = true }
+ratatui = { version = "=0.30.2", optional = true, default-features = false, features = ["crossterm_0_29", "layout-cache"] }
+crossterm = { version = "=0.29.0", optional = true, features = ["bracketed-paste"] }
+unicode-width = { version = "=0.2.2", optional = true }
+unicode-segmentation = { version = "=1.13.3", optional = true }
 sha2 = "0.10"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "io-util", "macros", "process", "fs"] }
 uuid = { version = "1", features = ["v4", "serde"] }
@@ -41,6 +56,9 @@ keyring = { version = "=3.6.3", features = ["sync-secret-service", "crypto-rust"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "=3.6.3", features = ["windows-native"] }
+
+[target.'cfg(unix)'.dependencies]
+signal-hook = { version = "0.3", optional = true }
 
 [profile.release]
 opt-level = "s"

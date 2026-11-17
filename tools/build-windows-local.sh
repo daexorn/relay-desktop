@@ -11,4 +11,5 @@ export AR_x86_64_pc_windows_gnullvm="$RELAY_MINGW_ROOT/bin/llvm-ar"
 export CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_LINKER="$RELAY_MINGW_ROOT/bin/x86_64-w64-mingw32-clang"
 export CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_RUSTFLAGS='-C target-feature=+crt-static'
 cd "$RELAY_PROJECT"
-cargo build --release --locked --offline --target x86_64-pc-windows-gnullvm --target-dir target/windows --jobs 4
+cargo build --release --locked --offline --bin relay --target x86_64-pc-windows-gnullvm --target-dir target/windows --jobs 4
+cargo build --release --locked --offline --no-default-features --features tui --bin relay-tui --target x86_64-pc-windows-gnullvm --target-dir target/windows --jobs 4
