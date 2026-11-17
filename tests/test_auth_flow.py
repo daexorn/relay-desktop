@@ -27,12 +27,25 @@ if code!='fixture-code#fixture-state':sys.exit(2)
 sys.exit(0)
 '''.replace('url=URL','url='+repr(URL))
 
+class FakeBrowser:
+    @staticmethod
+    def info():return {'ready':True,'missing':[]}
+    @staticmethod
+    def address(value):return value
+    def __init__(self,ident,send,navigation=False):self.ident=ident;self.send=send;self.url=None;self.inputs=[];self.acks=[];self.closed=False;self.navigation=navigation
+    def open(self,url):self.url=url
+    def navigate(self,url):self.url=url
+    def input(self,value):self.inputs.append(value)
+    def ack(self,frame):self.acks.append(frame)
+    def close(self):self.closed=True
+    def alive(self):return not self.closed
+
 
 class AuthFlowTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.binary=Path(self.temp.name)/'claude';self.binary.write_text(FAKE);self.binary.chmod(0o700)
-        self.events=queue.Queue();self.manager=auth.AuthManager(str(self.binary),timeout=5)
+        self.events=queue.Queue();self.manager=auth.AuthManager(str(self.binary),timeout=5,browser_factory=FakeBrowser)
         self.ident=str(uuid.uuid4());self.owner=object();self.flow=None
         self.addCleanup(self.close)
 
@@ -64,7 +77,7 @@ class AuthFlowTests(unittest.TestCase):
     def test_real_cli_protocol_no_shell_code_echo_or_credential_changes(self):
         credentials=Path(self.temp.name)/'.credentials.json';credentials.write_bytes(b'untouched-fixture')
         with mock.patch.dict(os.environ,{'CLAUDE_CONFIG_DIR':self.temp.name}):
-            self.start();event=self.wait('browser');self.assertEqual(event['url'],URL)
+            self.start();event=self.wait('browser');self.assertTrue(event['remote']);self.assertNotIn('url',event);self.assertEqual(self.flow['browser'].url,URL)
             self.manager.input(self.ident,'fixture-code#fixture-state',self.owner)
             event=self.wait('success');self.assertNotIn('fixture-code',json.dumps(event))
             self.flow['thread'].join(3)
@@ -108,7 +121,7 @@ class AuthFlowTests(unittest.TestCase):
         service=self.rpc()
         with mock.patch.object(bridge,'CLIENT',SimpleNamespace()):
             service.dispatch({'op':'auth_start','id':self.ident});self.flow=self.manager.current
-            self.assertEqual(self.wait('browser')['url'],URL)
+            self.assertTrue(self.wait('browser')['remote']);self.assertEqual(self.flow['browser'].url,URL)
             service.dispatch({'op':'auth_input','id':self.ident,'code':'fixture-code#fixture-state'})
             self.wait('success');self.flow['thread'].join(3)
 
@@ -120,3 +133,42 @@ class AuthFlowTests(unittest.TestCase):
             event=self.wait('input_error');self.assertEqual(event['id'],self.ident)
             self.assertFalse(self.flow['cancel'].is_set())
             service.dispatch({'op':'auth_input','id':self.ident,'code':'fixture-code#fixture-state'});self.wait('success')
+
+    def test_frames_and_control_belong_only_to_the_initiating_client(self):
+        self.start();self.wait('browser');browser=self.flow['browser']
+        self.manager.browser(self.ident,{'kind':'text','text':'fixture'},self.owner)
+        self.manager.browser(self.ident,7,self.owner,ack=True)
+        self.assertEqual(browser.inputs,[{'kind':'text','text':'fixture'}]);self.assertEqual(browser.acks,[7])
+        with self.assertRaises(ValueError):self.manager.browser(self.ident,{'kind':'key','key':'Enter'},object())
+        self.manager.browser(self.ident,8,object(),ack=True);self.assertEqual(browser.acks,[7])
+        self.manager.cancel(self.ident,self.owner);self.wait('cancelled');self.flow['thread'].join(4);self.assertTrue(browser.closed)
+        self.manager.browser(self.ident,9,self.owner,ack=True)
+
+    def test_standalone_browser_needs_no_claude_and_disconnect_closes_it(self):
+        self.manager.binary=None
+        with mock.patch.object(auth.subprocess,'Popen',side_effect=AssertionError('Must not launch Claude')):
+            self.manager.start(self.ident,self.events.put,self.owner,standalone=True,url='https://example.com/')
+            self.flow=self.manager.current;self.wait('browser');browser=self.flow['browser']
+            self.assertTrue(browser.navigation);self.assertEqual(browser.url,'https://example.com/');self.assertIsNone(self.flow['process'])
+            self.manager.browser(self.ident,{'kind':'navigate','url':'https://example.net'},self.owner)
+            self.assertEqual(browser.inputs,[{'kind':'navigate','url':'https://example.net'}])
+            self.manager.cancel_owner(object());self.assertFalse(self.flow['cancel'].is_set())
+            self.manager.cancel_owner(self.owner);self.wait('cancelled');self.flow['thread'].join(4)
+            self.assertTrue(browser.closed);self.assertIsNone(self.manager.current)
+
+    def test_cancel_then_open_waits_for_own_browser_cleanup(self):
+        self.manager.start(self.ident,self.events.put,self.owner,standalone=True)
+        self.flow=self.manager.current;self.wait('browser');old=self.flow
+        self.manager.cancel(self.ident,self.owner)
+        ident=str(uuid.uuid4());self.manager.start(ident,self.events.put,self.owner,standalone=True)
+        self.flow=self.manager.current;self.wait('browser')
+        self.assertEqual(self.flow['id'],ident);self.assertTrue(old['browser'].closed)
+        with self.assertRaises(ValueError):self.manager.start(str(uuid.uuid4()),self.events.put,object(),standalone=True)
+
+    def test_actual_bridge_browser_button_starts_a_standalone_browser(self):
+        service=self.rpc()
+        with mock.patch.object(bridge,'CLIENT',SimpleNamespace()):
+            service.dispatch({'op':'browser_open','id':self.ident,'url':'https://example.com/'})
+            self.flow=self.manager.current;self.wait('browser')
+            self.assertTrue(self.flow['standalone']);self.assertTrue(self.flow['browser'].navigation)
+            service.dispatch({'op':'auth_cancel','id':self.ident});self.wait('cancelled')

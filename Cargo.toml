@@ -1,6 +1,6 @@
 [package]
 name = "relay-desktop"
-version = "0.11.0"
+version = "0.12.0"
 edition = "2021"
 description = "A small native desktop for Claude Code on your servers"
 license = "MIT"
@@ -35,9 +35,6 @@ uuid = { version = "1", features = ["v4", "serde"] }
 zeroize = "1"
 ureq = { version = "2", default-features = false, features = ["tls"] }
 sha1 = "0.10"
-wry = "=0.57.2"
-tao = "=0.37.2"
-url = "2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "=3.6.3", features = ["sync-secret-service", "crypto-rust"] }

@@ -1145,4 +1145,19 @@ mod tests {
         app.login_disconnected(&a.id);assert!(app.login.as_ref().unwrap().active());
         app.login_disconnected(&b.id);assert!(!app.login.as_ref().unwrap().active());
     }
+
+    #[test]
+    fn standalone_browser_is_not_a_claude_prompt_and_can_switch_to_login() {
+        let (mut app,a,b,_,mut rx_a,_)=fixture();
+        app.remote.get_mut(&a.id).unwrap().auth_available=true;
+        app.start_browser(&a);let browser=take(&mut rx_a,"browser_open");
+        assert!(rx_a.try_recv().is_err());
+        app.data(b.id.clone(),json!({"type":"auth","id":browser["id"],"state":"failed"}));
+        assert!(app.login.as_ref().unwrap().active());
+        app.data(a.id.clone(),json!({"type":"auth","id":browser["id"],"state":"input_error","message":"Bad address"}));
+        assert!(app.login.as_ref().unwrap().active());
+        app.start_login(&a);assert_eq!(take(&mut rx_a,"auth_cancel")["id"],browser["id"]);
+        let login=take(&mut rx_a,"auth_start");assert_ne!(login["id"],browser["id"]);
+        assert!(rx_a.try_recv().is_err());
+    }
 }

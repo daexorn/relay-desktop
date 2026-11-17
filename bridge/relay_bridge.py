@@ -942,7 +942,9 @@ class Bridge:
         self.catalog_probe = False
         auth_source=globals().get('AUTH_SOURCE') or Path(__file__).with_name('auth_flow.py').read_text(encoding='utf-8')
         auth={'__name__':'relay_auth'};exec(auth_source,auth)
-        self.auth=auth['AuthManager'](self.binary)
+        browser_source=globals().get('BROWSER_SOURCE') or Path(__file__).with_name('remote_browser.py').read_text(encoding='utf-8')
+        self.browser={'__name__':'relay_browser'};exec(browser_source,self.browser)
+        self.auth=auth['AuthManager'](self.binary,browser_factory=self.browser['RemoteBrowser'])
 
     def learn_catalog(self, info):
         """Models and slash commands exactly as this server's Claude Code reports them."""
@@ -1117,7 +1119,7 @@ class Bridge:
     def hello(self):
         version = self.claude_version()
         self.send({"type": "hello", "home": str(Path.home()), "hostname": os.uname().nodename,
-                   "version": version, "protocol": 4, "api_available": True, "auth_available": True, "host": bool(globals().get("RELAY_HOSTED"))})
+                   "version": version, "protocol": 4, "api_available": True, "auth_available": True, "remote_browser": True, "host": bool(globals().get("RELAY_HOSTED"))})
         if self.catalog:
             self.send(self.catalog)
         elif not globals().get('API_DEFAULT'):
@@ -1130,10 +1132,24 @@ class Bridge:
             if op == "auth_start":
                 owner=getattr(CLIENT,'value',None)
                 self.auth.start(req.get('id'),owner.send if owner is not None else self.send,owner)
+            elif op == 'browser_open':
+                owner=getattr(CLIENT,'value',None)
+                self.auth.start(req.get('id'),owner.send if owner is not None else self.send,owner,standalone=True,url=req.get('url','https://claude.ai/'))
             elif op == "auth_input":
                 self.auth.input(req.get('id'),req.get('code'),getattr(CLIENT,'value',None))
             elif op == "auth_cancel":
                 self.auth.cancel(req.get('id'),getattr(CLIENT,'value',None))
+            elif op == 'auth_browser_input':
+                self.auth.browser(req.get('id'),req.get('input'),getattr(CLIENT,'value',None))
+            elif op == 'auth_browser_ack':
+                self.auth.browser(req.get('id'),req.get('frame'),getattr(CLIENT,'value',None),ack=True)
+            elif op == 'browser_info':
+                self.send({'type':'browser_info','id':req.get('id'),'info':self.browser['browser_info']()})
+            elif op == 'browser_setup':
+                self.browser['install_browser'](self.send,req.get('id'))
+            elif op == 'browser_probe':
+                owner=getattr(CLIENT,'value',None)
+                self.browser['probe_browser'](owner.send if owner is not None else self.send,req.get('id'))
             elif op == "sessions":
                 self.send_sessions()
             elif op == "session_meta":
@@ -1341,8 +1357,8 @@ class Bridge:
             else:
                 raise ValueError("Обнови приложение: сервер не знает это действие.")
         except (ValueError, OSError, subprocess.SubprocessError, TypeError, AttributeError, UnicodeError) as error:
-            if op in ('auth_start','auth_input','auth_cancel'):
-                self.send({'type':'auth','id':req.get('id'),'state':'input_error' if op=='auth_input' else 'failed','message':str(error)[:500]})
+            if op in ('auth_start','auth_input','auth_cancel','auth_browser_input','auth_browser_ack','browser_open'):
+                self.send({'type':'auth','id':req.get('id'),'state':'input_error' if op in ('auth_input','auth_browser_input') else 'failed','message':str(error)[:500]})
                 return
             sid = req.get("sid", "")
             run = self.runs.get(sid)

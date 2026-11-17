@@ -1,15 +1,24 @@
 use super::*;
-use crate::auth_browser::Browser;
+use crate::auth_browser;
 
 pub(super) struct Login {
     pub(super) server: String,
     pub(super) id: String,
     state: String,
     message: String,
-    url: String,
     code: String,
-    browser: Option<Browser>,
-    browser_error: String,
+    texture: Option<egui::TextureHandle>,
+    size: [u32; 2],
+    frame: u64,
+    origin: String,
+    error: String,
+    info: Value,
+    preparing: bool,
+    button: Option<&'static str>,
+    standalone: bool,
+    address: String,
+    address_focused: bool,
+    tabs: Vec<Value>,
 }
 impl Login {
     pub(super) fn active(&self) -> bool {
@@ -24,10 +33,18 @@ impl Drop for Login {
 
 impl RelayApp {
     pub(super) fn start_login(&mut self, server: &Server) {
+        self.open_server_browser(server, false);
+    }
+
+    pub(super) fn start_browser(&mut self, server: &Server) {
+        self.open_server_browser(server, true);
+    }
+
+    fn open_server_browser(&mut self, server: &Server, standalone: bool) {
         if self
             .login
             .as_ref()
-            .is_some_and(|l| l.server == server.id && l.active())
+            .is_some_and(|l| l.server == server.id && l.standalone == standalone && l.active())
         {
             return;
         }
@@ -47,19 +64,32 @@ impl RelayApp {
             id: id.clone(),
             state: if available { "starting" } else { "failed" }.into(),
             message: if available {
-                "Готовим вход на сервере…"
+                "Открываем браузер на сервере…"
             } else {
-                "Подключись к серверу заново, чтобы включить вход из Relay."
+                "Переподключись к серверу, чтобы загрузить трансляцию браузера."
             }
             .into(),
-            url: String::new(),
             code: String::new(),
-            browser: None,
-            browser_error: String::new(),
+            texture: None,
+            size: [1200, 800],
+            frame: 0,
+            origin: String::new(),
+            error: String::new(),
+            info: Value::Null,
+            preparing: false,
+            button: None,
+            standalone,
+            address: "https://claude.ai/".into(),
+            address_focused: false,
+            tabs: Vec::new(),
         });
         if available {
             self.controller
-                .send(&server.id, json!({"op":"auth_start","id":id}));
+                .send(&server.id, json!({"op":"browser_info","id":id}));
+            self.controller.send(
+                &server.id,
+                json!({"op":if standalone {"browser_open"} else {"auth_start"},"id":id}),
+            );
         }
     }
 
@@ -71,57 +101,118 @@ impl RelayApp {
         else {
             return;
         };
-        let state = value["state"].as_str().unwrap_or("failed");
-        if !matches!(
-            state,
-            "starting"
-                | "browser"
-                | "verifying"
-                | "success"
-                | "failed"
-                | "cancelled"
-                | "input_error"
-        ) {
-            return;
-        }
-        login.state = state.into();
-        login.message = value["message"]
-            .as_str()
-            .unwrap_or("")
-            .chars()
-            .take(500)
-            .collect();
-        if state == "input_error" {
-            login.state = "browser".into();
-            return;
-        }
-        if state == "browser" {
-            let url = value["url"].as_str().unwrap_or("");
-            if !crate::auth_browser::valid_login_url(url) {
-                login.state = "failed".into();
-                login.message = "Сервер вернул неизвестную страницу входа.".into();
-                return;
+        match value["type"].as_str().unwrap_or("") {
+            "auth_frame" => {
+                if !login.active() {
+                    return;
+                }
+                match auth_browser::Frame::decode(value) {
+                    Ok(frame) if frame.sequence > login.frame => {
+                        login.size = [frame.width, frame.height];
+                        login.frame = frame.sequence;
+                        if let Some(texture) = login.texture.as_mut() {
+                            texture.set(frame.image, egui::TextureOptions::LINEAR);
+                        } else {
+                            login.texture = Some(self.controller.bus.ctx.load_texture(
+                                format!("server-browser-{}", login.id),
+                                frame.image,
+                                egui::TextureOptions::LINEAR,
+                            ));
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(_) => login.error = "Не удалось прочитать кадр серверного браузера.".into(),
+                }
+                self.controller.send(
+                    server,
+                    json!({"op":"auth_browser_ack","id":login.id,"frame":value["frame"]}),
+                );
             }
-            login.url = url.into();
-            if !self.demo && !cfg!(test) {
-                let title = self
-                    .settings
-                    .servers
-                    .iter()
-                    .find(|s| s.id == server)
-                    .map_or("Сервер", |s| s.name.as_str());
-                match Browser::open(server, title, url) {
-                    Ok(browser) => login.browser = Some(browser),
-                    Err(error) => login.browser_error = error.to_string(),
+            "auth_browser" => {
+                login.origin = value["origin"]
+                    .as_str()
+                    .unwrap_or("")
+                    .chars()
+                    .take(180)
+                    .collect();
+                if value["connected"] == false {
+                    login.error = "Браузер сервера закрылся. Открой его ещё раз.".into();
+                    login.state = "failed".into();
                 }
             }
-        }
-        if !login.active() {
-            login.browser = None;
-            login.code.zeroize();
-        }
-        if state == "success" {
-            self.controller.send(server, json!({"op":"usage"}));
+            "browser_navigation" if login.standalone && login.active() => {
+                if !login.address_focused {
+                    let address = value["url"].as_str().unwrap_or("");
+                    login.address = if address == "about:blank" {
+                        String::new()
+                    } else {
+                        address.chars().take(8192).collect()
+                    };
+                }
+                login.tabs = value["tabs"]
+                    .as_array()
+                    .map(|tabs| tabs.iter().take(16).cloned().collect())
+                    .unwrap_or_default();
+            }
+            "auth_clipboard" => {
+                if login.active() {
+                    if let Some(text) = value["text"].as_str().filter(|v| v.len() <= 65536) {
+                        self.controller.bus.ctx.copy_text(text.to_owned());
+                    }
+                }
+            }
+            "browser_info" => login.info = value["info"].clone(),
+            "browser_setup" => {
+                login.preparing = value["running"] == true;
+                login.info = value["info"].clone();
+                login.message = value["message"]
+                    .as_str()
+                    .unwrap_or("")
+                    .chars()
+                    .take(500)
+                    .collect();
+                if !login.preparing {
+                    login.state = "failed".into();
+                }
+            }
+            "auth" => {
+                let state = value["state"].as_str().unwrap_or("failed");
+                if login.state == "success" || login.state == "cancelled" {
+                    return;
+                }
+                if !matches!(
+                    state,
+                    "starting"
+                        | "browser"
+                        | "verifying"
+                        | "success"
+                        | "failed"
+                        | "cancelled"
+                        | "input_error"
+                ) {
+                    return;
+                }
+                login.state = if state == "input_error" {
+                    "browser"
+                } else {
+                    state
+                }
+                .into();
+                login.message = value["message"]
+                    .as_str()
+                    .unwrap_or("")
+                    .chars()
+                    .take(500)
+                    .collect();
+                if !login.active() {
+                    login.code.zeroize();
+                    login.texture = None;
+                }
+                if state == "success" {
+                    self.controller.send(server, json!({"op":"usage"}));
+                }
+            }
+            _ => {}
         }
     }
 
@@ -131,10 +222,11 @@ impl RelayApp {
             .as_mut()
             .filter(|l| l.server == server && l.active())
         {
-            login.browser = None;
+            login.texture = None;
             login.code.zeroize();
             login.state = "failed".into();
-            login.message = "Подключение прервалось. Подключись к серверу и повтори вход.".into();
+            login.message =
+                "Связь с сервером прервалась. Переподключись и открой браузер ещё раз.".into();
         }
     }
 
@@ -143,129 +235,126 @@ impl RelayApp {
             return;
         };
         let p = design::animated_palette(ctx, self.settings.light);
-        let title = self
+        let server = self
             .settings
             .servers
             .iter()
             .find(|s| s.id == login.server)
-            .map_or("Сервер", |s| s.name.as_str());
+            .cloned();
+        let title = server.as_ref().map_or("Сервер", |s| s.name.as_str());
         let mut open = true;
         let mut retry = false;
         let mut close = false;
-        if login.browser.as_mut().is_some_and(|b| !b.running()) {
-            login.browser = None;
-        }
-        egui::Window::new("Вход в Claude")
-            .id(egui::Id::new("claude-login"))
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .default_width(460.)
-            .show(ctx, |ui| {
-                label(ui, title, 20., p.text);
-                ui.add_space(8.);
-                if login.active() {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        label(ui, &login.message, 13., p.muted);
-                    });
-                } else {
-                    label(
-                        ui,
-                        &login.message,
-                        13.,
-                        if login.state == "success" {
-                            GREEN
-                        } else {
-                            p.text
-                        },
-                    );
-                }
-                if login.active() && !login.url.is_empty() {
-                    ui.add_space(14.);
-                    ui.horizontal_wrapped(|ui| {
-                        if design::button(
-                            ui,
-                            "Открыть окно входа",
-                            None,
-                            Kind::Primary,
-                            p,
-                            Vec2::new(0., 32.),
-                        )
-                        .clicked()
-                        {
-                            login.browser = None;
-                            match Browser::open(&login.server, title, &login.url) {
-                                Ok(browser) => {
-                                    login.browser = Some(browser);
-                                    login.browser_error.clear();
+        let browser_width=(ctx.screen_rect().width()-32.).max(320.);
+        egui::Window::new(format!("Браузер сервера · {title}"))
+            .id(egui::Id::new("claude-login")).open(&mut open).collapsible(false).resizable(true)
+            .default_pos(egui::pos2(16.,16.)).default_width(browser_width.min(1100.)).min_width(320.).max_width(browser_width).show(ctx,|ui|{
+                ui.horizontal_wrapped(|ui|{
+                    label(ui,format!("● {title} · на сервере"),13.,GREEN);
+                    if !login.origin.is_empty(){label(ui,&login.origin,12.,p.muted);}
+                    if login.texture.is_some(){
+                        for (text,kind) in [("Назад","back"),("Вперёд","forward"),("Обновить","reload"),("Копировать выделение","copy")]{
+                            if ui.small_button(text).clicked(){self.controller.send(&login.server,json!({"op":"auth_browser_input","id":login.id,"input":{"kind":kind}}));}
+                        }
+                    }
+                });
+                if login.standalone && login.active(){
+                    if !login.tabs.is_empty(){
+                        ui.horizontal_wrapped(|ui|{
+                            for tab in &login.tabs {
+                                let title=tab["title"].as_str().filter(|s|!s.is_empty()).unwrap_or("Новая вкладка");
+                                let short:String=title.chars().take(20).collect();
+                                if ui.selectable_label(tab["active"]==true,short).on_hover_text(title).clicked(){
+                                    self.controller.send(&login.server,json!({"op":"auth_browser_input","id":login.id,"input":{"kind":"switch_tab","target":tab["id"]}}));
                                 }
-                                Err(error) => login.browser_error = error.to_string(),
+                                if ui.small_button("×").on_hover_text("Закрыть вкладку").clicked(){
+                                    self.controller.send(&login.server,json!({"op":"auth_browser_input","id":login.id,"input":{"kind":"close_tab","target":tab["id"]}}));
+                                }
                             }
-                        }
-                        if ui.button("В обычном браузере").clicked() {
-                            ctx.open_url(egui::OpenUrl::new_tab(&login.url));
+                            if ui.small_button("+").on_hover_text("Новая вкладка").clicked(){
+                                self.controller.send(&login.server,json!({"op":"auth_browser_input","id":login.id,"input":{"kind":"new_tab"}}));
+                            }
+                        });
+                    }
+                    ui.horizontal(|ui|{
+                        let address_id=egui::Id::new(("browser-address",&login.id));
+                        if ui.input_mut(|i|i.consume_key(egui::Modifiers::COMMAND,egui::Key::L)){ui.memory_mut(|m|m.request_focus(address_id));}
+                        let address=ui.add(egui::TextEdit::singleline(&mut login.address).id(address_id).hint_text("Адрес сайта").desired_width((ui.available_width()-80.).max(140.)));
+                        login.address_focused=address.has_focus();
+                        if ui.button("Перейти").clicked() || address.lost_focus() && ui.input(|i|i.key_pressed(egui::Key::Enter)){
+                            self.controller.send(&login.server,json!({"op":"auth_browser_input","id":login.id,"input":{"kind":"navigate","url":login.address.trim()}}));
                         }
                     });
-                    if !login.browser_error.is_empty() {
-                        label(ui, &login.browser_error, 12., p.muted);
+                }
+                ui.add_space(6.);label(ui,&login.message,12.,p.muted);
+                if !login.error.is_empty(){label(ui,&login.error,12.,p.text);}
+                if let Some(texture)=login.texture.as_ref(){
+                    let max_height=(ctx.screen_rect().height()-if login.standalone{280.}else{235.}).max(180.);
+                    let width=ui.available_width().min(max_height*login.size[0] as f32/login.size[1] as f32);
+                    let height=width*login.size[1] as f32/login.size[0] as f32;
+                    let response=ui.add(egui::Image::new(texture).fit_to_exact_size(Vec2::new(width,height)).sense(egui::Sense::click_and_drag()));
+                    if response.clicked() || response.drag_started(){response.request_focus();}
+                    let events=ui.input(|i|i.events.clone());let has_paste=events.iter().any(|e|matches!(e,egui::Event::Paste(_)));
+                    let mut pointer=None;
+                    for event in events {
+                        let mut input=None;
+                        match event {
+                            egui::Event::PointerMoved(pos) if response.hovered() || response.dragged()=>{
+                                if let Some((x,y))=auth_browser::point(response.rect,pos,login.size[0],login.size[1]){
+                                    let button=if ui.input(|i|i.pointer.primary_down()){"left"}else{"none"};pointer=Some(json!({"kind":"move","x":x,"y":y,"button":button}));
+                                }
+                            }
+                            egui::Event::PointerButton{pos,button,pressed,..} if response.hovered() || login.button.is_some()=>{
+                                let pos=if !pressed && login.button.is_some(){response.rect.clamp(pos)}else{pos};
+                                if let Some((x,y))=auth_browser::point(response.rect,pos,login.size[0],login.size[1]){
+                                    let name=match button{egui::PointerButton::Primary=>"left",egui::PointerButton::Secondary=>"right",egui::PointerButton::Middle=>"middle",_=>"none"};
+                                    if pressed{response.request_focus();login.button=Some(name);}else{login.button=None;}
+                                    input=Some(json!({"kind":if pressed{"down"}else{"up"},"x":x,"y":y,"button":name}));
+                                }
+                            }
+                            egui::Event::MouseWheel{delta,unit,..} if response.hovered()=>{
+                                if let Some(pos)=ui.input(|i|i.pointer.hover_pos()){
+                                    if let Some((x,y))=auth_browser::point(response.rect,pos,login.size[0],login.size[1]){
+                                        let factor=match unit{egui::MouseWheelUnit::Point=>1.,egui::MouseWheelUnit::Line=>40.,egui::MouseWheelUnit::Page=>login.size[1] as f32};
+                                        input=Some(json!({"kind":"wheel","x":x,"y":y,"deltaX":-delta.x*factor,"deltaY":-delta.y*factor}));
+                                    }
+                                }
+                            }
+                            egui::Event::Copy if response.has_focus()=>input=Some(json!({"kind":"copy"})),
+                            egui::Event::Text(text)|egui::Event::Paste(text) if response.has_focus()=>{if !text.is_empty(){input=Some(json!({"kind":"text","text":text}));}}
+                            egui::Event::Key{key,pressed,modifiers,..} if response.has_focus()=>{
+                                if !(has_paste && key==egui::Key::V && modifiers.command){
+                                    if let Some(key)=auth_browser::key(key,modifiers.command){input=Some(json!({"kind":"key","key":key,"pressed":pressed,"modifiers":auth_browser::modifiers(modifiers)}));}
+                                }
+                            }
+                            _=>{}
+                        }
+                        if let Some(input)=input{self.controller.send(&login.server,json!({"op":"auth_browser_input","id":login.id,"input":input}));}
                     }
-                    ui.add_space(14.);
-                    label(
-                        ui,
-                        "Если Claude показал код — вставь его сюда",
-                        12.,
-                        p.muted,
-                    );
-                    let response = ui.add(
-                        egui::TextEdit::singleline(&mut login.code)
-                            .password(true)
-                            .hint_text("Код входа")
-                            .desired_width(f32::INFINITY),
-                    );
-                    let enter =
-                        response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    let ready = !login.code.trim().is_empty() && login.state != "verifying";
-                    let send = ui
-                        .add_enabled(ready, egui::Button::new("Подтвердить вход"))
-                        .clicked()
-                        || ready && enter;
-                    if send {
-                        self.controller.send(
-                            &login.server,
-                            json!({"op":"auth_input","id":login.id,"code":login.code.trim()}),
-                        );
-                        login.code.zeroize();
-                        login.code.clear();
-                        login.state = "verifying".into();
-                        login.message = "Claude Code проверяет код…".into();
+                    if let Some(input)=pointer{self.controller.send(&login.server,json!({"op":"auth_browser_input","id":login.id,"input":input}));}
+                }else if login.active() || login.preparing {
+                    ui.add_space(30.);ui.spinner();label(ui,"Ждём изображение с сервера…",13.,p.muted);ui.add_space(30.);
+                }
+                if login.info["ready"]==false && login.info["can_install"]==true && !login.preparing {
+                    ui.add_space(10.);
+                    if ui.button("Подготовить браузер на сервере").clicked(){
+                        login.preparing=true;self.controller.send(&login.server,json!({"op":"browser_setup","id":login.id}));
                     }
                 }
-                ui.add_space(16.);
-                label(
-                    ui,
-                    "Вход относится к выбранному серверу. История сессий сохраняется.",
-                    12.,
-                    p.muted,
-                );
-                ui.add_space(12.);
-                ui.horizontal(|ui| {
-                    if !login.active()
-                        && login.state != "success"
-                        && ui.button("Повторить").clicked()
-                    {
-                        retry = true;
-                    }
-                    if ui
-                        .button(if login.state == "success" {
-                            "Продолжить"
-                        } else {
-                            "Закрыть"
-                        })
-                        .clicked()
-                    {
-                        close = true;
-                    }
+                if login.active() && !login.standalone{
+                    egui::CollapsingHeader::new("Код подтверждения, если его показал Claude").show(ui,|ui|{
+                        ui.horizontal(|ui|{
+                            let response=ui.add(egui::TextEdit::singleline(&mut login.code).password(true).hint_text("Код с экрана сервера"));
+                            let ready=!login.code.trim().is_empty();
+                            if ready && (ui.button("Подтвердить").clicked() || response.lost_focus() && ui.input(|i|i.key_pressed(egui::Key::Enter))){
+                                self.controller.send(&login.server,json!({"op":"auth_input","id":login.id,"code":login.code.trim()}));login.code.zeroize();login.code.clear();
+                            }
+                        });
+                    });
+                }
+                ui.add_space(8.);ui.horizontal(|ui|{
+                    if !login.active() && !login.preparing && login.state!="success" && ui.button(if login.standalone{"Открыть браузер"}else{"Открыть вход"}).clicked(){retry=true;}
+                    if ui.button(if login.state=="success"{"Продолжить"}else{"Закрыть"}).clicked(){close=true;}
                 });
             });
         if !open || close || retry {
@@ -274,14 +363,8 @@ impl RelayApp {
                     .send(&login.server, json!({"op":"auth_cancel","id":login.id}));
             }
             if retry {
-                if let Some(server) = self
-                    .settings
-                    .servers
-                    .iter()
-                    .find(|s| s.id == login.server)
-                    .cloned()
-                {
-                    self.start_login(&server);
+                if let Some(server) = server {
+                    self.open_server_browser(&server, login.standalone);
                 }
             }
         } else {

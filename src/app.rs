@@ -298,6 +298,20 @@ impl RelayApp {
             app.settings = Settings::default();
             app.notice.clear();
             app.seed_demo();
+            if let Some(at)=args.iter().position(|a|a=="--demo-browser-frame") {
+                if let Some(path)=args.get(at+1){
+                    if let Ok(bytes)=std::fs::read(path){
+                        if bytes.len()<=crate::auth_browser::MAX_FRAME {
+                            use base64::Engine;
+                            let server=app.settings.servers[0].clone();app.start_browser(&server);
+                            let id=app.login.as_ref().unwrap().id.clone();
+                            app.login_event(&server.id,&json!({"type":"auth","id":id,"state":"browser","message":"Браузер работает на сервере. Управляй изображением ниже."}));
+                            app.login_event(&server.id,&json!({"type":"browser_navigation","id":id,"url":"https://example.com/","tabs":[{"id":"preview","title":"Проверка браузера сервера","active":true}]}));
+                            app.login_event(&server.id,&json!({"type":"auth_frame","id":id,"frame":1,"width":1200,"height":800,"data":base64::engine::general_purpose::STANDARD.encode(bytes)}));
+                        }
+                    }
+                }
+            }
             if args.iter().any(|a| a == "--demo-api" || a == "--demo-api-settings") {
                 let profile = &mut app.settings.servers[0];
                 profile.api.enabled = true;profile.api.base_url = "https://tooken.club/v1".into();
@@ -1009,7 +1023,7 @@ impl RelayApp {
                 r.connecting = false;
                 r.version = value["version"].as_str().unwrap_or("Claude Code").into();
                 r.protocol = value["protocol"].as_u64().unwrap_or(0);
-                r.auth_available = value["auth_available"] == true;
+                r.auth_available = value["auth_available"] == true && value["remote_browser"] == true;
                 r.home = value["home"].as_str().unwrap_or("~").into();
                 r.usage_requested = Some(Instant::now());
                 r.sessions_requested = Some(Instant::now());
@@ -1057,7 +1071,7 @@ impl RelayApp {
                 r.commands = serde_json::from_value(value["commands"].clone()).unwrap_or_default();
             }
             "api_models" => self.api_models_reply(&server, &value),
-            "auth" => self.login_event(&server, &value),
+            "auth"|"auth_frame"|"auth_browser"|"auth_clipboard"|"browser_info"|"browser_setup"|"browser_navigation" => self.login_event(&server, &value),
             "model_changed" | "mode_changed" | "notice" => {
                 let sid = value["sid"].as_str().unwrap_or("");
                 if let Some(c) = self.chats.get_mut(&key(&server, sid)) {
@@ -1801,8 +1815,11 @@ impl RelayApp {
                                         }
                                     }
                                 }
-                                if connected && ui.small_button("Войти в Claude").clicked() {
-                                    self.start_login(&server);
+                                if connected {
+                                    ui.horizontal(|ui|{
+                                        if ui.small_button("Браузер").on_hover_text("Открыть браузер на этом сервере").clicked(){self.start_browser(&server);}
+                                        if ui.small_button("Войти в Claude").clicked(){self.start_login(&server);}
+                                    });
                                 }
                                 if !connected && !connecting {
                                     ui.add_space(6.);
@@ -4873,7 +4890,7 @@ impl eframe::App for RelayApp {
             self.close_confirm = true;
         }
         let dropped = ctx.input_mut(|i| std::mem::take(&mut i.raw.dropped_files));
-        if !dropped.is_empty() {
+        if !dropped.is_empty() && self.login.is_none() {
             if self.current_key().is_none() {
                 self.new_chat();
             }
@@ -4887,12 +4904,13 @@ impl eframe::App for RelayApp {
             }
         }
         if self.editor.is_none()
+            && self.login.is_none()
             && !self.folder_open
             && ctx.input(|i| i.events.iter().any(|event|matches!(event,egui::Event::Key{key:egui::Key::V,pressed:true,modifiers,..} if modifiers.command||modifiers.ctrl)))
         {
             self.paste_image();
         }
-        if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::N)) {
+        if self.login.is_none() && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::N)) {
             self.new_chat();
         }
         self.rail(ctx);

@@ -37,7 +37,7 @@ android {
 
 val copyBridge by tasks.registering(Copy::class) {
     from(rootProject.file("../bridge")) {
-        include("relay_bridge.py", "desktop_mcp.py", "board.py", "cluster_mcp.py", "attachments.py", "api_engine.py", "auth_flow.py")
+        include("relay_bridge.py", "desktop_mcp.py", "board.py", "cluster_mcp.py", "attachments.py", "api_engine.py", "auth_flow.py", "remote_browser.py")
     }
     into(layout.buildDirectory.dir("generated/bridge/bridge"))
 }

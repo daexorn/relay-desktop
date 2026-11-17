@@ -16,7 +16,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.0
       - uses: Swatinem/rust-cache@v2
       - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config libxkbcommon-dev libwayland-dev libgl1-mesa-dev libwebkit2gtk-4.1-dev
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config libxkbcommon-dev libwayland-dev libgl1-mesa-dev
       - run: cargo test --locked
       - run: cargo test --locked -p egui_commonmark --lib
       - run: python -m unittest discover -s tests -v

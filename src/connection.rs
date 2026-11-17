@@ -252,13 +252,14 @@ async fn run(
     drop(password);
     let mut channel = session.channel_open_session().await?;
     let helper = format!(
-        "DESKTOP_SOURCE = {}\nBOARD_SOURCE = {}\nCLUSTER_SOURCE = {}\nATTACHMENTS_SOURCE = {}\nAPI_SOURCE = {}\nAUTH_SOURCE = {}\nAPI_DEFAULT = {}\n{}",
+        "DESKTOP_SOURCE = {}\nBOARD_SOURCE = {}\nCLUSTER_SOURCE = {}\nATTACHMENTS_SOURCE = {}\nAPI_SOURCE = {}\nAUTH_SOURCE = {}\nBROWSER_SOURCE = {}\nAPI_DEFAULT = {}\n{}",
         serde_json::to_string(include_str!("../bridge/desktop_mcp.py"))?,
         serde_json::to_string(include_str!("../bridge/board.py"))?,
         serde_json::to_string(include_str!("../bridge/cluster_mcp.py"))?,
         serde_json::to_string(include_str!("../bridge/attachments.py"))?,
         serde_json::to_string(include_str!("../bridge/api_engine.py"))?,
         serde_json::to_string(include_str!("../bridge/auth_flow.py"))?,
+        serde_json::to_string(include_str!("../bridge/remote_browser.py"))?,
         if server.api.enabled { "True" } else { "False" },
         include_str!("../bridge/relay_bridge.py")
     );
@@ -401,6 +402,12 @@ pub fn probe() -> Result<()> {
     controller.connect(profile.clone(), password);
     line.clear();
     let exercise = value["exercise"].as_bool().unwrap_or(false);
+    let browser_setup = value["browser_setup"] == true;
+    let browser_info = value["browser_info"] == true;
+    let browser_probe = value["browser_probe"] == true;
+    let browser_frame_out = value["browser_frame_out"].as_str().map(str::to_owned);
+    let mut browser_frame_seen = false;
+    let browser_request = uuid::Uuid::new_v4().to_string();
     let desktop_probe = value["desktop_probe"].as_bool().unwrap_or(false);
     let mut desktop_exercised = false;
     let artifact_probe = value["artifact_probe"].as_str().map(str::to_owned);
@@ -425,14 +432,35 @@ pub fn probe() -> Result<()> {
     let mode = value["mode"].as_str().unwrap_or("plan").to_owned();
     let mut reply = String::new();
     let mut count = 0;
-    let until = std::time::Instant::now() + Duration::from_secs(150);
+    let until = std::time::Instant::now() + Duration::from_secs(if browser_setup {660}else{150});
     while std::time::Instant::now() < until {
         match rx.recv_timeout(Duration::from_secs(1)).map(|e| match e {
             Event::Epoch { event, .. } => *event,
             event => event,
         }) {
             Ok(Event::Data { value, .. }) if value["type"] == "hello" => {
+                if browser_setup || browser_info || browser_probe {
+                    controller.send(&profile.id,json!({"op":if browser_setup{"browser_setup"}else if browser_probe{"browser_probe"}else{"browser_info"},"id":browser_request}));
+                    continue;
+                }
                 controller.send(&profile.id, json!({"op":"sessions"}));
+            }
+            Ok(Event::Data { value,.. }) if value["type"]=="browser_info" || value["type"]=="browser_setup" => {
+                if value["id"]==browser_request && value["running"]!=true {
+                    println!("{}",json!({"ok":value["info"]["ready"]==true,"info":value["info"],"message":value["message"]}));
+                    controller.disconnect(&profile.id);return Ok(());
+                }
+            }
+            Ok(Event::Data { value,.. }) if value["type"]=="auth_frame" && browser_probe && value["id"]==browser_request => {
+                crate::auth_browser::Frame::decode(&value)?;browser_frame_seen=true;
+                if let Some(path)=browser_frame_out.as_ref(){
+                    use base64::Engine;
+                    std::fs::write(path,base64::engine::general_purpose::STANDARD.decode(value["data"].as_str().unwrap_or(""))?)?;
+                }
+            }
+            Ok(Event::Data { value,.. }) if value["type"]=="browser_probe" && browser_probe && value["id"]==browser_request => {
+                println!("{}",json!({"ok":value["ok"]==true && browser_frame_seen,"frame_seen":browser_frame_seen,"server":value["server"],"browser_uid":value["browser_uid"],"browser_egress_ip":value["browser_egress_ip"],"result":value["result"],"navigation_history":value["navigation_history"],"tabs":value["tabs"]}));
+                controller.disconnect(&profile.id);return Ok(());
             }
             Ok(Event::Data { value, .. }) if value["type"] == "sessions" => {
                 count = value["sessions"].as_array().map(Vec::len).unwrap_or(0);
