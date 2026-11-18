@@ -1,18 +1,20 @@
 package dev.relay.mobile
 
 import android.app.Application
+import android.graphics.BitmapFactory
 import android.os.Handler
 import android.os.Looper
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.lifecycle.AndroidViewModel
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.Base64
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 
@@ -20,8 +22,11 @@ enum class Screen { Servers, Sessions, Chat, Settings }
 enum class Link { Off, Connecting, Online }
 
 class Chat(val sid: String, cwd: String, title: String, model: String, mode: String, effort: String) {
+    var backend by mutableStateOf("claude")
     var api by mutableStateOf(false)
     var apiModel by mutableStateOf("")
+    var codexModel by mutableStateOf("default")
+    var agyModel by mutableStateOf("default")
     var cwd by mutableStateOf(cwd)
     var title by mutableStateOf(title)
     var model by mutableStateOf(model)
@@ -30,13 +35,38 @@ class Chat(val sid: String, cwd: String, title: String, model: String, mode: Str
     var draft by mutableStateOf("")
     var loading by mutableStateOf(false)
     var loaded by mutableStateOf(false)
+    var locked by mutableStateOf(false)
+    var unlocked by mutableStateOf(true)
+    var unlocking by mutableStateOf(false)
+    var lockError by mutableStateOf("")
     /** Bumped after every change of the transcript, which is not itself observable. */
     var version by mutableIntStateOf(0)
     val transcript = Transcript()
     val permissions = mutableStateListOf<Permission>()
-    /** Sent while Claude was answering: Claude Code answers them in order, one after another. */
+    /** Sent while the agent was answering: answered in order, one after another. */
     val queued = mutableStateListOf<String>()
     val picked = mutableStateListOf<Picked>()
+
+    fun isLockedGate(): Boolean = locked && !unlocked
+
+    fun activeBackend(): String = if (api) "api" else backend
+
+    fun selectedModel(profile: ServerProfile? = null): String = when (activeBackend()) {
+        "api" -> apiModel.ifBlank { profile?.api?.model.orEmpty() }
+        "codex" -> codexModel.ifBlank { profile?.codexModel ?: "default" }
+        "agy" -> agyModel.ifBlank { profile?.agyModel ?: "default" }
+        else -> model.ifBlank { "default" }
+    }
+
+    fun updateSelectedModel(value: String) {
+        when (activeBackend()) {
+            "api" -> apiModel = value
+            "codex" -> codexModel = value
+            "agy" -> agyModel = value
+            else -> model = value
+        }
+    }
+
     fun changed() {
         version++
     }
@@ -70,14 +100,22 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var sessionsLoaded by mutableStateOf(false)
         private set
-    /** 4 and later: Claude runs in a host process on the server and keeps working without the app. */
+    /** 4 and later: agents run in a host process on the server and keep working without the app. */
     var protocol by mutableIntStateOf(0)
         private set
     var running by mutableStateOf<Set<String>>(emptySet())
         private set
     var models by mutableStateOf<List<ModelInfo>>(emptyList())
         private set
+    var codexModels by mutableStateOf<List<ModelInfo>>(emptyList())
+        private set
+    var agyModels by mutableStateOf<List<ModelInfo>>(emptyList())
+        private set
     var commands by mutableStateOf<List<CommandInfo>>(emptyList())
+        private set
+    var codexCommands by mutableStateOf<List<CommandInfo>>(emptyList())
+        private set
+    var agyCommands by mutableStateOf<List<CommandInfo>>(emptyList())
         private set
     var apiModels by mutableStateOf<List<ModelInfo>>(emptyList())
         private set
@@ -90,6 +128,22 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var updating by mutableStateOf(false)
         private set
+
+    // 1-Click CLI Agent Installer & Server Status
+    var backendsStatus by mutableStateOf<Map<String, BackendStatus>>(emptyMap())
+        private set
+    var backendsKnown by mutableStateOf(false)
+        private set
+    val installingAgents = mutableStateMapOf<String, Boolean>()
+    val agentMessages = mutableStateMapOf<String, String>()
+    val agentLogs = mutableStateMapOf<String, String>()
+
+    // Server OAuth Login Flow
+    var authFlow by mutableStateOf<AuthFlowState?>(null)
+        private set
+    var browserSetupRunning by mutableStateOf(false)
+        private set
+
     val transfers = mutableStateListOf<Transfer>()
     var collapsed by mutableStateOf(store.collapsed)
         private set
@@ -113,32 +167,80 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
 
     fun savedPassword(server: ServerProfile) = store.password(server.id)
     fun savedApiKey(server: ServerProfile) = store.apiKey(server.id).orEmpty()
-    fun apiCatalog(): List<ModelInfo> = apiModels.ifEmpty { current?.api?.models.orEmpty().map { ModelInfo(it,it,"") } }
-    fun setApiSource(chat: Chat, enabled: Boolean) {
-        if (chat.transcript.busy) { notice = "Дождись завершения ответа перед сменой источника."; return }
-        chat.api = enabled
-        current?.let { s -> store.setApiSource(s.id,chat.sid,enabled);if (chat.apiModel.isBlank()) chat.apiModel = s.api.model }
+    fun apiCatalog(): List<ModelInfo> = apiModels.ifEmpty { current?.api?.models.orEmpty().map { ModelInfo(it, it, "") } }
+
+    fun catalogFor(backend: String): List<ModelInfo> = when (backend) {
+        "api" -> apiCatalog()
+        "codex" -> codexModels.ifEmpty { defaultBackendModels("codex") }
+        "agy" -> agyModels.ifEmpty { defaultBackendModels("agy") }
+        else -> models.ifEmpty { defaultBackendModels("claude") }
     }
-    fun saveApi(server: ServerProfile, profile: ApiProfile, key: String): Boolean {
-        profile.error()?.let { notice = it;return false }
-        if (current?.id == server.id && profile.enabled != server.api.enabled && chats.values.any { it.transcript.busy }) {
-            notice = "Дождись завершения работы перед сменой источника по умолчанию.";return false
+
+    fun commandsFor(backend: String): List<CommandInfo> = when (backend) {
+        "codex" -> codexCommands
+        "agy" -> agyCommands
+        "api" -> emptyList()
+        else -> commands
+    }
+
+    fun setBackend(chat: Chat, target: String) {
+        if (target !in BACKENDS) return
+        if (chat.transcript.busy) {
+            notice = "Дождись завершения ответа перед сменой источника."
+            return
         }
-        if (store.setApiKey(server.id,key).isFailure) { notice = "Не удалось сохранить ключ в защищённом хранилище Android.";return false }
-        val updated = server.copy(api=profile)
-        saveServer(updated,null,false)
+        chat.backend = target
+        chat.api = target == "api"
+        current?.let { s ->
+            store.setSessionBackend(s.id, chat.sid, target)
+            if (chat.apiModel.isBlank()) chat.apiModel = s.api.model
+            if (chat.codexModel.isBlank()) chat.codexModel = s.codexModel
+            if (chat.agyModel.isBlank()) chat.agyModel = s.agyModel
+        }
+        if (target in listOf("codex", "agy") && link == Link.Online) {
+            send(JSONObject().put("op", "catalog").put("backend", target))
+        }
+    }
+
+    fun setApiSource(chat: Chat, enabled: Boolean) {
+        setBackend(chat, if (enabled) "api" else "claude")
+    }
+
+    fun saveApi(server: ServerProfile, profile: ApiProfile, key: String): Boolean {
+        profile.error()?.let { notice = it; return false }
+        if (current?.id == server.id && profile.enabled != server.api.enabled && chats.values.any { it.transcript.busy }) {
+            notice = "Дождись завершения работы перед сменой источника по умолчанию."
+            return false
+        }
+        if (store.setApiKey(server.id, key).isFailure) {
+            notice = "Не удалось сохранить ключ в защищённом хранилище Android."
+            return false
+        }
+        val nextDefault = when {
+            profile.enabled -> "api"
+            server.defaultBackend == "api" -> ""
+            else -> server.defaultBackend
+        }
+        val updated = server.copy(api = profile, defaultBackend = nextDefault)
+        saveServer(updated, null, false)
         if (current?.id == server.id) {
             current = updated
-            apiModels = profile.models.map { ModelInfo(it,it,"") }
+            apiModels = profile.models.map { ModelInfo(it, it, "") }
             chats.values.filter { it.apiModel.isBlank() }.forEach { it.apiModel = profile.model }
         }
         notice = "Настройки API сохранены"
         return true
     }
+
     fun checkApi(server: ServerProfile, profile: ApiProfile, key: String) {
-        if (current?.id != server.id || link != Link.Online) { apiError = "Подключись к этому серверу для проверки API.";return }
-        apiRequest = UUID.randomUUID().toString();apiChecking = true;apiError = ""
-        send(JSONObject().put("op","api_models").put("request",apiRequest).put("api",profile.request(key)))
+        if (current?.id != server.id || link != Link.Online) {
+            apiError = "Подключись к этому серверу для проверки API."
+            return
+        }
+        apiRequest = UUID.randomUUID().toString()
+        apiChecking = true
+        apiError = ""
+        send(JSONObject().put("op", "api_models").put("request", apiRequest).put("api", profile.request(key)))
     }
 
     fun saveServer(profile: ServerProfile, password: String?, remember: Boolean) {
@@ -148,6 +250,7 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         servers = list
         store.servers = list
         if (password != null) store.setPassword(profile.id, if (remember) password else null)
+        if (current?.id == profile.id) current = profile
     }
 
     fun deleteServer(profile: ServerProfile) {
@@ -166,12 +269,20 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
     fun connect(profile: ServerProfile, password: String) {
         disconnect()
         current = profile
-        apiModels = profile.api.models.map { ModelInfo(it,it,"") };apiError = "";apiChecking = false
+        apiModels = profile.api.models.map { ModelInfo(it, it, "") }
+        apiError = ""
+        apiChecking = false
         link = Link.Connecting
         notice = ""
         sessions = emptyList()
         folders = emptyList()
         sessionsLoaded = false
+        backendsStatus = emptyMap()
+        backendsKnown = false
+        installingAgents.clear()
+        agentMessages.clear()
+        agentLogs.clear()
+        authFlow = null
         chats.clear()
         selected = null
         screen = Screen.Sessions
@@ -216,6 +327,7 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         bridge = null
         poller?.let { main.removeCallbacks(it) }
         poller = null
+        authFlow = null
         link = Link.Off
     }
 
@@ -231,6 +343,7 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         bridge = null
+        authFlow = null
         link = Link.Off
         chats.values.forEach { c ->
             if (c.transcript.busy) {
@@ -256,6 +369,8 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         chats.clear()
         selected = null
         sessions = emptyList()
+        backendsStatus = emptyMap()
+        backendsKnown = false
         link = Link.Online
         screen = Screen.Sessions
         Demo.events().forEach { if (it.optString("type") != "history") handle(it) }
@@ -266,6 +381,8 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         link = Link.Off
         current = null
         sessions = emptyList()
+        backendsStatus = emptyMap()
+        backendsKnown = false
         chats.clear()
         screen = Screen.Servers
     }
@@ -295,6 +412,43 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                 transfers.firstOrNull { it.id == value.optString("id") }?.let { Downloads.fail(it, "В демо-режиме файлы не скачиваются — подключи свой сервер.") }
             }
             "stop" -> main.post { handle(JSONObject().put("type", "run_closed").put("sid", sid)) }
+            "session_lock" -> main.post {
+                val remove = value.optBoolean("remove")
+                handle(JSONObject().put("type", "session_lock_changed").put("sid", sid).put("locked", !remove).put("unlocked", true))
+            }
+            "session_relock" -> main.post {
+                handle(JSONObject().put("type", "session_lock_changed").put("sid", sid).put("locked", true).put("unlocked", false))
+            }
+            "session_unlock" -> main.post {
+                handle(JSONObject().put("type", "session_unlock_result").put("sid", sid).put("ok", true))
+            }
+            "agent_install" -> main.post {
+                val agent = value.optString("agent")
+                handle(JSONObject().put("type", "agent_install").put("agent", agent).put("running", false).put("ok", true).put("installed", true).put("version", "демо").put("message", "В демо-режиме все агенты уже готовы."))
+            }
+            "auth_start" -> main.post {
+                handle(JSONObject().put("type", "auth").put("id", value.optString("id")).put("provider", value.optString("provider", "claude")).put("state", "failed").put("message", "Для входа в аккаунт подключи свой SSH-сервер."))
+            }
+        }
+    }
+
+    private fun parseBackends(obj: JSONObject?) {
+        if (obj == null) return
+        val map = mutableMapOf<String, BackendStatus>()
+        for (id in BACKENDS) {
+            val item = obj.optJSONObject(id) ?: continue
+            map[id] = BackendStatus(
+                id = id,
+                label = item.optString("label").ifBlank { backendLabel(id) },
+                installed = item.optBoolean("installed", id == "api"),
+                version = item.optString("version"),
+                running = item.optBoolean("running", false),
+            )
+        }
+        if (map.isNotEmpty()) {
+            backendsStatus = map
+            backendsKnown = true
+            map["claude"]?.version?.takeIf { it.isNotEmpty() }?.let { claudeVersion = it }
         }
     }
 
@@ -306,6 +460,7 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                 home = value.optString("home", "~")
                 protocol = value.optInt("protocol", 0)
                 claudeVersion = value.optString("version")
+                parseBackends(value.optJSONObject("backends"))
                 val c = current
                 if (c != null && c.fingerprint == null && bridge?.fingerprint != null) {
                     val trusted = c.copy(fingerprint = bridge?.fingerprint, cwd = if (c.cwd == "~") home else c.cwd)
@@ -313,28 +468,186 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                     saveServer(trusted, null, false)
                 }
                 send(JSONObject().put("op", "sessions"))
-                selected?.let { s -> send(JSONObject().put("op", "history").put("sid", s)) }
+                selected?.let { s ->
+                    val chat = chats[s]
+                    if (chat == null || !chat.isLockedGate()) send(JSONObject().put("op", "history").put("sid", s))
+                }
                 schedulePoll()
+            }
+            "backends_status" -> parseBackends(value.optJSONObject("backends"))
+            "agent_install" -> {
+                val agent = value.optString("agent")
+                val isRunning = value.optBoolean("running", false)
+                if (agent.isNotEmpty()) {
+                    installingAgents[agent] = isRunning
+                    val msg = value.optString("message")
+                    if (msg.isNotEmpty()) agentMessages[agent] = msg
+                    val out = value.optString("output")
+                    if (out.isNotEmpty()) agentLogs[agent] = out
+                    if (!isRunning) {
+                        val ok = value.optBoolean("ok", false)
+                        val ver = value.optString("version")
+                        val installed = value.optBoolean("installed", ok)
+                        val prev = backendsStatus[agent]
+                        backendsStatus = backendsStatus + (agent to BackendStatus(
+                            id = agent,
+                            label = prev?.label ?: backendLabel(agent),
+                            installed = installed,
+                            version = ver.ifEmpty { prev?.version.orEmpty() },
+                            running = false,
+                        ))
+                        backendsKnown = true
+                        if (agent == "claude" && ver.isNotEmpty()) claudeVersion = ver
+                        if (msg.isNotEmpty()) notice = msg
+                    }
+                }
+            }
+            "auth" -> {
+                val id = value.optString("id")
+                val cur = authFlow
+                if (cur != null && (id.isEmpty() || cur.id == id)) {
+                    val state = value.optString("state", cur.state)
+                    val msg = value.optString("message", cur.message)
+                    if (state == "cancelled") {
+                        authFlow = null
+                    } else {
+                        authFlow = cur.copy(
+                            state = state,
+                            message = msg,
+                            frame = if (state in setOf("success", "failed")) null else cur.frame,
+                        )
+                        if (state == "success") {
+                            notice = msg.ifBlank { "Вход выполнен на сервере" }
+                            send(JSONObject().put("op", "backends_status"))
+                        }
+                    }
+                }
+            }
+            "auth_frame" -> {
+                val id = value.optString("id")
+                val seq = value.optInt("frame", 0)
+                val cur = authFlow
+                if (cur != null && cur.id == id && seq >= 1) {
+                    send(JSONObject().put("op", "auth_browser_ack").put("id", id).put("frame", seq))
+                    val data = value.optString("data")
+                    if (data.isNotEmpty()) {
+                        val bmp = runCatching {
+                            val bytes = Base64.getDecoder().decode(data)
+                            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+                        }.getOrNull()
+                        if (bmp != null) {
+                            authFlow = cur.copy(
+                                frame = bmp,
+                                frameWidth = value.optInt("width", 1280).coerceAtLeast(1),
+                                frameHeight = value.optInt("height", 960).coerceAtLeast(1),
+                            )
+                        }
+                    }
+                }
+            }
+            "browser_setup" -> {
+                browserSetupRunning = value.optBoolean("running", false)
+                val msg = value.optString("message")
+                if (msg.isNotEmpty()) {
+                    notice = msg
+                    authFlow?.let { authFlow = it.copy(message = msg) }
+                }
             }
             "sessions" -> {
                 val rows = value.optJSONArray("sessions") ?: JSONArray()
                 sessions = (0 until rows.length()).mapNotNull { rows.optJSONObject(it) }.map {
-                    Session(it.optString("id"), it.optString("title"), it.optString("cwd"), it.optDouble("modified", 0.0),
-                        it.optDouble("pinned", 0.0).let { p -> if (p.isNaN()) 0.0 else p }, it.optString("folder"), it.optString("auto_title"),
-                        it.optBoolean("running"), it.optString("backend"))
+                    val locked = it.optBoolean("locked", false)
+                    val unlocked = it.optBoolean("unlocked", !locked)
+                    Session(
+                        id = it.optString("id"),
+                        title = it.optString("title"),
+                        cwd = it.optString("cwd"),
+                        modified = it.optDouble("modified", 0.0),
+                        pinned = it.optDouble("pinned", 0.0).let { p -> if (p.isNaN()) 0.0 else p },
+                        folder = it.optString("folder"),
+                        autoTitle = it.optString("auto_title"),
+                        running = it.optBoolean("running"),
+                        backend = it.optString("backend"),
+                        locked = locked,
+                        unlocked = unlocked,
+                    )
                 }.filter { it.id.isNotEmpty() }.distinctBy { it.id }
                 if (protocol >= 4) running = sessions.filter { it.running }.map { it.id }.toSet()
                 val f = value.optJSONArray("folders")
                 if (f != null) folders = (0 until f.length()).mapNotNull { f.optJSONObject(it) }.map { Folder(it.optString("id"), it.optString("name")) }
                 sessionsLoaded = true
-                sessions.forEach { s -> chats[s.id]?.let { c -> c.title = s.title; c.cwd = s.cwd } }
+                sessions.forEach { s ->
+                    chats[s.id]?.let { c ->
+                        c.title = s.title
+                        c.cwd = s.cwd
+                        c.locked = s.locked
+                        c.unlocked = s.unlocked
+                        if (c.isLockedGate()) {
+                            c.loading = false
+                            c.loaded = false
+                            c.transcript.messages.clear()
+                            c.permissions.clear()
+                            c.changed()
+                        }
+                    }
+                }
+            }
+            "session_locked" -> {
+                sessions = sessions.map { if (it.id == sid) it.copy(locked = true, unlocked = false) else it }
+                chats[sid]?.let { c ->
+                    c.locked = true
+                    c.unlocked = false
+                    c.unlocking = false
+                    c.loading = false
+                    c.loaded = false
+                    c.transcript.messages.clear()
+                    c.permissions.clear()
+                    c.changed()
+                }
+            }
+            "session_unlock_result" -> {
+                val ok = value.optBoolean("ok", false)
+                if (ok) {
+                    sessions = sessions.map { if (it.id == sid) it.copy(unlocked = true) else it }
+                }
+                chats[sid]?.let { c ->
+                    c.unlocking = false
+                    if (ok) {
+                        c.unlocked = true
+                        c.lockError = ""
+                        c.loading = true
+                        send(JSONObject().put("op", "history").put("sid", sid))
+                    } else {
+                        c.lockError = value.optString("message").ifBlank { "Неверный пароль сессии." }
+                    }
+                    c.changed()
+                }
+            }
+            "session_lock_changed" -> {
+                val isLocked = value.optBoolean("locked", false)
+                val isUnlocked = value.optBoolean("unlocked", !isLocked)
+                sessions = sessions.map { if (it.id == sid) it.copy(locked = isLocked, unlocked = isUnlocked) else it }
+                chats[sid]?.let { c ->
+                    c.locked = isLocked
+                    c.unlocked = isUnlocked
+                    c.unlocking = false
+                    if (isLocked && !isUnlocked) {
+                        c.loading = false
+                        c.loaded = false
+                        c.transcript.messages.clear()
+                        c.permissions.clear()
+                    } else {
+                        c.lockError = ""
+                    }
+                    c.changed()
+                }
             }
             "history" -> chats[sid]?.let { c ->
-                if (!c.transcript.busy) {
+                if (!c.transcript.busy && !c.isLockedGate()) {
                     c.transcript.loadHistory(value.optJSONArray("messages") ?: JSONArray())
                     c.loading = false
                     c.loaded = true
-                    // Opened while Claude is still answering, maybe started from another device.
+                    // Opened while the agent is still answering, maybe started from another device.
                     if (sid in running) {
                         c.transcript.busy = true
                         c.transcript.userAt = c.transcript.messages.indexOfLast { it.role == "user" }.coerceAtLeast(0)
@@ -344,11 +657,11 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
             "claude" -> chats[sid]?.let { c ->
+                if (c.isLockedGate()) return@let
                 val data = value.optJSONObject("data") ?: return@let
                 c.transcript.reduce(data)
                 if (data.optString("type") == "result" && data.optBoolean("is_error")) c.queued.clear()
                 if (data.optString("type") == "result" && c.queued.isNotEmpty()) {
-                    // The next queued message is the one Claude answers now.
                     c.transcript.userAt = c.transcript.messages.size
                     c.transcript.messages.add(Message("user", c.queued.removeAt(0)))
                     c.transcript.busy = true
@@ -358,29 +671,51 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                 if (data.optString("type") == "result") send(JSONObject().put("op", "sessions"))
             }
             "catalog" -> {
-                models = value.optJSONArray("models")?.let { a -> (0 until a.length()).mapNotNull { a.optJSONObject(it) }.map {
+                val b = value.optString("backend").ifBlank { "claude" }
+                val parsedModels = value.optJSONArray("models")?.let { a -> (0 until a.length()).mapNotNull { a.optJSONObject(it) }.map {
                     ModelInfo(it.optString("value"), it.optString("displayName"), it.optString("description"))
                 } }.orEmpty().filter { it.value.isNotEmpty() }
-                commands = value.optJSONArray("commands")?.let { a -> (0 until a.length()).mapNotNull { a.optJSONObject(it) }.map {
+                val parsedCommands = value.optJSONArray("commands")?.let { a -> (0 until a.length()).mapNotNull { a.optJSONObject(it) }.map {
                     CommandInfo(it.optString("name"), it.optString("description"), it.optString("hint"))
                 } }.orEmpty().filter { it.name.isNotEmpty() }
+                when (b) {
+                    "codex" -> {
+                        if (parsedModels.isNotEmpty()) codexModels = parsedModels
+                        if (parsedCommands.isNotEmpty()) codexCommands = parsedCommands
+                    }
+                    "agy" -> {
+                        if (parsedModels.isNotEmpty()) agyModels = parsedModels
+                        if (parsedCommands.isNotEmpty()) agyCommands = parsedCommands
+                    }
+                    else -> {
+                        models = parsedModels
+                        commands = parsedCommands
+                    }
+                }
             }
             "api_models" -> {
                 if (value.optString("request") == apiRequest) {
-                    apiChecking = false;apiError = value.optString("error")
-                    if (apiError.isEmpty()) apiModels = value.optJSONArray("models")?.let { a -> (0 until a.length()).mapNotNull { a.optJSONObject(it) }.map { ModelInfo(it.optString("value"),it.optString("displayName"),it.optString("description")) } }.orEmpty()
+                    apiChecking = false
+                    apiError = value.optString("error")
+                    if (apiError.isEmpty()) {
+                        apiModels = value.optJSONArray("models")?.let { a -> (0 until a.length()).mapNotNull { a.optJSONObject(it) }.map {
+                            ModelInfo(it.optString("value"), it.optString("displayName"), it.optString("description"))
+                        } }.orEmpty()
+                    }
                 }
             }
             "run_state" -> {
                 val busy = value.optBoolean("busy")
                 running = if (busy) running + sid else running - sid
                 chats[sid]?.let { c ->
-                    if (busy && value.optString("backend") in listOf("api","claude")) {
-                        c.api = value.optString("backend") == "api"
-                        current?.let { store.setApiSource(it.id,sid,c.api) }
+                    val b = value.optString("backend")
+                    if (busy && b in BACKENDS) {
+                        c.backend = b
+                        c.api = b == "api"
+                        current?.let { store.setSessionBackend(it.id, sid, b) }
                     }
                     val background = value.optJSONArray("background")?.let { a -> (0 until a.length()).map { a.optString(it) } }.orEmpty()
-                    if (busy && !c.transcript.busy && c.loaded) {
+                    if (busy && !c.transcript.busy && c.loaded && !c.isLockedGate()) {
                         c.transcript.busy = true
                         if (c.transcript.status.isEmpty()) c.transcript.status = "Работает"
                         c.changed()
@@ -396,13 +731,15 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
             }
-            "permission" -> chats[sid]?.permissions?.add(
-                Permission(value.optString("id"), value.optString("tool", "Действие"), value.optJSONObject("input") ?: JSONObject())
-            )
+            "permission" -> chats[sid]?.let { c ->
+                if (!c.isLockedGate()) {
+                    c.permissions.add(Permission(value.optString("id"), value.optString("tool", "Действие"), value.optJSONObject("input") ?: JSONObject()))
+                }
+            }
             "permission_cancelled" -> chats[sid]?.permissions?.removeAll { it.id == value.optString("id") }
             "run_closed" -> chats[sid]?.let { c ->
                 if (c.transcript.busy) {
-                    c.transcript.error = value.optString("detail").ifEmpty { "Claude остановлен. История сохранена, можно продолжить." }
+                    c.transcript.error = value.optString("detail").ifEmpty { "Ответ остановлен. История сохранена, можно продолжить." }
                 }
                 c.transcript.busy = false
                 c.transcript.status = ""
@@ -412,7 +749,7 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
             }
             "error" -> {
                 val c = chats[sid]
-                if (c != null) {
+                if (c != null && value.optString("op") !in setOf("session_lock", "delete_session")) {
                     c.transcript.error = value.optString("message", "Не удалось выполнить действие.")
                     if (value.optString("op") == "prompt") c.transcript.busy = false
                     if (value.optString("op") == "history") c.loading = false
@@ -429,7 +766,7 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                     screen = Screen.Sessions
                 }
             }
-            "model_changed" -> chats[sid]?.let { it.model = value.optString("model", "default") }
+            "model_changed" -> chats[sid]?.updateSelectedModel(value.optString("model", "default"))
             "mode_changed" -> chats[sid]?.let { it.mode = value.optString("mode", "manual") }
             "notice" -> notice = value.optString("message")
             "claude_update" -> {
@@ -467,6 +804,7 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun schedulePoll() {
         poller?.let { main.removeCallbacks(it) }
+        if (bridge == null) return
         val r = object : Runnable {
             override fun run() {
                 if (link == Link.Online) send(JSONObject().put("op", "sessions"))
@@ -479,17 +817,37 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
 
     fun refresh() {
         send(JSONObject().put("op", "sessions"))
-        chat()?.let { c -> if (!c.transcript.busy) send(JSONObject().put("op", "history").put("sid", c.sid)) }
+        send(JSONObject().put("op", "backends_status"))
+        chat()?.let { c -> if (!c.transcript.busy && !c.isLockedGate()) send(JSONObject().put("op", "history").put("sid", c.sid)) }
     }
 
     fun open(session: Session) {
         val s = current ?: return
         val c = chats.getOrPut(session.id) { Chat(session.id, session.cwd, session.title, s.model, s.mode, s.effort) }
-        c.api = store.apiSource(s.id,c.sid) ?: when (session.backend) { "api" -> true; "claude" -> false;else -> s.api.enabled }
+        val chosen = store.sessionBackend(s.id, c.sid)
+            ?: session.backend.takeIf { it in BACKENDS }
+            ?: s.effectiveBackend()
+        c.backend = chosen
+        c.api = chosen == "api"
         if (c.apiModel.isBlank()) c.apiModel = s.api.model
-        if (!c.transcript.busy) {
+        if (c.codexModel.isBlank() || c.codexModel == "default") c.codexModel = s.codexModel
+        if (c.agyModel.isBlank() || c.agyModel == "default") c.agyModel = s.agyModel
+        c.locked = session.locked
+        c.unlocked = session.unlocked
+        c.unlocking = false
+        c.lockError = ""
+        if (c.isLockedGate()) {
+            c.loading = false
+            c.loaded = false
+            c.transcript.messages.clear()
+            c.permissions.clear()
+            c.changed()
+        } else if (!c.transcript.busy) {
             c.loading = !c.loaded
             send(JSONObject().put("op", "history").put("sid", session.id))
+            if (chosen in listOf("codex", "agy") && link == Link.Online) {
+                send(JSONObject().put("op", "catalog").put("backend", chosen))
+            }
         }
         selected = session.id
         screen = Screen.Chat
@@ -499,28 +857,42 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         val s = current ?: return
         val sid = UUID.randomUUID().toString()
         val c = Chat(sid, if (s.cwd == "~") home else s.cwd, "Новая сессия", s.model, s.mode, s.effort)
-        c.api = s.api.enabled;c.apiModel = s.api.model
+        val b = s.effectiveBackend()
+        c.backend = b
+        c.api = b == "api"
+        c.apiModel = s.api.model
+        c.codexModel = s.codexModel
+        c.agyModel = s.agyModel
         c.loaded = true
         chats[sid] = c
         selected = sid
         screen = Screen.Chat
+        if (b in listOf("codex", "agy") && link == Link.Online) {
+            send(JSONObject().put("op", "catalog").put("backend", b))
+        }
     }
 
-    /** Can a message go now? While Claude answers, only a server with the host queues it. */
-    fun canSend(c: Chat) = link == Link.Online && (!c.transcript.busy || protocol >= 4)
+    /** Can a message go now? Locked sessions are gated; while busy, only protocol >= 4 steers/queues. */
+    fun canSend(c: Chat) = link == Link.Online && !c.isLockedGate() && (!c.transcript.busy || protocol >= 4)
 
-    /** `/model`, `/mode` and `/stop` act at once, also mid-answer; other commands go to Claude Code. */
+    /** `/model`, `/mode` and `/stop` act at once, also mid-answer; other commands go to the CLI engine. */
     private fun localCommand(c: Chat, text: String): Boolean {
         val name = text.substringBefore(' ')
         val arg = text.substringAfter(' ', "").trim()
         when {
             name == "/model" && arg.isNotEmpty() -> {
-                val catalog = if (c.api) apiCatalog() else models
+                val active = c.activeBackend()
+                val catalog = when (active) {
+                    "api" -> apiCatalog()
+                    "codex" -> catalogFor("codex")
+                    "agy" -> catalogFor("agy")
+                    else -> models
+                }
                 val value = resolveModel(catalog, arg)
                 if (value == null) {
-                    c.transcript.error = "Нет такой модели: $arg. Доступны: " + models.joinToString { it.value }
+                    c.transcript.error = "Нет такой модели: $arg. Доступны: " + catalog.joinToString { it.value }
                 } else {
-                    if (c.api) c.apiModel = value else c.model = value
+                    c.updateSelectedModel(value)
                     send(JSONObject().put("op", "control").put("sid", c.sid).put("action", "model").put("value", value))
                     notice = "Модель: " + modelLabel(catalog, value)
                 }
@@ -537,10 +909,10 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         return true
     }
 
-    /** Model or mode picked while Claude answers: switch it live. */
+    /** Model or mode picked while the agent answers: switch it live. */
     fun liveChange(c: Chat) {
         if (protocol >= 4 && c.transcript.busy) {
-            send(JSONObject().put("op", "control").put("sid", c.sid).put("action", "model").put("value", if (c.api) c.apiModel else c.model))
+            send(JSONObject().put("op", "control").put("sid", c.sid).put("action", "model").put("value", c.selectedModel(current)))
             send(JSONObject().put("op", "control").put("sid", c.sid).put("action", "mode").put("value", c.mode))
         }
     }
@@ -564,8 +936,8 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                     val total = c.picked.sumOf { it.bytes.size } + added.sumOf { it.bytes.size } + bytes.size
                     if (total > 12 * 1024 * 1024) { problem = "С телефона можно отправить до 12 МБ за раз."; return@runCatching }
                     val preview = if (mime.startsWith("image/")) runCatching {
-                        val options = android.graphics.BitmapFactory.Options().apply { inSampleSize = 4 }
-                        android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)?.asImageBitmap()
+                        val options = BitmapFactory.Options().apply { inSampleSize = 4 }
+                        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)?.asImageBitmap()
                     }.getOrNull() else null
                     added.add(Picked(name, mime, bytes, preview))
                 }.onFailure { problem = "Не удалось прочитать файл: ${it.message}" }
@@ -584,18 +956,25 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
     fun submit() {
         val c = chat() ?: return
         val profile = current ?: return
-        if (c.api) profile.api.copy(model=c.apiModel.ifBlank { profile.api.model }).error()?.let { c.transcript.error = it;c.changed();return }
+        if (c.isLockedGate()) return
+        val activeBackend = c.activeBackend()
+        if (activeBackend == "api") {
+            profile.api.copy(model = c.apiModel.ifBlank { profile.api.model }).error()?.let {
+                c.transcript.error = it
+                c.changed()
+                return
+            }
+        }
         val text = c.draft.trim()
         if ((text.isEmpty() && c.picked.isEmpty()) || link != Link.Online) return
         if (c.picked.isEmpty() && localCommand(c, text)) return
         if (!canSend(c)) return
         c.transcript.error = ""
-        // Mid-answer the message goes straight in: Claude takes it at its next step, as in the terminal.
         val steering = c.transcript.busy
         c.transcript.userAt = c.transcript.messages.size
         val attached = c.picked.toList()
         c.picked.clear()
-        val b64 = java.util.Base64.getEncoder()
+        val b64 = Base64.getEncoder()
         val images = JSONArray(attached.filter { it.image }.map { JSONObject().put("type", "base64").put("media_type", it.mime).put("data", b64.encodeToString(it.bytes)) })
         val files = JSONArray(attached.filter { !it.image }.map { JSONObject().put("type", "file").put("name", it.name).put("data", b64.encodeToString(it.bytes)) })
         c.transcript.messages.add(Message("user", text, images = images.length(), files = attached.filter { !it.image }.map { it.name }))
@@ -606,22 +985,132 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         if (c.title == "Новая сессия") c.title = text.ifEmpty { attached.firstOrNull()?.name.orEmpty() }.take(60)
         c.draft = ""
         c.changed()
-        val request = JSONObject().put("op", "prompt").put("sid", c.sid).put("cwd", c.cwd).put("text", text)
-                .put("images", images).put("files", files).put("model", if (c.api) c.apiModel.ifBlank { profile.api.model } else c.model).put("mode", c.mode)
-                .put("effort", c.effort).put("actor", actor.ifBlank { "Relay Android" }).put("desktop_enabled", false)
-                .put("desktop_context", JSONObject())
-        if (c.api) request.put("backend","api").put("api",profile.api.request(store.apiKey(profile.id).orEmpty(),c.apiModel))
+        val selectedModel = c.selectedModel(profile)
+        val request = JSONObject()
+            .put("op", "prompt")
+            .put("sid", c.sid)
+            .put("cwd", c.cwd)
+            .put("text", text)
+            .put("images", images)
+            .put("files", files)
+            .put("model", selectedModel)
+            .put("mode", c.mode)
+            .put("effort", c.effort)
+            .put("actor", actor.ifBlank { "Relay Android" })
+            .put("desktop_enabled", false)
+            .put("desktop_context", JSONObject())
+            .put("backend", activeBackend)
+        if (activeBackend == "api") {
+            request.put("api", profile.api.request(store.apiKey(profile.id).orEmpty(), c.apiModel))
+        }
         send(request)
         current?.let { s ->
-            if (s.model != c.model || s.mode != c.mode || s.effort != c.effort) {
-                val updated = s.copy(model = c.model, mode = c.mode, effort = c.effort)
+            if (s.model != c.model || s.codexModel != c.codexModel || s.agyModel != c.agyModel || s.mode != c.mode || s.effort != c.effort) {
+                val updated = s.copy(model = c.model, codexModel = c.codexModel, agyModel = c.agyModel, mode = c.mode, effort = c.effort)
                 current = updated
                 saveServer(updated, null, false)
             }
         }
     }
 
-    /** A file Claude mentioned: fetched over the same connection into Downloads/Relay. */
+    // --- Private Password-Locked Sessions ---
+
+    fun lockSession(sid: String, password: String, currentPassword: String = "", remove: Boolean = false) {
+        send(
+            JSONObject()
+                .put("op", "session_lock")
+                .put("sid", sid)
+                .put("password", password)
+                .put("current_password", currentPassword)
+                .put("remove", remove)
+                .put("actor", actor.ifBlank { "Relay Android" })
+        )
+    }
+
+    fun unlockSession(sid: String, password: String) {
+        chats[sid]?.let {
+            it.unlocking = true
+            it.lockError = ""
+        }
+        send(JSONObject().put("op", "session_unlock").put("sid", sid).put("password", password))
+    }
+
+    fun relockSession(sid: String) {
+        send(JSONObject().put("op", "session_relock").put("sid", sid))
+    }
+
+    // --- 1-Click CLI Agent Installer & Server OAuth Login ---
+
+    fun installAgent(agent: String, action: String = "install") {
+        if (agent == "all") {
+            val targets = CLI_AGENTS.filter { backendsStatus[it]?.installed != true }.ifEmpty { CLI_AGENTS }
+            for (a in targets) installingAgents[a] = true
+        } else {
+            installingAgents[agent] = true
+        }
+        send(JSONObject().put("op", "agent_install").put("agent", agent).put("action", action))
+    }
+
+    fun refreshBackends() {
+        if (link == Link.Online) send(JSONObject().put("op", "backends_status"))
+    }
+
+    fun startAuth(provider: String) {
+        if (link != Link.Online) {
+            notice = "Подключись к серверу, чтобы войти в ${backendLabel(provider)}."
+            return
+        }
+        val id = UUID.randomUUID().toString()
+        authFlow = AuthFlowState(
+            id = id,
+            provider = provider,
+            state = "starting",
+            message = "Готовим вход в ${backendLabel(provider)} на сервере…",
+        )
+        send(JSONObject().put("op", "auth_start").put("id", id).put("provider", provider))
+    }
+
+    fun submitAuthInput(code: String) {
+        val flow = authFlow ?: return
+        val trimmed = code.trim()
+        if (trimmed.isEmpty()) return
+        send(JSONObject().put("op", "auth_input").put("id", flow.id).put("code", trimmed))
+    }
+
+    fun tapAuthBrowser(x: Int, y: Int) {
+        val flow = authFlow ?: return
+        val down = JSONObject().put("kind", "down").put("x", x).put("y", y).put("button", "left")
+        val up = JSONObject().put("kind", "up").put("x", x).put("y", y).put("button", "left")
+        send(JSONObject().put("op", "auth_browser_input").put("id", flow.id).put("input", down))
+        send(JSONObject().put("op", "auth_browser_input").put("id", flow.id).put("input", up))
+    }
+
+    fun sendAuthBrowserText(text: String, pressEnter: Boolean = true) {
+        val flow = authFlow ?: return
+        if (text.isNotEmpty()) {
+            send(JSONObject().put("op", "auth_browser_input").put("id", flow.id).put("input", JSONObject().put("kind", "text").put("text", text)))
+        }
+        if (pressEnter) {
+            send(JSONObject().put("op", "auth_browser_input").put("id", flow.id).put("input", JSONObject().put("kind", "key").put("key", "Enter").put("pressed", true)))
+            send(JSONObject().put("op", "auth_browser_input").put("id", flow.id).put("input", JSONObject().put("kind", "key").put("key", "Enter").put("pressed", false)))
+        }
+    }
+
+    fun setupServerBrowser() {
+        if (link != Link.Online) return
+        browserSetupRunning = true
+        send(JSONObject().put("op", "browser_setup").put("id", UUID.randomUUID().toString()))
+    }
+
+    fun cancelAuth() {
+        val flow = authFlow
+        if (flow != null && flow.active) {
+            send(JSONObject().put("op", "auth_cancel").put("id", flow.id))
+        }
+        authFlow = null
+    }
+
+    /** A file mentioned in chat: fetched over the same connection into Downloads/Relay. */
     fun download(path: String, cwd: String) {
         if (transfers.any { it.path == path && it.error.isEmpty() && !it.done }) return
         if (link != Link.Online) {
@@ -674,7 +1163,13 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
     fun pin(session: Session, on: Boolean) = meta(session) { put("pinned", on) }
     fun rename(session: Session, title: String) = meta(session) { put("title", title.trim()) }
     fun moveTo(session: Session, folder: String) = meta(session) { put("folder", folder) }
-    fun delete(session: Session) = send(JSONObject().put("op", "delete_session").put("sid", session.id))
+    fun delete(session: Session) {
+        if (session.locked) {
+            notice = "Сессия защищена паролем — сначала сними пароль, чтобы удалить её."
+            return
+        }
+        send(JSONObject().put("op", "delete_session").put("sid", session.id))
+    }
     fun createFolder(name: String, session: Session? = null) =
         send(JSONObject().put("op", "session_folder").put("name", name.trim()).put("sid", session?.id ?: JSONObject.NULL).put("actor", actor))
     fun renameFolder(folder: Folder, name: String) = send(JSONObject().put("op", "session_folder").put("id", folder.id).put("name", name.trim()))

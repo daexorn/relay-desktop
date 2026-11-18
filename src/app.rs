@@ -53,6 +53,8 @@ struct Remote {
     codex_commands: Vec<crate::model::CommandInfo>,
     agy_commands: Vec<crate::model::CommandInfo>,
     backends: Value,
+    installing_agents: HashMap<String, String>,
+    agent_logs: HashMap<String, String>,
     /// `claude update` is running on the server.
     updating: bool,
 }
@@ -67,6 +69,11 @@ struct Chat {
     upload_progress: Option<(u64, u64)>,
     loading: bool,
     loaded: bool,
+    locked: bool,
+    unlocked: bool,
+    unlock_input: String,
+    unlock_error: String,
+    unlocking: bool,
     status: String,
     error: String,
     model: String,
@@ -134,6 +141,11 @@ impl Chat {
             upload_progress: None,
             loading: false,
             loaded: false,
+            locked: false,
+            unlocked: true,
+            unlock_input: String::new(),
+            unlock_error: String::new(),
+            unlocking: false,
             status: String::new(),
             error: String::new(),
             model: "default".into(),
@@ -176,6 +188,8 @@ pub struct RelayApp {
     chats: HashMap<String, Chat>,
     selected_chat: HashMap<String, String>,
     delete_chat: Option<session_actions::DeleteChat>,
+    lock_dialog: Option<session_actions::LockDialog>,
+    agents_open: Option<String>,
     deleted_sessions: std::collections::HashSet<String>,
     /// Session being renamed in the sidebar, with the text typed so far.
     renaming: Option<(String, String)>,
@@ -251,6 +265,8 @@ impl RelayApp {
             chats: HashMap::new(),
             selected_chat: HashMap::new(),
             delete_chat: None,
+            lock_dialog: None,
+            agents_open: None,
             deleted_sessions: Default::default(),
             renaming: None,
             folder_renaming: None,
@@ -621,8 +637,15 @@ impl RelayApp {
             );
         }
         if let Some(s) = self.server() {
+            let locked_gate = session.is_locked_gate();
             let chat = self.chat_entry(&s, &session);
-            if !chat.loaded && !chat.loading {
+            chat.locked = session.locked;
+            chat.unlocked = session.unlocked;
+            if locked_gate {
+                chat.loading = false;
+                chat.loaded = false;
+                chat.messages.clear();
+            } else if !chat.loaded && !chat.loading {
                 chat.loading = true;
                 self.controller
                     .send(&s.id, json!({"op":"history","sid":session.id}));
@@ -712,6 +735,7 @@ impl RelayApp {
     }
     fn prefetch(&mut self, server: &str, session: &Session) {
         if self.demo
+            || session.is_locked_gate()
             || !self.connected(server)
             || self.chats.contains_key(&key(server, &session.id))
         {
@@ -1135,6 +1159,61 @@ impl RelayApp {
                     self.notice = value["message"].as_str().unwrap_or("").into();
                 }
             }
+            "backends_status" => {
+                let r = self.remote.entry(server.clone()).or_default();
+                r.backends = value["backends"].clone();
+                if let Some(ver) = r.backends["claude"]["version"]
+                    .as_str()
+                    .filter(|v| !v.is_empty())
+                {
+                    r.version = ver.to_owned();
+                }
+            }
+            "agent_install" => {
+                let agent = value["agent"].as_str().unwrap_or("").to_owned();
+                let running = value["running"] == true;
+                let msg = value["message"].as_str().unwrap_or("").to_owned();
+                let r = self.remote.entry(server.clone()).or_default();
+                if running {
+                    if !agent.is_empty() {
+                        r.installing_agents.insert(
+                            agent,
+                            if msg.is_empty() {
+                                "Устанавливаем на сервере…".into()
+                            } else {
+                                msg
+                            },
+                        );
+                    }
+                } else {
+                    r.installing_agents.remove(&agent);
+                    if let Some(out) = value["output"].as_str().filter(|s| !s.is_empty()) {
+                        r.agent_logs.insert(agent.clone(), out.to_owned());
+                    }
+                    if r.backends.is_object() && !agent.is_empty() {
+                        if let Some(inst) = value["installed"].as_bool() {
+                            r.backends[&agent]["installed"] = json!(inst);
+                        }
+                        if let Some(ver) = value["version"].as_str() {
+                            r.backends[&agent]["version"] = json!(ver);
+                            if agent == "claude" && !ver.is_empty() {
+                                r.version = ver.to_owned();
+                            }
+                        }
+                    }
+                    if !msg.is_empty() {
+                        self.notice = msg;
+                    }
+                    if value["ok"] == true {
+                        if matches!(agent.as_str(), "codex" | "agy") {
+                            self.controller
+                                .send(&server, json!({"op": "catalog", "backend": agent}));
+                        } else if agent == "claude" {
+                            self.controller.send(&server, json!({"op": "usage"}));
+                        }
+                    }
+                }
+            }
             "claude_update" => {
                 let r = self.remote.entry(server.clone()).or_default();
                 r.updating = value["running"] == true;
@@ -1215,6 +1294,15 @@ impl RelayApp {
                     if let Some(c) = self.chats.get_mut(&key(&server, &s.id)) {
                         c.title = s.title.clone();
                         c.cwd = s.cwd.clone();
+                        c.locked = s.locked;
+                        c.unlocked = s.unlocked;
+                        if s.is_locked_gate() {
+                            c.messages.clear();
+                            c.sent_images.clear();
+                            c.permissions.clear();
+                            c.loaded = false;
+                            c.loading = false;
+                        }
                     }
                 }
                 if !self.selected_chat.contains_key(&server)
@@ -1242,6 +1330,74 @@ impl RelayApp {
                 self.folder_path = value["path"].as_str().unwrap_or("~").into();
                 self.folder_parent = value["parent"].as_str().unwrap_or("/").into();
                 self.folders = serde_json::from_value(value["folders"].clone()).unwrap_or_default();
+            }
+            "session_locked" => {
+                let sid = value["sid"].as_str().unwrap_or("");
+                if let Some(c) = self.chats.get_mut(&key(&server, sid)) {
+                    c.loading = false;
+                    c.loaded = false;
+                    c.locked = true;
+                    c.unlocked = false;
+                    c.messages.clear();
+                    c.sent_images.clear();
+                    c.permissions.clear();
+                }
+            }
+            "session_unlock_result" => {
+                let sid = value["sid"].as_str().unwrap_or("");
+                if let Some(c) = self.chats.get_mut(&key(&server, sid)) {
+                    c.unlocking = false;
+                    if value["ok"] == true {
+                        c.unlocked = true;
+                        c.unlock_error.clear();
+                        c.loading = true;
+                        self.controller
+                            .send(&server, json!({"op": "history", "sid": sid}));
+                    } else {
+                        c.unlock_error = value["message"]
+                            .as_str()
+                            .unwrap_or("Неверный пароль сессии.")
+                            .into();
+                    }
+                }
+            }
+            "session_lock_changed" => {
+                let sid = value["sid"].as_str().unwrap_or("");
+                let locked = value["locked"] == true;
+                let unlocked = value["unlocked"].as_bool().unwrap_or(!locked);
+                if let Some(r) = self.remote.get_mut(&server) {
+                    if let Some(s) = r.sessions.iter_mut().find(|s| s.id == sid) {
+                        s.locked = locked;
+                        s.unlocked = unlocked;
+                        if locked && !unlocked {
+                            s.title = "Защищённая сессия".into();
+                            s.auto_title.clear();
+                        }
+                    }
+                }
+                if let Some(c) = self.chats.get_mut(&key(&server, sid)) {
+                    c.locked = locked;
+                    c.unlocked = unlocked;
+                    if locked && !unlocked {
+                        c.messages.clear();
+                        c.sent_images.clear();
+                        c.permissions.clear();
+                        c.loaded = false;
+                        c.loading = false;
+                    }
+                }
+                if self
+                    .lock_dialog
+                    .as_ref()
+                    .is_some_and(|d| d.server == server && d.sid == sid)
+                {
+                    self.lock_dialog = None;
+                    self.notice = if locked {
+                        "Сессия защищена паролем.".into()
+                    } else {
+                        "Защита паролем снята.".into()
+                    };
+                }
             }
             "history" => {
                 let sid = value["sid"].as_str().unwrap_or("");
@@ -1315,6 +1471,20 @@ impl RelayApp {
                             c.permissions.clear();
                         }
                         "error" => {
+                            if value["op"] == "session_lock" {
+                                if let Some(d) = self
+                                    .lock_dialog
+                                    .as_mut()
+                                    .filter(|d| d.server == server && d.sid == sid)
+                                {
+                                    d.pending = false;
+                                    d.error = value["message"]
+                                        .as_str()
+                                        .unwrap_or("Не удалось изменить защиту сессии.")
+                                        .into();
+                                    return;
+                                }
+                            }
                             if value["upload_failed"] == true {
                                 c.restore_failed_upload();
                             }
@@ -1333,6 +1503,20 @@ impl RelayApp {
                         _ => {}
                     }
                 } else if kind == "error" {
+                    if value["op"] == "session_lock" {
+                        if let Some(d) = self
+                            .lock_dialog
+                            .as_mut()
+                            .filter(|d| d.server == server)
+                        {
+                            d.pending = false;
+                            d.error = value["message"]
+                                .as_str()
+                                .unwrap_or("Не удалось изменить защиту сессии.")
+                                .into();
+                            return;
+                        }
+                    }
                     self.notice = value["message"].as_str().unwrap_or("").into();
                 }
             }
@@ -1353,6 +1537,9 @@ impl RelayApp {
         let Some(k) = self.current_key() else {
             return;
         };
+        if self.chats.get(&k).is_some_and(|c| c.locked && !c.unlocked) {
+            return;
+        }
         let backend = self.backend_for_chat(&server, &k);
         server.api.enabled = backend == "api";
         if let Some(run_id) = self.cluster_for_chat(&server.id, &self.chats[&k].sid) {
@@ -1380,6 +1567,39 @@ impl RelayApp {
         let backend_owned = self.backend_for_chat(server, k);
         let backend = backend_owned.as_str();
         let draft_trimmed = self.chats.get(k).map(|c| c.draft.trim().to_owned()).unwrap_or_default();
+        if draft_trimmed == "/install" || draft_trimmed.starts_with("/install ") {
+            let arg = draft_trimmed.strip_prefix("/install").unwrap_or("").trim();
+            if arg.is_empty() {
+                self.agents_open = Some(server.id.clone());
+            } else if matches!(arg, "claude" | "codex" | "agy" | "all") {
+                let act = if arg != "all" && self.backend_installed(&server.id, arg) {
+                    "update"
+                } else {
+                    "install"
+                };
+                self.install_server_agent(&server.id, arg, act);
+            } else {
+                self.notice = "Доступные агенты: /install claude, /install codex, /install agy, /install all".into();
+            }
+            if let Some(c) = self.chats.get_mut(k) {
+                c.draft.clear();
+            }
+            return true;
+        }
+        if draft_trimmed == "/lock" {
+            if let Some(sid) = self.chats.get(k).map(|c| c.sid.clone()) {
+                let is_unlocked_locked = self.chats.get(k).is_some_and(|c| c.locked && c.unlocked);
+                if is_unlocked_locked {
+                    self.relock_session(&server.id, &sid);
+                } else {
+                    self.open_lock_dialog(&server.id, &sid);
+                }
+            }
+            if let Some(c) = self.chats.get_mut(k) {
+                c.draft.clear();
+            }
+            return true;
+        }
         if draft_trimmed == "/login" || draft_trimmed.starts_with("/login ") {
             let arg = draft_trimmed.strip_prefix("/login").unwrap_or("").trim();
             let prov = if arg.is_empty() {
@@ -1768,6 +1988,11 @@ impl RelayApp {
                         self.save();
                     }
                 });
+                let edge = ui.max_rect();
+                ui.painter().line_segment(
+                    [egui::pos2(edge.right(), edge.top()), egui::pos2(edge.right(), edge.bottom())],
+                    Stroke::new(1.0_f32, design::mix(p.rail, p.line, 0.5)),
+                );
             });
     }
     fn sidebar(&mut self, ctx: &egui::Context) {
@@ -1782,11 +2007,19 @@ impl RelayApp {
                     .inner_margin(egui::Margin::symmetric(12, 16)),
             )
             .show(ctx, |ui| {
+                let side_edge = ui.max_rect();
+                ui.painter().line_segment(
+                    [egui::pos2(side_edge.right(), side_edge.top()), egui::pos2(side_edge.right(), side_edge.bottom())],
+                    Stroke::new(1.0_f32, design::mix(p.side, p.line, 0.55)),
+                );
                 ui.spacing_mut().item_spacing.y = 6.;
                 ui.horizontal(|ui| {
                     ui.add_space(6.);
                     label(ui, "Relay", 20., p.text);
                     if let Some(server) = self.server() {
+                        if design::button(ui, "CLI", None, Kind::Ghost, p, Vec2::new(40., 28.)).on_hover_text("Установка и обновление Claude, Codex и AGY на сервере").clicked() {
+                            self.agents_open = Some(server.id.clone());
+                        }
                         if design::button(ui, "API", None, Kind::Ghost, p, Vec2::new(42., 28.)).on_hover_text("API этого сервера").clicked() {
                             self.open_api_settings(&server);
                         }
@@ -1907,36 +2140,74 @@ impl RelayApp {
                                         .map(|sid| self.backend_for_chat(&server, &key(&server.id, sid)))
                                         .unwrap_or_else(|| server.effective_backend().to_owned());
                                     if let Some(remote) = self.remote.get(&server.id) {
+                                        let installing_msg = remote.installing_agents.get(&active_backend).cloned();
+                                        let cli_installed = self.backend_installed(&server.id, &active_backend);
                                         ui.add_space(6.);
-                                        match active_backend.as_str() {
-                                            "api" => {
-                                                label(ui, "Пользовательский API", 12., p.muted);
-                                                if remote.api_tokens != (0, 0) {
-                                                    label(ui, format!("Токены: {} вход · {} выход", remote.api_tokens.0, remote.api_tokens.1), 11., p.muted);
+                                        if let Some(progress) = installing_msg {
+                                            ui.horizontal(|ui| {
+                                                design::dots(ui, accent());
+                                                label(ui, progress, 11.5, accent());
+                                            });
+                                        } else {
+                                            match active_backend.as_str() {
+                                                "api" => {
+                                                    label(ui, "Пользовательский API", 12., p.muted);
+                                                    if remote.api_tokens != (0, 0) {
+                                                        label(ui, format!("Токены: {} вход · {} выход", remote.api_tokens.0, remote.api_tokens.1), 11., p.muted);
+                                                    }
                                                 }
-                                            }
-                                            "codex" => {
-                                                let ver = remote.backends["codex"]["version"].as_str().unwrap_or("");
-                                                label(ui, if ver.is_empty() { "OpenAI Codex CLI".to_owned() } else { format!("OpenAI Codex · {ver}") }, 11.5, p.muted);
-                                            }
-                                            "agy" => {
-                                                let ver = remote.backends["agy"]["version"].as_str().unwrap_or("");
-                                                label(ui, if ver.is_empty() { "Antigravity CLI (agy)".to_owned() } else { format!("Antigravity · {ver}") }, 11.5, p.muted);
-                                            }
-                                            _ => {
-                                                limits::show(ui, &remote.usage, p, connected);
-                                                if remote.protocol >= 4 {
-                                                    ui.add_space(4.);
-                                                    let text = if remote.updating {
-                                                        format!("{} · обновляется…", remote.version)
+                                                "codex" => {
+                                                    let ver = remote.backends["codex"]["version"].as_str().unwrap_or("").to_owned();
+                                                    if !cli_installed {
+                                                        if ui.add(egui::Label::new(RichText::new("Codex не установлен · установить").size(11.5).color(accent())).sense(egui::Sense::click())).clicked() {
+                                                            self.install_server_agent(&server.id, "codex", "install");
+                                                        }
                                                     } else {
-                                                        format!("{} · обновить", remote.version)
-                                                    };
-                                                    let response = ui
-                                                        .add(egui::Label::new(RichText::new(text).size(11.).color(p.muted)).truncate().sense(egui::Sense::click()))
-                                                        .on_hover_text("Claude Code на сервере обновляется сам раз в 6 часов, когда ничего не делает. Нажми, чтобы обновить сейчас.");
-                                                    if response.clicked() && !remote.updating {
-                                                        self.controller.send(&server.id, json!({"op":"claude_update"}));
+                                                        let text = if ver.is_empty() { "OpenAI Codex · обновить".to_owned() } else { format!("Codex · {ver} · обновить") };
+                                                        if ui.add(egui::Label::new(RichText::new(text).size(11.).color(p.muted)).truncate().sense(egui::Sense::click()))
+                                                            .on_hover_text("Нажми, чтобы обновить OpenAI Codex CLI на сервере")
+                                                            .clicked()
+                                                        {
+                                                            self.install_server_agent(&server.id, "codex", "update");
+                                                        }
+                                                    }
+                                                }
+                                                "agy" => {
+                                                    let ver = remote.backends["agy"]["version"].as_str().unwrap_or("").to_owned();
+                                                    if !cli_installed {
+                                                        if ui.add(egui::Label::new(RichText::new("AGY не установлен · установить").size(11.5).color(accent())).sense(egui::Sense::click())).clicked() {
+                                                            self.install_server_agent(&server.id, "agy", "install");
+                                                        }
+                                                    } else {
+                                                        let text = if ver.is_empty() { "Antigravity · обновить".to_owned() } else { format!("{ver} · обновить") };
+                                                        if ui.add(egui::Label::new(RichText::new(text).size(11.).color(p.muted)).truncate().sense(egui::Sense::click()))
+                                                            .on_hover_text("Нажми, чтобы обновить Antigravity CLI на сервере")
+                                                            .clicked()
+                                                        {
+                                                            self.install_server_agent(&server.id, "agy", "update");
+                                                        }
+                                                    }
+                                                }
+                                                _ => {
+                                                    limits::show(ui, &remote.usage, p, connected);
+                                                    if !cli_installed {
+                                                        ui.add_space(4.);
+                                                        if ui.add(egui::Label::new(RichText::new("Claude Code не установлен · установить").size(11.5).color(accent())).sense(egui::Sense::click())).clicked() {
+                                                            self.install_server_agent(&server.id, "claude", "install");
+                                                        }
+                                                    } else if remote.protocol >= 4 {
+                                                        ui.add_space(4.);
+                                                        let text = if remote.updating {
+                                                            format!("{} · обновляется…", remote.version)
+                                                        } else {
+                                                            format!("{} · обновить", remote.version)
+                                                        };
+                                                        let response = ui
+                                                            .add(egui::Label::new(RichText::new(text).size(11.).color(p.muted)).truncate().sense(egui::Sense::click()))
+                                                            .on_hover_text("Claude Code на сервере обновляется сам раз в 6 часов, когда ничего не делает. Нажми, чтобы обновить сейчас.");
+                                                        if response.clicked() && !remote.updating {
+                                                            self.controller.send(&server.id, json!({"op":"claude_update"}));
+                                                        }
                                                     }
                                                 }
                                             }
@@ -1945,6 +2216,9 @@ impl RelayApp {
                                     ui.add_space(8.);
                                     let active=self.login.as_ref().is_some_and(|l|l.server==server.id && l.active());
                                     if design::service_action(ui,"Браузер",Icon::Browser,active,p).on_hover_text("Открыть браузер на сервере").clicked(){self.start_browser(&server);}
+                                    if design::service_action(ui,"Агенты и установка",Icon::Download,self.agents_open.as_deref()==Some(server.id.as_str()),p).on_hover_text("Установить или обновить Claude Code, Codex и Antigravity в 1 клик").clicked(){
+                                        self.agents_open = Some(server.id.clone());
+                                    }
                                     let (primary_prov, primary_label, primary_hint) = match active_backend.as_str() {
                                         "codex" => ("codex", "Войти в Codex", "Войти в учётную запись OpenAI Codex на этом сервере"),
                                         "agy" => ("agy", "Войти в AGY", "Войти в учётную запись Google Antigravity на этом сервере"),
@@ -2215,8 +2489,18 @@ impl RelayApp {
                 ui.spacing_mut().item_spacing.y = 2.;
                 ui.allocate_ui_with_layout(
                     Vec2::new((ui.available_width() - 30.).max(60.), 0.),
-                    Layout::top_down(Align::Min),
+                    Layout::left_to_right(Align::Center),
                     |ui| {
+                        ui.spacing_mut().item_spacing.x = 5.;
+                        if session.locked {
+                            let (lr, _) = ui.allocate_exact_size(Vec2::splat(13.), egui::Sense::hover());
+                            design::icon(
+                                ui.painter(),
+                                lr,
+                                if session.unlocked { Icon::Unlock } else { Icon::Lock },
+                                if session.unlocked { GREEN } else { accent() },
+                            );
+                        }
                         design::session_title(
                             ui,
                             &title,
@@ -2253,8 +2537,14 @@ impl RelayApp {
         let response = ui.interact(row.rect, ui.id().with(&session.id), egui::Sense::click());
         let t = ctx.animate_bool_with_time(response.id.with("active"), selected, 0.18);
         let hover = ctx.animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.12);
-        let mut shapes = vec![egui::Shape::rect_filled(row.rect, 9., design::mix(p.side, design::mix(p.surface, accent(), 0.1), t.max(hover * 0.45)))];
+        let mut shapes = vec![egui::Shape::rect_filled(row.rect, 9., design::mix(p.side, design::mix(p.surface, accent(), 0.12), t.max(hover * 0.45)))];
         if selected {
+            shapes.push(egui::Shape::rect_stroke(
+                row.rect,
+                9.,
+                Stroke::new(1.0_f32, design::mix(p.line, accent(), 0.28)),
+                egui::StrokeKind::Inside,
+            ));
             shapes.push(egui::Shape::rect_filled(
                 egui::Rect::from_min_size(row.rect.left_top() + Vec2::new(3., 9.), Vec2::new(3., row.rect.height() - 18.)),
                 2.,
@@ -2295,12 +2585,14 @@ impl RelayApp {
                 ui.close_menu();
             }
         });
-        if response.double_clicked() && connected {
+        if response.double_clicked() && connected && !session.is_locked_gate() {
             self.renaming = Some((session.id.clone(), session.title.clone()));
         } else if response.hovered() {
             self.prefetch(server, session);
         }
-        let hint = if session.auto_title.is_empty() {
+        let hint = if session.is_locked_gate() {
+            "Защищённая паролем сессия · нажми, чтобы разблокировать".to_owned()
+        } else if session.auto_title.is_empty() {
             format!("{}\n{}", session.title, session.cwd)
         } else {
             format!("{}\nClaude назвал: {}\n{}", session.title, session.auto_title, session.cwd)
@@ -2315,6 +2607,8 @@ impl RelayApp {
         match action {
             RowAction::Open => self.select_chat(session),
             RowAction::Delete => self.request_delete(server, session),
+            RowAction::ManageLock => self.open_lock_dialog(server, &session.id),
+            RowAction::Relock => self.relock_session(server, &session.id),
             RowAction::Pin(on) => {
                 self.controller.send(server, json!({"op":"session_meta","sid":session.id,"pinned":on,"actor":actor}));
             }
@@ -2372,21 +2666,58 @@ impl RelayApp {
                         let title=chat.map(|c|c.title.clone()).unwrap_or_else(||"Рабочее пространство".into());
                         let cwd=chat.map(|c|c.cwd.clone()).unwrap_or_default();
                         let fresh=chat.is_some_and(|c|c.messages.is_empty() && !c.loading && !c.busy);
+                        let sid_opt=chat.map(|c|c.sid.clone());
+                        let chat_locked=chat.is_some_and(|c|c.locked);
+                        let chat_unlocked=chat.is_none_or(|c|c.unlocked);
+                        let active_badge=self.server().zip(self.current_key()).map(|(srv, k)| crate::model::backend_short_label(&self.backend_for_chat(&srv, &k)));
                         ui.horizontal(|ui|{
-                            let available=(ui.available_width()-114.).max(100.);
+                            let right_reserve = if sid_opt.is_some() { 160. } else { 114. };
+                            let available=(ui.available_width()-right_reserve).max(100.);
                             ui.allocate_ui_with_layout(Vec2::new(available,42.),Layout::top_down(Align::Min),|ui|{
                                 ui.set_width(available);
-                                ui.add(egui::Label::new(RichText::new(title).size(15.).color(p.text)).truncate());
+                                ui.horizontal(|ui|{
+                                    ui.spacing_mut().item_spacing.x = 6.;
+                                    if chat_locked {
+                                        let (lr,_)=ui.allocate_exact_size(Vec2::splat(14.),egui::Sense::hover());
+                                        design::icon(ui.painter(),lr,if chat_unlocked{Icon::Unlock}else{Icon::Lock},if chat_unlocked{GREEN}else{accent()});
+                                    }
+                                    ui.add(egui::Label::new(RichText::new(title).size(15.).color(p.text)).truncate());
+                                });
                                 ui.horizontal(|ui|{
                                     let (r,_)=ui.allocate_exact_size(Vec2::splat(12.),egui::Sense::hover());design::icon(ui.painter(),r,Icon::Folder,p.muted);
                                     let response=ui.add(egui::Label::new(RichText::new(if cwd.is_empty(){"Выбери подключение"}else{folder_name(&cwd)}).size(11.5).color(p.muted)).sense(egui::Sense::click())).on_hover_text(&cwd);
-                                    if fresh && response.clicked(){self.open_folders();}
+                                    if fresh && (!chat_locked || chat_unlocked) && response.clicked(){self.open_folders();}
+                                    if let Some(b_name) = active_badge {
+                                        label(ui, format!("· {b_name}"), 11.5, accent());
+                                    }
                                 });
                             });
                             if let Some(server)=self.server(){
+                                if let Some(sid)=sid_opt {
+                                    let lock_icon = if chat_locked && chat_unlocked { Icon::Unlock } else { Icon::Lock };
+                                    let lock_tip = if chat_locked && !chat_unlocked {
+                                        "Сессия заблокирована паролем"
+                                    } else if chat_locked {
+                                        "Настроить защиту паролем или заблокировать (ПКМ — заблокировать сразу)"
+                                    } else {
+                                        "Защитить эту сессию паролем"
+                                    };
+                                    let lock_btn = design::button(ui,"",Some(lock_icon),Kind::Secondary,p,Vec2::new(36.,32.)).on_hover_text(lock_tip);
+                                    if lock_btn.clicked() && (!chat_locked || chat_unlocked) {
+                                        self.open_lock_dialog(&server.id, &sid);
+                                    }
+                                    if lock_btn.secondary_clicked() && chat_locked && chat_unlocked {
+                                        self.relock_session(&server.id, &sid);
+                                    }
+                                }
                                 if design::button(ui,"Браузер",Some(Icon::Browser),Kind::Secondary,p,Vec2::new(106.,32.)).on_hover_text("Браузер выбранного сервера").clicked(){self.start_browser(&server);}
                             }
                         });
+                        let hdr = ui.max_rect();
+                        ui.painter().line_segment(
+                            [egui::pos2(hdr.left() - 18., hdr.bottom() + 9.), egui::pos2(hdr.right() + 18., hdr.bottom() + 9.)],
+                            Stroke::new(1.0_f32, design::mix(p.base, p.line, 0.55)),
+                        );
                     });
                 if !self.notice.is_empty() {
                     egui::TopBottomPanel::top("notice")
@@ -2454,6 +2785,95 @@ impl RelayApp {
                 let Some(k) = self.current_key() else {
                     return;
                 };
+                if self.chats.get(&k).is_some_and(|c| c.locked && !c.unlocked) {
+                    let server_id = self.server().map(|s| s.id).unwrap_or_default();
+                    let sid = self.chats.get(&k).map(|c| c.sid.clone()).unwrap_or_default();
+                    let mut unlock_now = false;
+                    egui::ScrollArea::vertical()
+                        .id_salt(("locked-gate", &k))
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.add_space((ui.available_height() * 0.2).clamp(24., 130.));
+                            design::content(ui, 400., |ui| {
+                                egui::Frame::new()
+                                    .fill(p.surface)
+                                    .stroke(Stroke::new(1.0_f32, p.line))
+                                    .corner_radius(14.)
+                                    .inner_margin(24.)
+                                    .show(ui, |ui| {
+                                        ui.set_width(ui.available_width());
+                                        ui.vertical_centered(|ui| {
+                                            let (ir, _) = ui.allocate_exact_size(
+                                                Vec2::splat(38.),
+                                                egui::Sense::hover(),
+                                            );
+                                            ui.painter().circle_filled(
+                                                ir.center(),
+                                                19.,
+                                                accent().gamma_multiply(0.14),
+                                            );
+                                            design::icon(
+                                                ui.painter(),
+                                                ir.shrink(9.),
+                                                Icon::Lock,
+                                                accent(),
+                                            );
+                                            ui.add_space(12.);
+                                            label(ui, "Сессия защищена паролем", 19., p.text);
+                                            ui.add_space(6.);
+                                            label(
+                                                ui,
+                                                "История и отправка сообщений скрыты. Введи пароль этой сессии, чтобы продолжить работу.",
+                                                12.5,
+                                                p.muted,
+                                            );
+                                        });
+                                        ui.add_space(16.);
+                                        if let Some(c) = self.chats.get_mut(&k) {
+                                            let resp = design::field(
+                                                ui,
+                                                &mut c.unlock_input,
+                                                "Пароль сессии",
+                                                true,
+                                            );
+                                            if resp.lost_focus()
+                                                && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                                                && !c.unlocking
+                                            {
+                                                unlock_now = true;
+                                            }
+                                            if !c.unlock_error.is_empty() {
+                                                ui.add_space(6.);
+                                                label(ui, &c.unlock_error, 12., design::RED);
+                                            }
+                                            ui.add_space(14.);
+                                            ui.add_enabled_ui(!c.unlocking, |ui| {
+                                                if design::button(
+                                                    ui,
+                                                    if c.unlocking {
+                                                        "Проверяем пароль…"
+                                                    } else {
+                                                        "Разблокировать сессию"
+                                                    },
+                                                    Some(Icon::Unlock),
+                                                    Kind::Primary,
+                                                    p,
+                                                    Vec2::new(ui.available_width(), 36.),
+                                                )
+                                                .clicked()
+                                                {
+                                                    unlock_now = true;
+                                                }
+                                            });
+                                        }
+                                    });
+                            });
+                        });
+                    if unlock_now {
+                        self.submit_unlock(&server_id, &sid);
+                    }
+                    return;
+                }
                 egui::TopBottomPanel::bottom("composer-panel")
                     .frame(egui::Frame::new().fill(p.base).inner_margin(egui::Margin {
                         left: 20,
@@ -2725,6 +3145,19 @@ impl RelayApp {
         let mut api_model = server.api.model.clone();
         let mut configure_api = false;
         let mut login_provider: Option<String> = None;
+        let mut open_agents = false;
+        let mut install_active_cli = false;
+        let installed_flags = [
+            self.backend_installed(&server.id, "claude"),
+            self.backend_installed(&server.id, "codex"),
+            self.backend_installed(&server.id, "agy"),
+        ];
+        let active_cli_missing = connected
+            && matches!(backend.as_str(), "claude" | "codex" | "agy")
+            && !self.backend_installed(&server.id, &backend);
+        let active_cli_installing = self
+            .backend_installing(&server.id, &backend)
+            .map(str::to_owned);
         let models = self.models_for_backend(&server, &backend);
         self.game_test_cards(ui, &server.id, p);
         let (commands, live) = self
@@ -2891,6 +3324,55 @@ impl RelayApp {
             ui.add_space(6.);
         }
         let previous = (chat.model.clone(), chat.mode.clone(), chat.effort.clone());
+        if active_cli_missing || active_cli_installing.is_some() {
+            egui::Frame::new()
+                .fill(design::mix(p.side, p.surface, 0.7))
+                .stroke(Stroke::new(1.0_f32, design::mix(p.line, accent(), 0.35)))
+                .corner_radius(11.)
+                .inner_margin(egui::Margin::symmetric(12, 8))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal_wrapped(|ui| {
+                        if let Some(msg) = &active_cli_installing {
+                            design::dots(ui, accent());
+                            label(ui, msg, 12.5, accent());
+                        } else {
+                            let agent_title = crate::model::backend_label(&backend);
+                            label(
+                                ui,
+                                format!("На сервере ещё не установлен {agent_title}."),
+                                12.5,
+                                p.text,
+                            );
+                            if design::button(
+                                ui,
+                                &format!("Установить {}", crate::model::backend_short_label(&backend)),
+                                Some(Icon::Download),
+                                Kind::Primary,
+                                p,
+                                Vec2::new(158., 28.),
+                            )
+                            .clicked()
+                            {
+                                install_active_cli = true;
+                            }
+                            if design::button(
+                                ui,
+                                "Все агенты…",
+                                None,
+                                Kind::Secondary,
+                                p,
+                                Vec2::new(112., 28.),
+                            )
+                            .clicked()
+                            {
+                                open_agents = true;
+                            }
+                        }
+                    });
+                });
+            ui.add_space(6.);
+        }
         if !chat.error.is_empty() {
             egui::Frame::new()
                 .fill(accent().gamma_multiply(0.1))
@@ -2998,7 +3480,7 @@ impl RelayApp {
                         attach = true;
                     }
                     if !compact {
-                        api_settings::backend_picker(ui, &mut backend, &mut configure_api, &mut login_provider, chat.busy, p);
+                        api_settings::backend_picker(ui, &mut backend, &mut configure_api, &mut login_provider, &mut open_agents, installed_flags, chat.busy, p);
                         let is_api = backend == "api";
                         composer_selectors(ui, chat, &mut tests, &models, if is_api { Some(&mut api_model) } else { None }, p);
                     }
@@ -3042,7 +3524,7 @@ impl RelayApp {
                 if compact {
                     ui.add_space(4.);
                     ui.horizontal_wrapped(|ui| {
-                        api_settings::backend_picker(ui, &mut backend, &mut configure_api, &mut login_provider, chat.busy, p);
+                        api_settings::backend_picker(ui, &mut backend, &mut configure_api, &mut login_provider, &mut open_agents, installed_flags, chat.busy, p);
                         let is_api = backend == "api";
                         composer_selectors(ui, chat, &mut tests, &models, if is_api { Some(&mut api_model) } else { None }, p);
                     });
@@ -3109,6 +3591,12 @@ impl RelayApp {
             }
             if backend == "api" && server.api.base_url.is_empty() { configure_api = true; }
             self.save();
+        }
+        if install_active_cli {
+            self.install_server_agent(&server.id, &backend, "install");
+        }
+        if open_agents {
+            self.agents_open = Some(server.id.clone());
         }
         if let Some(prov) = login_provider {
             if let Some(profile) = self.settings.servers.iter().find(|s| s.id == server.id).cloned() {
@@ -3658,7 +4146,9 @@ impl RelayApp {
             || self.trust.is_some()
             || self.folder_open
             || self.close_confirm
-            || self.delete_chat.is_some();
+            || self.delete_chat.is_some()
+            || self.lock_dialog.is_some()
+            || self.agents_open.is_some();
         let modal_t = ctx.animate_bool_with_time_and_easing(
             egui::Id::new("modal-fade"),
             visible,
@@ -3666,6 +4156,8 @@ impl RelayApp {
             egui::emath::easing::cubic_in_out,
         );
         self.deletion_dialog(ctx, p, modal_t);
+        self.lock_dialog(ctx, p, modal_t);
+        self.agents_dialog(ctx, p, modal_t);
         if let Some(mut editor) = self.editor.take() {
             let mut open = true;
             let mut submit = false;
@@ -4213,6 +4705,8 @@ impl RelayApp {
                     {"value":"haiku","displayName":"Haiku 5.5","description":"Fastest for quick answers"}
                 ])).unwrap_or_default(),
                 updating: false,
+                installing_agents: HashMap::new(),
+                agent_logs: HashMap::new(),
                 codex_models: crate::model::default_backend_models("codex"),
                 agy_models: crate::model::default_backend_models("agy"),
                 codex_commands: vec![],
@@ -4524,8 +5018,8 @@ fn user_message_bubble(
             .layout(Layout::top_down(Align::Min)),
     );
     let bubble = egui::Frame::new()
-        .fill(design::mix(p.surface, accent(), 0.035))
-        .stroke(Stroke::new(1.0_f32, design::mix(p.line, accent(), 0.06)))
+        .fill(design::mix(p.surface, accent(), 0.065))
+        .stroke(Stroke::new(1.0_f32, design::mix(p.line, accent(), 0.16)))
         .corner_radius(14.)
         .inner_margin(egui::Margin::symmetric(14, 9))
         .show(&mut child, |ui| {
@@ -4655,6 +5149,8 @@ fn attachment_view(ui: &mut egui::Ui, file: &Attachment, p: Palette, removable: 
 enum RowAction {
     Open,
     Delete,
+    ManageLock,
+    Relock,
     Pin(bool),
     StartRename,
     Rename(String),
@@ -4671,40 +5167,60 @@ fn session_menu(
     p: Palette,
 ) -> Option<RowAction> {
     let mut action = None;
+    let locked_gate = session.is_locked_gate();
     ui.add_enabled_ui(connected, |ui| {
-        let pinned = session.pinned > 0.;
-        if ui.button(if pinned { "Открепить" } else { "Закрепить сверху" }).clicked() {
-            action = Some(RowAction::Pin(!pinned));
-        }
-        if ui.button("Переименовать").on_hover_text("Название увидят все, кто подключается к серверу").clicked() {
-            action = Some(RowAction::StartRename);
-        }
-        if ui.button("Скопировать команду для терминала")
-            .on_hover_text("Чтобы продолжить эту сессию в CLI на сервере: вставь команду в SSH-терминал")
-            .clicked()
-        {
-            ui.ctx().copy_text(resume_command_for(&session.cwd, &session.id, &session.native_id, &session.backend));
-            ui.close_menu();
-        }
-        ui.menu_button("Переместить в папку", |ui| {
-            ui.set_min_width(180.);
-            for folder in folders {
-                let here = session.folder == folder.id;
-                if ui.add_enabled(!here, egui::Button::new(&folder.name)).clicked() {
-                    action = Some(RowAction::Folder(folder.id.clone()));
-                    ui.close_menu();
+        if locked_gate {
+            if ui.button("Разблокировать сессию…").clicked() {
+                action = Some(RowAction::Open);
+            }
+        } else {
+            if !session.locked {
+                if ui.button("Защитить паролем…").clicked() {
+                    action = Some(RowAction::ManageLock);
+                }
+            } else {
+                if ui.button("Заблокировать сейчас").clicked() {
+                    action = Some(RowAction::Relock);
+                }
+                if ui.button("Сменить / снять пароль…").clicked() {
+                    action = Some(RowAction::ManageLock);
                 }
             }
-            if !session.folder.is_empty() && ui.button("Без папки").clicked() {
-                action = Some(RowAction::Folder(String::new()));
-                ui.close_menu();
-            }
             ui.separator();
-            if ui.button("Новая папка…").clicked() {
-                action = Some(RowAction::NewFolder);
+            let pinned = session.pinned > 0.;
+            if ui.button(if pinned { "Открепить" } else { "Закрепить сверху" }).clicked() {
+                action = Some(RowAction::Pin(!pinned));
+            }
+            if ui.button("Переименовать").on_hover_text("Название увидят все, кто подключается к серверу").clicked() {
+                action = Some(RowAction::StartRename);
+            }
+            if ui.button("Скопировать команду для терминала")
+                .on_hover_text("Чтобы продолжить эту сессию в CLI на сервере: вставь команду в SSH-терминал")
+                .clicked()
+            {
+                ui.ctx().copy_text(resume_command_for(&session.cwd, &session.id, &session.native_id, &session.backend));
                 ui.close_menu();
             }
-        });
+            ui.menu_button("Переместить в папку", |ui| {
+                ui.set_min_width(180.);
+                for folder in folders {
+                    let here = session.folder == folder.id;
+                    if ui.add_enabled(!here, egui::Button::new(&folder.name)).clicked() {
+                        action = Some(RowAction::Folder(folder.id.clone()));
+                        ui.close_menu();
+                    }
+                }
+                if !session.folder.is_empty() && ui.button("Без папки").clicked() {
+                    action = Some(RowAction::Folder(String::new()));
+                    ui.close_menu();
+                }
+                ui.separator();
+                if ui.button("Новая папка…").clicked() {
+                    action = Some(RowAction::NewFolder);
+                    ui.close_menu();
+                }
+            });
+        }
     });
     ui.separator();
     let delete = ui.add_enabled(blocked.is_none(), egui::Button::new(RichText::new("Удалить сессию").color(design::RED)));

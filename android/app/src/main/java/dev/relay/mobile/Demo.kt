@@ -9,8 +9,8 @@ object Demo {
 
     fun events(): List<JSONObject> {
         val now = System.currentTimeMillis() / 1000.0
-        fun s(id: String, title: String, ago: Double, pinned: Double = 0.0, folder: String = "", running: Boolean = false) = JSONObject()
-            .put("id", id).put("title", title).put("cwd", "/opt/sbrp-client").put("modified", now - ago).put("pinned", pinned).put("folder", folder).put("running", running)
+        fun s(id: String, title: String, ago: Double, pinned: Double = 0.0, folder: String = "", running: Boolean = false, backend: String = "claude") = JSONObject()
+            .put("id", id).put("title", title).put("cwd", "/opt/sbrp-client").put("modified", now - ago).put("pinned", pinned).put("folder", folder).put("running", running).put("backend", backend)
         val tex = '$'
         val answer = """
             Средний урон за удар:
@@ -41,8 +41,13 @@ object Demo {
             JSONObject().put("role", "tool_result").put("tool_id", "t3").put("text", "> Task :compileKotlin\n> Task :jar\nBUILD SUCCESSFUL in 41s"),
             JSONObject().put("role", "assistant").put("text", answer),
         ))
+        val backends = JSONObject()
+            .put("claude", JSONObject().put("installed", true).put("version", "2.1 · демо").put("label", "Claude Code"))
+            .put("codex", JSONObject().put("installed", true).put("version", "0.28 · демо").put("label", "OpenAI Codex CLI"))
+            .put("agy", JSONObject().put("installed", true).put("version", "agy 2.0 · демо").put("label", "Antigravity CLI (agy)"))
+            .put("api", JSONObject().put("installed", true).put("version", "").put("label", "Пользовательский API"))
         return listOf(
-            JSONObject().put("type", "hello").put("home", "/root").put("version", "2.1 (Claude Code) · демо").put("protocol", 4),
+            JSONObject().put("type", "hello").put("home", "/root").put("version", "2.1 (Claude Code) · демо").put("protocol", 4).put("backends", backends),
             JSONObject().put("type", "catalog")
                 .put("models", JSONArray(listOf(
                     JSONObject().put("value", "default").put("displayName", "Default").put("description", "Opus 5.5"),
@@ -56,17 +61,17 @@ object Demo {
                     JSONObject().put("name", "code-review").put("description", "Проверить изменения")))),
             JSONObject().put("type", "sessions")
                 .put("sessions", JSONArray(listOf(
-                    s(SID, "Формулы для расчёта урона", 60.0, pinned = now),
-                    s("demo-anchor", "Якорь и цепь у штурвала", 3000.0, folder = "f1"),
-                    s("demo-sails", "Паруса и ветер", 90000.0, folder = "f1"),
-                    s("demo-forge", "Новая кузня: печь на домне", 600.0, running = true),
-                    s("demo-update", "Проверка обновления сервера", 100000.0),
+                    s(SID, "Формулы для расчёта урона", 60.0, pinned = now, backend = "claude"),
+                    s("demo-anchor", "Якорь и цепь у штурвала", 3000.0, folder = "f1", backend = "codex"),
+                    s("demo-sails", "Паруса и ветер", 90000.0, folder = "f1", backend = "agy"),
+                    s("demo-forge", "Новая кузня: печь на домне", 600.0, running = true, backend = "codex"),
+                    s("demo-update", "Проверка обновления сервера", 100000.0, backend = "claude"),
                 )))
                 .put("folders", JSONArray(listOf(JSONObject().put("id", "f1").put("name", "Корабли")))),
             JSONObject().put("type", "history").put("sid", SID).put("messages", messages),
         )
     }
 
-    fun reply(text: String) = "Это демо-режим: сервера нет, поэтому Claude не отвечает по-настоящему. Ты написал: «${text.take(200)}». " +
+    fun reply(text: String) = "Это демо-режим: сервера нет, поэтому агент не отвечает по-настоящему. Ты написал: «${text.take(200)}». " +
         "Подключи свой сервер на первом экране, и всё будет работать так же."
 }

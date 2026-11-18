@@ -200,15 +200,19 @@ impl RelayApp {
 pub(super) fn source_picker(ui: &mut egui::Ui, api: &mut bool, configure: &mut bool, busy: bool, p: Palette) {
     let mut backend = if *api { "api".to_owned() } else { "claude".to_owned() };
     let mut login = None;
-    backend_picker(ui, &mut backend, configure, &mut login, busy, p);
+    let mut open_agents = false;
+    backend_picker(ui, &mut backend, configure, &mut login, &mut open_agents, [true, true, true], busy, p);
     *api = backend == "api";
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn backend_picker(
     ui: &mut egui::Ui,
     backend: &mut String,
     configure: &mut bool,
     login_provider: &mut Option<String>,
+    open_agents: &mut bool,
+    installed: [bool; 3],
     busy: bool,
     p: Palette,
 ) {
@@ -228,12 +232,25 @@ pub(super) fn backend_picker(
         .icon(design::combo_icon)
         .show_ui(ui, |ui| {
             ui.add_enabled_ui(!busy, |ui| {
-                ui.selectable_value(backend, "claude".into(), "Claude Code");
-                ui.selectable_value(backend, "codex".into(), "Codex");
-                ui.selectable_value(backend, "agy".into(), "Antigravity (agy)");
+                for ((id, title), ok) in [
+                    (("claude", "Claude Code"), installed[0]),
+                    (("codex", "Codex"), installed[1]),
+                    (("agy", "Antigravity (agy)"), installed[2]),
+                ] {
+                    let label = if ok {
+                        title.to_owned()
+                    } else {
+                        format!("{title} · не установлен")
+                    };
+                    ui.selectable_value(backend, id.into(), label);
+                }
                 ui.selectable_value(backend, "api".into(), "Пользовательский API");
             });
             ui.separator();
+            if ui.button("Установить / обновить CLI-агентов…").clicked() {
+                *open_agents = true;
+                ui.close_menu();
+            }
             if ui.button("Настроить API…").clicked() {
                 *configure = true;
                 ui.close_menu();

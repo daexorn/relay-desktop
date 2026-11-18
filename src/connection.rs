@@ -263,7 +263,7 @@ async fn run(
     drop(password);
     let mut channel = session.channel_open_session().await?;
     let helper = format!(
-        "DESKTOP_SOURCE = {}\nBOARD_SOURCE = {}\nCLUSTER_SOURCE = {}\nATTACHMENTS_SOURCE = {}\nAPI_SOURCE = {}\nCODEX_SOURCE = {}\nAGY_SOURCE = {}\nAUTH_SOURCE = {}\nBROWSER_SOURCE = {}\nAPI_DEFAULT = {}\nDEFAULT_BACKEND = {}\n{}",
+        "DESKTOP_SOURCE = {}\nBOARD_SOURCE = {}\nCLUSTER_SOURCE = {}\nATTACHMENTS_SOURCE = {}\nAPI_SOURCE = {}\nCODEX_SOURCE = {}\nAGY_SOURCE = {}\nINSTALLER_SOURCE = {}\nAUTH_SOURCE = {}\nBROWSER_SOURCE = {}\nAPI_DEFAULT = {}\nDEFAULT_BACKEND = {}\n{}",
         serde_json::to_string(include_str!("../bridge/desktop_mcp.py"))?,
         serde_json::to_string(include_str!("../bridge/board.py"))?,
         serde_json::to_string(include_str!("../bridge/cluster_mcp.py"))?,
@@ -271,6 +271,7 @@ async fn run(
         serde_json::to_string(include_str!("../bridge/api_engine.py"))?,
         serde_json::to_string(include_str!("../bridge/codex_engine.py"))?,
         serde_json::to_string(include_str!("../bridge/agy_engine.py"))?,
+        serde_json::to_string(include_str!("../bridge/agent_installer.py"))?,
         serde_json::to_string(include_str!("../bridge/auth_flow.py"))?,
         serde_json::to_string(include_str!("../bridge/remote_browser.py"))?,
         if server.effective_backend() == "api" { "True" } else { "False" },

@@ -24,6 +24,7 @@ use std::{
 
 pub const COMMANDS: &[(&str, &str)] = &[
     ("/help", "Клавиши и команды"),
+    ("/menu", "Открыть панель серверов, сессий, агентов и лимитов"),
     ("/hosts", "Выбрать сервер"),
     ("/connect", "Подключиться или переподключиться"),
     ("/disconnect", "Отключиться от сервера"),
@@ -36,7 +37,11 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/mode", "auto, manual, acceptEdits, plan"),
     ("/effort", "default, low, medium, high, xhigh, max"),
     ("/backend", "claude, codex, agy или api в этой сессии"),
+    ("/install", "Установить или обновить claude, codex, agy на сервере"),
     ("/api", "Настроить API для сервера"),
+    ("/lock", "Защитить сессию паролем или закрыть (/lock change — сменить)"),
+    ("/unlock", "Разблокировать сессию паролем"),
+    ("/unlock-remove", "Снять парольную защиту с сессии"),
     ("/attach", "Прикрепить файл с компьютера"),
     ("/clear-files", "Убрать вложения"),
     ("/download", "Скачать файл с сервера"),
@@ -52,7 +57,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/pin", "Закрепить или открепить сессию"),
     ("/delete", "Удалить сессию с подтверждением"),
     ("/prompt", "Инструкции для этой сессии"),
-    ("/theme", "graphite, midnight, paper"),
+    ("/theme", "Выбрать тему оформления (24 темы)"),
     ("/refresh", "Обновить сессии и лимиты"),
     ("/login", "Как войти в Claude, Codex или AGY на сервере"),
     ("/quit", "Выйти из Relay TUI"),
@@ -139,6 +144,7 @@ pub struct Remote {
     pub codex_commands: Vec<CommandInfo>,
     pub agy_commands: Vec<CommandInfo>,
     pub backends: Value,
+    pub installing: BTreeSet<String>,
     pub usage: Value,
     pub home: String,
     pub version: String,
@@ -147,12 +153,13 @@ pub struct Remote {
     retries: u8,
     last_refresh: Option<Instant>,
 }
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Picker {
     Hosts,
     Sessions,
     Models,
     Backends,
+    Install,
     Themes,
     Modes,
     Efforts,
@@ -162,6 +169,25 @@ pub struct Item {
     pub id: String,
     pub label: String,
     pub detail: String,
+}
+#[derive(Clone)]
+pub enum WorkspaceAction {
+    Host(String),
+    AddHost,
+    NewSession,
+    LockSession,
+    UnlockSession,
+    RemoveLock,
+    Session(Session),
+    Agent(String),
+    OpenInstall,
+}
+pub struct WorkspaceEntry {
+    pub section: usize,
+    pub label: String,
+    pub detail: String,
+    pub active: bool,
+    pub action: WorkspaceAction,
 }
 pub enum Field {
     Attach,
@@ -173,6 +199,18 @@ pub enum Field {
     DownloadLocal { remote: String },
     Add { server: Server, stage: u8 },
     Api { profile: ApiProfile, stage: u8 },
+    SessionLockSet {
+        sid: String,
+        has_existing: bool,
+        stage: u8,
+        current_pw: zeroize::Zeroizing<String>,
+    },
+    SessionUnlock {
+        sid: String,
+    },
+    SessionLockRemove {
+        sid: String,
+    },
 }
 pub enum Confirmation {
     Quit,
@@ -222,17 +260,21 @@ pub enum Popup {
         key: String,
         index: usize,
     },
+    Workspace {
+        section: usize,
+        index: usize,
+    },
     Help {
         scroll: usize,
     },
 }
 #[derive(Clone)]
 pub enum Hit {
-    Host(String),
-    Session(Session),
-    New,
     Hosts,
     Sessions,
+    Workspace,
+    WorkspaceTab(usize),
+    WorkspaceItem(usize),
 }
 
 pub struct App {
@@ -250,7 +292,6 @@ pub struct App {
     pub quit: bool,
     pub demo: bool,
     pub read_only: bool,
-    pub sidebar: bool,
     pub hits: Vec<(Rect, Hit)>,
     pub chat_rect: Rect,
     pub dirty: bool,
@@ -325,7 +366,6 @@ impl App {
             quit: false,
             demo,
             read_only: false,
-            sidebar: true,
             hits: vec![],
             chat_rect: Rect::default(),
             dirty: false,
@@ -379,6 +419,243 @@ impl App {
             &self.store.theme
         }
     }
+    pub fn active_backend_missing(&self) -> bool {
+        let Some(c) = self.chat() else {
+            return false;
+        };
+        if !matches!(c.backend.as_str(), "claude" | "codex" | "agy") {
+            return false;
+        }
+        self.active
+            .as_ref()
+            .and_then(|h| self.remote.get(h))
+            .is_some_and(|r| {
+                r.connected
+                    && r.backends.is_object()
+                    && r.backends
+                        .get(&c.backend)
+                        .is_some_and(|b| b["installed"] == false)
+            })
+    }
+    pub fn open_workspace(&mut self) {
+        self.popup = Some(Popup::Workspace {
+            section: 0,
+            index: 0,
+        });
+    }
+    pub fn workspace_items(&self) -> Vec<WorkspaceEntry> {
+        let mut out = vec![];
+        for s in self.servers() {
+            let is_active = self.active.as_deref() == Some(&s.id);
+            let connected = self.remote.get(&s.id).is_some_and(|r| r.connected);
+            let eff = s.effective_backend();
+            out.push(WorkspaceEntry {
+                section: 0,
+                label: format!("{} {}", if connected { "●" } else { "○" }, s.name),
+                detail: format!(
+                    "{}@{}:{} · {}{}",
+                    s.user,
+                    s.host,
+                    s.port,
+                    relay_desktop::model::backend_short_label(eff),
+                    if connected {
+                        " · на связи"
+                    } else {
+                        " · не подключён"
+                    }
+                ),
+                active: is_active,
+                action: WorkspaceAction::Host(s.id),
+            });
+        }
+        out.push(WorkspaceEntry {
+            section: 0,
+            label: "＋ Добавить сервер".into(),
+            detail: "Ctrl+A · новый SSH-профиль".into(),
+            active: false,
+            action: WorkspaceAction::AddHost,
+        });
+
+        out.push(WorkspaceEntry {
+            section: 1,
+            label: "＋ Новая сессия".into(),
+            detail: "Ctrl+N · чистый диалог на сервере".into(),
+            active: false,
+            action: WorkspaceAction::NewSession,
+        });
+        if let Some(c) = self.chat() {
+            if c.locked && !c.unlocked {
+                out.push(WorkspaceEntry {
+                    section: 1,
+                    label: "🔒 Разблокировать текущую сессию".into(),
+                    detail: "/unlock · ввести пароль для открытия истории".into(),
+                    active: false,
+                    action: WorkspaceAction::UnlockSession,
+                });
+            } else if c.locked {
+                out.push(WorkspaceEntry {
+                    section: 1,
+                    label: "🔓 Заблокировать сессию снова".into(),
+                    detail: "/lock · скрыть историю до ввода пароля".into(),
+                    active: false,
+                    action: WorkspaceAction::LockSession,
+                });
+                out.push(WorkspaceEntry {
+                    section: 1,
+                    label: "🔓 Снять пароль с сессии".into(),
+                    detail: "/unlock-remove · отключить парольную защиту".into(),
+                    active: false,
+                    action: WorkspaceAction::RemoveLock,
+                });
+            } else {
+                out.push(WorkspaceEntry {
+                    section: 1,
+                    label: "🔓 Защитить сессию паролем".into(),
+                    detail: "/lock · приватная сессия с PBKDF2-защитой".into(),
+                    active: false,
+                    action: WorkspaceAction::LockSession,
+                });
+            }
+        }
+        let mut sessions = self
+            .active
+            .as_ref()
+            .and_then(|h| self.remote.get(h))
+            .map(|r| r.sessions.clone())
+            .unwrap_or_default();
+        sessions.sort_by(|a, b| {
+            b.pinned
+                .total_cmp(&a.pinned)
+                .then_with(|| b.modified.total_cmp(&a.modified))
+        });
+        for s in sessions {
+            let is_current = self.chat().is_some_and(|c| c.sid == s.id);
+            let lock_icon = if s.locked && !s.unlocked {
+                "🔒 "
+            } else if s.locked {
+                "🔓 "
+            } else {
+                ""
+            };
+            let pin_icon = if s.pinned > 0. { "◆ " } else { "" };
+            out.push(WorkspaceEntry {
+                section: 1,
+                label: format!(
+                    "{}{}{}{}",
+                    lock_icon,
+                    pin_icon,
+                    s.title,
+                    if s.running { " · работает" } else { "" }
+                ),
+                detail: format!(
+                    "{} · {}",
+                    relay_desktop::model::backend_short_label(&s.backend),
+                    s.cwd
+                ),
+                active: is_current,
+                action: WorkspaceAction::Session(s),
+            });
+        }
+
+        let active_backend = self
+            .chat()
+            .map(|c| c.backend.clone())
+            .or_else(|| self.server().map(|s| s.effective_backend().to_owned()))
+            .unwrap_or_else(|| "claude".into());
+        let r = self.active.as_ref().and_then(|h| self.remote.get(h));
+        for id in ["claude", "codex", "agy"] {
+            let is_active = active_backend == id;
+            let running = r.is_some_and(|rem| {
+                rem.installing.contains(id) || rem.backends[id]["running"] == true
+            });
+            let detail = if running {
+                "⟳ Устанавливается / обновляется на сервере…".into()
+            } else if let Some(rem) = r.filter(|rem| rem.backends.is_object()) {
+                if rem.backends[id]["installed"] == true {
+                    let ver = rem.backends[id]["version"].as_str().unwrap_or("");
+                    let v = if ver.is_empty() {
+                        "установлен".into()
+                    } else {
+                        format!("установлен ({ver})")
+                    };
+                    if is_active {
+                        format!("{v} · активен · Enter — обновить CLI")
+                    } else {
+                        format!("{v} · Enter — переключить агент")
+                    }
+                } else {
+                    "не установлен на сервере · Enter — установить CLI".into()
+                }
+            } else if is_active {
+                "активен в сессии".into()
+            } else {
+                "Enter — переключить агент сессии".into()
+            };
+            out.push(WorkspaceEntry {
+                section: 2,
+                label: relay_desktop::model::backend_label(id).into(),
+                detail,
+                active: is_active,
+                action: WorkspaceAction::Agent(id.into()),
+            });
+        }
+        out.push(WorkspaceEntry {
+            section: 2,
+            label: "Пользовательский API".into(),
+            detail: if active_backend == "api" {
+                "активен · Enter — настроить URL и ключ (/api)".into()
+            } else {
+                "Enter — переключить на API или настроить (/api)".into()
+            },
+            active: active_backend == "api",
+            action: WorkspaceAction::Agent("api".into()),
+        });
+        out.push(WorkspaceEntry {
+            section: 2,
+            label: "⬇ Установить / обновить CLI на сервере".into(),
+            detail: "/install · claude, codex, agy или все сразу".into(),
+            active: false,
+            action: WorkspaceAction::OpenInstall,
+        });
+        out
+    }
+    fn activate_workspace(&mut self, action: WorkspaceAction) {
+        match action {
+            WorkspaceAction::Host(id) => self.select_host(id),
+            WorkspaceAction::AddHost => self.command("/add"),
+            WorkspaceAction::NewSession => self.new_chat(),
+            WorkspaceAction::LockSession => self.command("/lock"),
+            WorkspaceAction::UnlockSession => self.command("/unlock"),
+            WorkspaceAction::RemoveLock => self.command("/unlock-remove"),
+            WorkspaceAction::Session(s) => self.open_session(s),
+            WorkspaceAction::Agent(id) => {
+                if id == "api" {
+                    if self.server().is_some_and(|s| s.api.base_url.is_empty())
+                        || self.chat().is_some_and(|c| c.backend == "api")
+                    {
+                        self.command("/api");
+                    } else {
+                        self.command("/backend api");
+                    }
+                } else {
+                    let not_installed = self
+                        .active
+                        .as_ref()
+                        .and_then(|h| self.remote.get(h))
+                        .is_some_and(|r| {
+                            r.backends.is_object() && r.backends[&id]["installed"] == false
+                        });
+                    let already_active = self.chat().is_some_and(|c| c.backend == id);
+                    if not_installed || (already_active && self.connected()) {
+                        self.command(&format!("/install {id}"));
+                    } else {
+                        self.command(&format!("/backend {id}"));
+                    }
+                }
+            }
+            WorkspaceAction::OpenInstall => self.picker(Picker::Install),
+        }
+    }
     pub fn picker(&mut self, kind: Picker) {
         self.popup = Some(Popup::Picker {
             kind,
@@ -429,23 +706,33 @@ impl App {
                         .then_with(|| b.modified.total_cmp(&a.modified))
                 });
                 rows.into_iter()
-                    .map(|s| Item {
-                        id: s.id,
-                        label: format!(
-                            "{}{}{}",
-                            if s.pinned > 0. { "◆ " } else { "" },
-                            s.title,
-                            if s.running {
-                                " · работает"
-                            } else {
-                                ""
-                            }
-                        ),
-                        detail: format!(
-                            "{} · {}",
-                            s.cwd,
-                            relay_desktop::model::backend_short_label(&s.backend)
-                        ),
+                    .map(|s| {
+                        let lock_icon = if s.locked && !s.unlocked {
+                            "🔒 "
+                        } else if s.locked {
+                            "🔓 "
+                        } else {
+                            ""
+                        };
+                        Item {
+                            id: s.id,
+                            label: format!(
+                                "{}{}{}{}",
+                                lock_icon,
+                                if s.pinned > 0. { "◆ " } else { "" },
+                                s.title,
+                                if s.running {
+                                    " · работает"
+                                } else {
+                                    ""
+                                }
+                            ),
+                            detail: format!(
+                                "{} · {}",
+                                s.cwd,
+                                relay_desktop::model::backend_short_label(&s.backend)
+                            ),
+                        }
                     })
                     .collect()
             }
@@ -457,7 +744,9 @@ impl App {
                         let status = if id == "api" {
                             "Свой OpenAI-совместимый URL и ключ (/api)".to_owned()
                         } else if let Some(rem) = r {
-                            if rem.backends.is_object() {
+                            if rem.installing.contains(id) || rem.backends[id]["running"] == true {
+                                "Устанавливается на сервере…".into()
+                            } else if rem.backends.is_object() {
                                 if rem.backends[id]["installed"] == true {
                                     let ver = rem.backends[id]["version"].as_str().unwrap_or("");
                                     if ver.is_empty() {
@@ -466,7 +755,7 @@ impl App {
                                         format!("Установлен · {ver}")
                                     }
                                 } else {
-                                    "Не найден на сервере".into()
+                                    "Не найден на сервере · /install".into()
                                 }
                             } else {
                                 "CLI на сервере".into()
@@ -481,6 +770,73 @@ impl App {
                         }
                     })
                     .collect()
+            }
+            Picker::Install => {
+                let r = self.active.as_ref().and_then(|h| self.remote.get(h));
+                let mut rows: Vec<Item> = [
+                    ("claude", "Claude Code"),
+                    ("codex", "OpenAI Codex CLI"),
+                    ("agy", "Antigravity CLI (agy)"),
+                ]
+                .into_iter()
+                .map(|(id, label)| {
+                    let detail = if let Some(rem) = r {
+                        let running =
+                            rem.installing.contains(id) || rem.backends[id]["running"] == true;
+                        if running {
+                            "⟳ Устанавливается / обновляется на сервере…".into()
+                        } else if rem.backends.is_object() {
+                            if rem.backends[id]["installed"] == true {
+                                let ver = rem.backends[id]["version"].as_str().unwrap_or("");
+                                if ver.is_empty() {
+                                    "Установлен · Enter — обновить".into()
+                                } else {
+                                    format!("Установлен ({ver}) · Enter — обновить")
+                                }
+                            } else {
+                                "Не установлен на сервере · Enter — установить".into()
+                            }
+                        } else {
+                            "Enter — установить или обновить на сервере".into()
+                        }
+                    } else {
+                        "Сначала подключись к серверу (/connect)".into()
+                    };
+                    Item {
+                        id: id.into(),
+                        label: label.into(),
+                        detail,
+                    }
+                })
+                .collect();
+                let all_detail = if let Some(rem) = r {
+                    if !rem.installing.is_empty() {
+                        format!(
+                            "В процессе: {}",
+                            rem.installing.iter().cloned().collect::<Vec<_>>().join(", ")
+                        )
+                    } else if rem.backends.is_object() {
+                        let missing: Vec<&str> = ["claude", "codex", "agy"]
+                            .into_iter()
+                            .filter(|a| rem.backends[*a]["installed"] != true)
+                            .collect();
+                        if missing.is_empty() {
+                            "Все CLI установлены · Enter — обновить все".into()
+                        } else {
+                            format!("Не установлены: {} · Enter — установить", missing.join(", "))
+                        }
+                    } else {
+                        "Установить недостающие CLI-агенты на сервере".into()
+                    }
+                } else {
+                    "Установить все недостающие CLI-агенты на сервере".into()
+                };
+                rows.push(Item {
+                    id: "all".into(),
+                    label: "Установить все недостающие".into(),
+                    detail: all_detail,
+                });
+                rows
             }
             Picker::Models => {
                 let active_backend = self.chat().map(|c| c.backend.as_str()).unwrap_or("claude");
@@ -558,17 +914,23 @@ impl App {
                 }
                 items
             }
-            Picker::Themes => ["graphite", "midnight", "paper"]
-                .into_iter()
-                .map(|s| Item {
-                    id: s.into(),
-                    label: match s {
-                        "graphite" => "Графит · мята",
-                        "midnight" => "Полночь · голубой",
-                        _ => "Бумага · светлая",
-                    }
-                    .into(),
-                    detail: String::new(),
+            Picker::Themes => relay_desktop::model::THEME_SPECS
+                .iter()
+                .map(|&(id, label, is_light, _)| Item {
+                    id: id.into(),
+                    label: format!(
+                        "{}{}",
+                        label,
+                        if self.theme() == id { " · активна" } else { "" }
+                    ),
+                    detail: format!(
+                        "{} · {id}",
+                        if is_light {
+                            "Светлая тема"
+                        } else {
+                            "Тёмная тема"
+                        }
+                    ),
                 })
                 .collect(),
             Picker::Modes => [
@@ -722,6 +1084,8 @@ impl App {
             c.cwd = session.cwd.clone();
             c.title = session.title.clone();
             c.busy = session.running;
+            c.locked = session.locked;
+            c.unlocked = session.unlocked;
         }
         if c.recovery.is_some() {
             self.notice="Осталось сообщение с неизвестным статусом. Проверь историю; /recover вернёт его в черновик.".into();
@@ -747,19 +1111,33 @@ impl App {
         let Some(host) = self.active.clone() else {
             return;
         };
-        self.ensure_chat(&host, &session.id, Some(&session));
-        self.selected.insert(host.clone(), session.id.clone());
-        self.store.last.insert(host.clone(), session.id.clone());
+        let is_gate = session.is_locked_gate();
+        let sid = session.id.clone();
+        self.ensure_chat(&host, &sid, Some(&session));
+        self.selected.insert(host.clone(), sid.clone());
+        self.store.last.insert(host.clone(), sid.clone());
         self.dirty = true;
-        let c = self.chats.get_mut(&chat_key(&host, &session.id)).unwrap();
+        let c = self.chats.get_mut(&chat_key(&host, &sid)).unwrap();
         c.title = session.title;
         c.cwd = session.cwd;
+        c.locked = session.locked;
+        c.unlocked = session.unlocked;
+        if is_gate {
+            c.locked = true;
+            c.unlocked = false;
+            c.loading = false;
+            c.loaded = false;
+            c.messages.clear();
+            c.permissions.clear();
+            self.ask_field(Field::SessionUnlock { sid }, String::new());
+            return;
+        }
         if !c.loaded && !c.loading && self.remote.get(&host).is_some_and(|r| r.connected) {
             c.loading = true;
             c.history_revision = c.revision;
             c.history_messages = c.messages.len();
             self.controller
-                .send(&host, json!({"op":"history","sid":session.id}));
+                .send(&host, json!({"op":"history","sid":sid}));
         }
     }
     pub fn tick(&mut self) -> bool {
@@ -799,7 +1177,14 @@ impl App {
         let ready: Vec<_> = self
             .chats
             .iter()
-            .filter(|(_, c)| !c.busy && !c.loading && c.loaded && !c.paused && !c.queue.is_empty())
+            .filter(|(_, c)| {
+                !c.busy
+                    && !c.loading
+                    && c.loaded
+                    && !c.paused
+                    && !c.is_locked_gate()
+                    && !c.queue.is_empty()
+            })
             .map(|(k, _)| k.clone())
             .collect();
         for key in ready {
@@ -895,6 +1280,7 @@ impl App {
                 let r = self.remote.entry(server.clone()).or_default();
                 r.connected = false;
                 r.connecting = false;
+                r.installing.clear();
                 for (key, c) in &mut self.chats {
                     if key.starts_with(&format!("{server}/")) {
                         c.busy = false;
@@ -902,6 +1288,11 @@ impl App {
                         c.loading = false;
                         c.permissions.clear();
                         c.recovery = c.inflight.take().or(c.recovery.take());
+                        if c.locked {
+                            c.unlocked = false;
+                            c.loaded = false;
+                            c.messages.clear();
+                        }
                     }
                 }
                 self.pending_trust.retain(|(h, _, _)| h != &server);
@@ -975,6 +1366,14 @@ impl App {
                 for s in &sessions {
                     if let Some(c) = self.chats.get_mut(&chat_key(host, &s.id)) {
                         c.title = s.title.clone();
+                        c.locked = s.locked;
+                        c.unlocked = s.unlocked;
+                        if c.is_locked_gate() {
+                            c.messages.clear();
+                            c.permissions.clear();
+                            c.loading = false;
+                            c.loaded = false;
+                        }
                     }
                 }
                 if self.active.as_deref() == Some(host) && self.chat().is_none() {
@@ -1219,6 +1618,159 @@ impl App {
                     self.dirty = true;
                 }
             }
+            "session_locked" => {
+                let msg = value["message"]
+                    .as_str()
+                    .unwrap_or("Сессия защищена паролем. Введи пароль, чтобы открыть историю.")
+                    .to_owned();
+                if let Some(r) = self.remote.get_mut(host) {
+                    if let Some(s) = r.sessions.iter_mut().find(|s| s.id == sid) {
+                        s.locked = true;
+                        s.unlocked = false;
+                    }
+                }
+                if let Some(c) = self.chats.get_mut(&key) {
+                    c.locked = true;
+                    c.unlocked = false;
+                    c.loading = false;
+                    c.loaded = false;
+                    c.busy = false;
+                    c.messages.clear();
+                    c.permissions.clear();
+                }
+                self.notice = msg;
+                if self.popup.is_none()
+                    && self.active.as_deref() == Some(host)
+                    && self.selected.get(host).is_some_and(|s| s == sid)
+                {
+                    self.ask_field(Field::SessionUnlock { sid: sid.into() }, String::new());
+                }
+            }
+            "session_unlock_result" => {
+                if value["ok"] == true {
+                    if let Some(r) = self.remote.get_mut(host) {
+                        if let Some(s) = r.sessions.iter_mut().find(|s| s.id == sid) {
+                            s.locked = true;
+                            s.unlocked = true;
+                        }
+                    }
+                    if let Some(c) = self.chats.get_mut(&key) {
+                        c.locked = true;
+                        c.unlocked = true;
+                        c.error.clear();
+                        c.loading = true;
+                        c.history_revision = c.revision;
+                        c.history_messages = c.messages.len();
+                    }
+                    if matches!(
+                        &self.popup,
+                        Some(Popup::Field {
+                            kind: Field::SessionUnlock { sid: s },
+                            ..
+                        }) if s == sid
+                    ) {
+                        self.popup = None;
+                    }
+                    self.notice = "Сессия разблокирована".into();
+                    self.controller
+                        .send(host, json!({"op":"history","sid":sid}));
+                } else {
+                    let msg = value["message"]
+                        .as_str()
+                        .unwrap_or("Неверный пароль сессии.")
+                        .to_owned();
+                    if let Some(c) = self.chats.get_mut(&key) {
+                        c.unlocked = false;
+                        c.loading = false;
+                        c.messages.clear();
+                    }
+                    if self.active.as_deref() == Some(host)
+                        && self.selected.get(host).is_some_and(|s| s == sid)
+                    {
+                        self.popup = Some(Popup::Field {
+                            kind: Field::SessionUnlock { sid: sid.into() },
+                            editor: Editor::default(),
+                            error: msg.clone(),
+                        });
+                    }
+                    self.notice = msg;
+                }
+            }
+            "session_lock_changed" => {
+                let locked = value["locked"] == true;
+                let unlocked = if value["unlocked"].is_boolean() {
+                    value["unlocked"] == true
+                } else {
+                    !locked
+                };
+                if let Some(r) = self.remote.get_mut(host) {
+                    if let Some(s) = r.sessions.iter_mut().find(|s| s.id == sid) {
+                        s.locked = locked;
+                        s.unlocked = unlocked;
+                    }
+                }
+                if let Some(c) = self.chats.get_mut(&key) {
+                    c.locked = locked;
+                    c.unlocked = unlocked;
+                    if locked && !unlocked {
+                        c.messages.clear();
+                        c.permissions.clear();
+                        c.loading = false;
+                        c.loaded = false;
+                        c.busy = false;
+                    }
+                }
+                self.notice = if locked && !unlocked {
+                    "Сессия заблокирована паролем".into()
+                } else if locked {
+                    "Пароль сессии установлен".into()
+                } else {
+                    "Пароль сессии снят".into()
+                };
+                self.dirty = true;
+            }
+            "agent_install" => {
+                let agent = value["agent"].as_str().unwrap_or("");
+                let running = value["running"] == true;
+                let r = self.remote.entry(host.into()).or_default();
+                if !agent.is_empty() {
+                    if running {
+                        r.installing.insert(agent.into());
+                    } else {
+                        r.installing.remove(agent);
+                    }
+                    if r.backends.is_object() {
+                        if let Some(obj) = r.backends.get_mut(agent).and_then(Value::as_object_mut)
+                        {
+                            obj.insert("running".into(), json!(running));
+                            if let Some(inst) = value["installed"].as_bool() {
+                                obj.insert("installed".into(), json!(inst));
+                            }
+                            if let Some(ver) = value["version"].as_str().filter(|s| !s.is_empty()) {
+                                obj.insert("version".into(), json!(ver));
+                            }
+                        }
+                    }
+                }
+                if let Some(msg) = value["message"].as_str().filter(|s| !s.is_empty()) {
+                    self.notice = msg.into();
+                }
+                if !running && value["ok"] == true && matches!(agent, "claude" | "codex" | "agy") {
+                    self.controller
+                        .send(host, json!({"op":"catalog","backend":agent}));
+                }
+            }
+            "backends_status" => {
+                let r = self.remote.entry(host.into()).or_default();
+                r.backends = value["backends"].clone();
+                for agent in ["claude", "codex", "agy"] {
+                    if r.backends[agent]["running"] == true {
+                        r.installing.insert(agent.into());
+                    } else if r.backends[agent].is_object() {
+                        r.installing.remove(agent);
+                    }
+                }
+            }
             _ => {}
         }
         if kind == "run_closed"
@@ -1342,11 +1894,45 @@ impl App {
             self.notice = "Выбери сервер: F2 или /add".into();
             return;
         };
+        let locked_gate = self.chats[&key].is_locked_gate();
+        let sid = self.chats[&key].sid.clone();
         let text = self.chats[&key].editor.text.trim().to_owned();
         if text.starts_with('/') && !text.contains('\n') {
+            let (cmd, _) = text.split_once(char::is_whitespace).unwrap_or((&text, ""));
+            if locked_gate
+                && !matches!(
+                    cmd,
+                    "/unlock"
+                        | "/hosts"
+                        | "/sessions"
+                        | "/new"
+                        | "/help"
+                        | "/quit"
+                        | "/exit"
+                        | "/menu"
+                        | "/panel"
+                        | "/theme"
+                        | "/connect"
+                        | "/disconnect"
+                        | "/add"
+                        | "/refresh"
+                        | "/install"
+                )
+            {
+                self.chats.get_mut(&key).unwrap().editor.take();
+                self.notice = "Сессия защищена паролем. Введи пароль через /unlock.".into();
+                self.ask_field(Field::SessionUnlock { sid }, String::new());
+                self.dirty = true;
+                return;
+            }
             self.chats.get_mut(&key).unwrap().editor.take();
             self.command(&text);
             self.dirty = true;
+            return;
+        }
+        if locked_gate {
+            self.notice = "Сессия защищена паролем. Введи пароль для доступа к истории.".into();
+            self.ask_field(Field::SessionUnlock { sid }, String::new());
             return;
         }
         if text.is_empty() && self.chats[&key].files.is_empty() {
@@ -1403,6 +1989,7 @@ impl App {
         let arg = arg.trim();
         match command {
             "/help"=>self.popup=Some(Popup::Help{scroll:0}),
+            "/menu"|"/panel"=>self.open_workspace(),
             "/hosts"=>{if !self.demo{if let Ok(settings)=storage::load(){self.settings=settings;}}self.picker(Picker::Hosts);},
             "/connect"=>if arg.is_empty(){self.connect();}else{let servers=self.servers();let found:Vec<_>=servers.iter().filter(|s|s.id==arg||s.name.eq_ignore_ascii_case(arg)||s.host==arg).collect();if found.len()==1{self.select_host(found[0].id.clone());}else{self.notice="Имя не найдено или неоднозначно. Выбери сервер через F2.".into();}},
             "/disconnect"=>if let Some(host)=self.active.clone(){self.controller.disconnect(&host);self.event(Event::Disconnected{server:host});},
@@ -1452,6 +2039,148 @@ impl App {
                 }
             }
             "/api"=>if let Some(s)=self.server(){self.ask_field(Field::Api{profile:s.api.clone(),stage:0},s.api.base_url);},
+            "/install" => {
+                if arg.is_empty() {
+                    self.picker(Picker::Install);
+                } else {
+                    let target = if arg.eq_ignore_ascii_case("all") {
+                        Some("all")
+                    } else {
+                        relay_desktop::model::normalize_backend(arg)
+                            .filter(|b| matches!(*b, "claude" | "codex" | "agy"))
+                    };
+                    let Some(target) = target else {
+                        self.notice = "Укажи CLI: /install claude, /install codex, /install agy или /install all".into();
+                        self.dirty = true;
+                        return;
+                    };
+                    let Some(host) = self.active.clone() else {
+                        self.notice = "Сначала выбери сервер: F2".into();
+                        return;
+                    };
+                    if self.demo {
+                        self.notice = "Демонстрация: установка CLI на сервер отключена".into();
+                        return;
+                    }
+                    if !self.connected() {
+                        self.notice = "Сначала подключись к серверу: /connect".into();
+                        return;
+                    }
+                    let installed = self
+                        .remote
+                        .get(&host)
+                        .is_some_and(|r| {
+                            if target == "all" {
+                                r.backends.is_object()
+                                    && ["claude", "codex", "agy"]
+                                        .iter()
+                                        .all(|a| r.backends[*a]["installed"] == true)
+                            } else {
+                                r.backends[target]["installed"] == true
+                            }
+                        });
+                    let action = if installed { "update" } else { "install" };
+                    let r = self.remote.entry(host.clone()).or_default();
+                    if target == "all" {
+                        let missing: Vec<&str> = ["claude", "codex", "agy"]
+                            .into_iter()
+                            .filter(|a| r.backends[*a]["installed"] != true)
+                            .collect();
+                        for a in if missing.is_empty() {
+                            vec!["claude", "codex", "agy"]
+                        } else {
+                            missing
+                        } {
+                            r.installing.insert(a.into());
+                        }
+                    } else {
+                        r.installing.insert(target.into());
+                    }
+                    self.controller.send(
+                        &host,
+                        json!({"op":"agent_install","agent":target,"action":action}),
+                    );
+                    self.notice = format!(
+                        "{} {} на сервере…",
+                        if action == "update" {
+                            "Обновление"
+                        } else {
+                            "Установка"
+                        },
+                        if target == "all" {
+                            "CLI-агентов"
+                        } else {
+                            relay_desktop::model::backend_label(target)
+                        }
+                    );
+                }
+            }
+            "/lock" => {
+                let Some(c) = self.chat() else {
+                    self.notice = "Сначала открой или создай сессию".into();
+                    return;
+                };
+                let sid = c.sid.clone();
+                let locked = c.locked;
+                let unlocked = c.unlocked;
+                if locked && unlocked && arg.is_empty() {
+                    if let Some(c) = self.chat_mut() {
+                        c.unlocked = false;
+                        c.loaded = false;
+                        c.loading = false;
+                        c.messages.clear();
+                        c.permissions.clear();
+                    }
+                    if let Some(h) = self.active.clone() {
+                        if let Some(r) = self.remote.get_mut(&h) {
+                            if let Some(s) = r.sessions.iter_mut().find(|s| s.id == sid) {
+                                s.unlocked = false;
+                            }
+                        }
+                        self.controller
+                            .send(&h, json!({"op":"session_relock","sid":sid}));
+                    }
+                    self.notice = "Сессия заблокирована".into();
+                } else if !locked || arg == "change" {
+                    if locked && !unlocked {
+                        self.notice = "Сначала разблокируй сессию через /unlock".into();
+                        self.ask_field(Field::SessionUnlock { sid }, String::new());
+                    } else {
+                        self.ask_field(
+                            Field::SessionLockSet {
+                                sid,
+                                has_existing: locked,
+                                stage: 0,
+                                current_pw: zeroize::Zeroizing::new(String::new()),
+                            },
+                            String::new(),
+                        );
+                    }
+                } else if locked && !unlocked {
+                    self.notice = "Сессия уже закрыта паролем. Введи /unlock.".into();
+                    self.ask_field(Field::SessionUnlock { sid }, String::new());
+                } else {
+                    self.notice =
+                        "Используй /lock для закрытия сессии или /lock change для смены пароля."
+                            .into();
+                }
+            }
+            "/unlock" => {
+                if let Some(c) = self.chat() {
+                    let sid = c.sid.clone();
+                    self.ask_field(Field::SessionUnlock { sid }, String::new());
+                } else {
+                    self.notice = "Сначала выбери сессию: F3".into();
+                }
+            }
+            "/unlock-remove" => {
+                if let Some(c) = self.chat() {
+                    let sid = c.sid.clone();
+                    self.ask_field(Field::SessionLockRemove { sid }, String::new());
+                } else {
+                    self.notice = "Сначала выбери сессию: F3".into();
+                }
+            }
             "/attach"=>if arg.is_empty(){self.ask_field(Field::Attach,String::new());}else{if let Err(e)=self.attach(arg){self.notice=e.to_string();}},
             "/clear-files"=>if let Some(c)=self.chat_mut(){c.files.clear();},
             "/download"=>if arg.is_empty(){self.ask_field(Field::DownloadRemote,String::new());}else{self.download_field(arg.into());},
@@ -1464,7 +2193,18 @@ impl App {
             "/pin"=>{let pinned=self.active.as_ref().and_then(|h|self.remote.get(h)).and_then(|r|r.sessions.iter().find(|s|self.chat().is_some_and(|c|c.sid==s.id))).is_some_and(|s|s.pinned>0.);self.meta(json!({"pinned":!pinned}));},
             "/delete"=>if let (Some(server),Some(c))=(self.active.clone(),self.chat()) {if c.busy{self.notice="Сначала останови ответ: /stop".into();}else{self.popup=Some(Popup::Confirm{message:format!("Удалить сессию «{}» с сервера?",c.title),action:Confirmation::Delete{server,sid:c.sid.clone()}});}},
             "/prompt"=>if arg.is_empty(){self.ask_field(Field::Prompt,self.chat().map(|c|c.custom_prompt.clone()).unwrap_or_default());}else if let Some(c)=self.chat_mut(){c.custom_prompt=arg.into();},
-            "/theme"=>if arg.is_empty(){self.picker(Picker::Themes);}else if ["graphite","midnight","paper"].contains(&arg){self.store.theme=arg.into();}else{self.notice="Темы: graphite, midnight, paper".into();},
+            "/theme" => {
+                if arg.is_empty() {
+                    self.picker(Picker::Themes);
+                } else if relay_desktop::model::valid_theme(arg) {
+                    self.store.theme = arg.into();
+                    let &(_, label, _, _) = relay_desktop::model::theme_spec(arg);
+                    self.notice = format!("Тема оформления: {label} ({arg})");
+                } else {
+                    self.notice =
+                        "Неизвестная тема. Нажми F4 или введи /theme для выбора из 24 тем.".into();
+                }
+            }
             "/refresh"=>self.refresh(),
             "/login" => {
                 let target = if arg.is_empty() {
@@ -1609,6 +2349,7 @@ impl App {
                     KeyCode::F(2) => self.command("/hosts"),
                     KeyCode::F(3) => self.command("/sessions"),
                     KeyCode::F(4) => self.picker(Picker::Themes),
+                    KeyCode::F(5) => self.open_workspace(),
                     KeyCode::Char('q') if ctrl => self.request_quit(),
                     KeyCode::Char('c') if ctrl => {
                         if self.chat().is_some_and(|c| c.busy) {
@@ -1628,7 +2369,7 @@ impl App {
                     }
                     KeyCode::Char('n') if ctrl => self.new_chat(),
                     KeyCode::Char('r') if ctrl => self.connect(),
-                    KeyCode::Char('b') if ctrl => self.sidebar = !self.sidebar,
+                    KeyCode::Char('b') if ctrl => self.open_workspace(),
                     KeyCode::Char('o') if ctrl => {
                         if let Some(c) = self.chat_mut() {
                             c.expanded = !c.expanded;
@@ -1743,11 +2484,10 @@ impl App {
                         .map(|(_, h)| h.clone())
                     {
                         match hit {
-                            Hit::Host(id) => self.select_host(id),
-                            Hit::Session(s) => self.open_session(s),
-                            Hit::New => self.new_chat(),
                             Hit::Hosts => self.command("/hosts"),
                             Hit::Sessions => self.command("/sessions"),
+                            Hit::Workspace => self.open_workspace(),
+                            Hit::WorkspaceTab(_) | Hit::WorkspaceItem(_) => {}
                         }
                     }
                 }
@@ -1789,6 +2529,7 @@ impl App {
             }
             Picker::Models => self.command(&format!("/model {id}")),
             Picker::Backends => self.command(&format!("/backend {id}")),
+            Picker::Install => self.command(&format!("/install {id}")),
             Picker::Themes => self.command(&format!("/theme {id}")),
             Picker::Modes => self.command(&format!("/mode {id}")),
             Picker::Efforts => self.command(&format!("/effort {id}")),
@@ -1922,8 +2663,17 @@ impl App {
                 if cancel {
                     keep = false;
                 } else if let Input::Paste(text) = event {
+                    let is_secret = matches!(
+                        kind,
+                        Field::Api { stage: 2, .. }
+                            | Field::SessionLockSet { .. }
+                            | Field::SessionUnlock { .. }
+                            | Field::SessionLockRemove { .. }
+                    );
                     editor.insert(&if matches!(kind, Field::Prompt) {
                         text
+                    } else if is_secret {
+                        text.replace('\n', "")
                     } else {
                         text.replace('\n', " ")
                     });
@@ -1934,7 +2684,18 @@ impl App {
                                 .modifiers
                                 .intersects(KeyModifiers::ALT | KeyModifiers::SHIFT))
                     {
-                        let value = zeroize::Zeroizing::new(editor.text.trim().to_owned());
+                        let is_lock_pw = matches!(
+                            kind,
+                            Field::SessionLockSet { .. }
+                                | Field::SessionUnlock { .. }
+                                | Field::SessionLockRemove { .. }
+                        );
+                        let raw = if is_lock_pw {
+                            editor.take()
+                        } else {
+                            editor.text.trim().to_owned()
+                        };
+                        let value = zeroize::Zeroizing::new(raw);
                         match self.field_value(kind, &value) {
                             Ok(Some((next, text))) => {
                                 self.ask_field(next, text);
@@ -2034,6 +2795,117 @@ impl App {
                             _ => {}
                         }
                         self.dirty = true;
+                    }
+                }
+            }
+            Popup::Workspace { section, index } => {
+                let items = self.workspace_items();
+                if cancel
+                    || key.is_some_and(|k| {
+                        k.code == KeyCode::F(5) || (ctrl && k.code == KeyCode::Char('b'))
+                    })
+                {
+                    keep = false;
+                } else if let Input::Mouse(mouse) = event {
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => {
+                            *index = index.saturating_sub(1);
+                            if let Some(it) = items.get(*index) {
+                                *section = it.section;
+                            }
+                        }
+                        MouseEventKind::ScrollDown => {
+                            *index = (*index + 1).min(items.len().saturating_sub(1));
+                            if let Some(it) = items.get(*index) {
+                                *section = it.section;
+                            }
+                        }
+                        MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                            let position = ratatui::layout::Position::new(mouse.column, mouse.row);
+                            if let Some(hit) = self
+                                .hits
+                                .iter()
+                                .find(|(r, _)| r.contains(position))
+                                .map(|(_, h)| h.clone())
+                            {
+                                match hit {
+                                    Hit::Workspace => keep = false,
+                                    Hit::WorkspaceTab(sec) => {
+                                        if let Some(pos) =
+                                            items.iter().position(|it| it.section == sec)
+                                        {
+                                            *section = sec;
+                                            *index = pos;
+                                        }
+                                    }
+                                    Hit::WorkspaceItem(idx) => {
+                                        if let Some(item) = items.get(idx) {
+                                            self.activate_workspace(item.action.clone());
+                                            keep = false;
+                                        }
+                                    }
+                                    Hit::Hosts => {
+                                        self.command("/hosts");
+                                        keep = false;
+                                    }
+                                    Hit::Sessions => {
+                                        self.command("/sessions");
+                                        keep = false;
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                } else if let Some(key) = key {
+                    if ctrl && key.code == KeyCode::Char('a') {
+                        self.command("/add");
+                        keep = false;
+                    } else if ctrl && key.code == KeyCode::Char('n') {
+                        self.new_chat();
+                        keep = false;
+                    } else {
+                        match key.code {
+                            KeyCode::Up => {
+                                *index = index.saturating_sub(1);
+                                if let Some(it) = items.get(*index) {
+                                    *section = it.section;
+                                }
+                            }
+                            KeyCode::Down => {
+                                *index = (*index + 1).min(items.len().saturating_sub(1));
+                                if let Some(it) = items.get(*index) {
+                                    *section = it.section;
+                                }
+                            }
+                            KeyCode::Tab => {
+                                let next_sec = (*section + 1) % 3;
+                                if let Some(pos) =
+                                    items.iter().position(|it| it.section == next_sec)
+                                {
+                                    *section = next_sec;
+                                    *index = pos;
+                                }
+                            }
+                            KeyCode::BackTab => {
+                                let prev_sec = (*section + 2) % 3;
+                                if let Some(pos) =
+                                    items.iter().position(|it| it.section == prev_sec)
+                                {
+                                    *section = prev_sec;
+                                    *index = pos;
+                                }
+                            }
+                            KeyCode::Enter => {
+                                if let Some(item) =
+                                    items.get((*index).min(items.len().saturating_sub(1)))
+                                {
+                                    self.activate_workspace(item.action.clone());
+                                    keep = false;
+                                }
+                            }
+                            _ => {}
+                        }
                     }
                 }
             }
@@ -2178,6 +3050,69 @@ impl App {
                     }
                 }
             }
+            Field::SessionLockSet {
+                sid,
+                has_existing,
+                stage,
+                current_pw,
+            } => {
+                anyhow::ensure!(
+                    !value.is_empty() && value.len() <= 256 && !value.contains('\0'),
+                    "Пароль сессии должен содержать от 1 до 256 символов"
+                );
+                if *has_existing && *stage == 0 {
+                    return Ok(Some((
+                        Field::SessionLockSet {
+                            sid: sid.clone(),
+                            has_existing: true,
+                            stage: 1,
+                            current_pw: zeroize::Zeroizing::new(value.to_owned()),
+                        },
+                        String::new(),
+                    )));
+                }
+                let host = self.active.clone().context("Выбери сервер")?;
+                let mut payload = json!({
+                    "op": "session_lock",
+                    "sid": sid,
+                    "remove": false,
+                    "password": value,
+                    "actor": self.settings.actor(),
+                });
+                if *has_existing {
+                    payload["current_password"] = json!(current_pw.as_str());
+                }
+                self.controller.send(&host, payload);
+                self.notice = "Установка парольной защиты сессии…".into();
+            }
+            Field::SessionUnlock { sid } => {
+                anyhow::ensure!(
+                    !value.is_empty() && value.len() <= 256 && !value.contains('\0'),
+                    "Введи пароль сессии"
+                );
+                let host = self.active.clone().context("Выбери сервер")?;
+                self.controller
+                    .send(&host, json!({"op":"session_unlock","sid":sid,"password":value}));
+                self.notice = "Проверка пароля сессии…".into();
+            }
+            Field::SessionLockRemove { sid } => {
+                anyhow::ensure!(
+                    !value.is_empty() && value.len() <= 256 && !value.contains('\0'),
+                    "Введи текущий пароль сессии"
+                );
+                let host = self.active.clone().context("Выбери сервер")?;
+                self.controller.send(
+                    &host,
+                    json!({
+                        "op": "session_lock",
+                        "sid": sid,
+                        "remove": true,
+                        "current_password": value,
+                        "actor": self.settings.actor(),
+                    }),
+                );
+                self.notice = "Снятие парольной защиты сессии…".into();
+            }
         }
         self.dirty = true;
         Ok(None)
@@ -2193,7 +3128,7 @@ impl App {
         self.settings.servers = vec![server];
         self.active = Some("demo".into());
         self.store.theme = "graphite".into();
-        self.remote.insert("demo".into(),Remote{connected:true,loaded:true,home:"/root".into(),version:"Claude Code".into(),usage:json!({"available":true,"windows":[{"id":"five_hour","label":"5 часов","utilization":38.},{"id":"seven_day","label":"Неделя","utilization":64.}]}),sessions:vec![Session{id:"11111111-1111-4111-8111-111111111111".into(),title:"Оптимизация атласа".into(),cwd:"/opt/project".into(),pinned:1.,..Default::default()},Session{id:"22222222-2222-4222-8222-222222222222".into(),title:"Новый интерфейс лаунчера".into(),cwd:"/opt/launcher".into(),..Default::default()}],..Default::default()});
+        self.remote.insert("demo".into(),Remote{connected:true,loaded:true,home:"/root".into(),version:"Claude Code".into(),backends:json!({"claude":{"installed":true,"version":"2.1.12","running":false,"label":"Claude Code"},"codex":{"installed":true,"version":"0.98.0","running":false,"label":"OpenAI Codex CLI"},"agy":{"installed":false,"version":"","running":false,"label":"Antigravity CLI (agy)"},"api":{"installed":true,"version":"","running":false,"label":"Пользовательский API"}}),usage:json!({"available":true,"windows":[{"id":"five_hour","label":"5 часов","utilization":38.},{"id":"seven_day","label":"Неделя","utilization":64.}]}),sessions:vec![Session{id:"11111111-1111-4111-8111-111111111111".into(),title:"Оптимизация атласа".into(),cwd:"/opt/project".into(),pinned:1.,..Default::default()},Session{id:"22222222-2222-4222-8222-222222222222".into(),title:"Новый интерфейс лаунчера".into(),cwd:"/opt/launcher".into(),..Default::default()}],..Default::default()});
         let session = self.remote["demo"].sessions[0].clone();
         self.open_session(session);
         let c = self.chat_mut().unwrap();
@@ -2480,5 +3415,257 @@ mod tests {
         assert_eq!(cat_agy["backend"], "agy");
         app.command("/login agy");
         assert!(app.notice.contains("agy acp --login"));
+    }
+
+    #[test]
+    fn workspace_popup_opens_navigates_sections_and_activates_items() {
+        let (mut app, mut outgoing) = connected();
+        app.input(key(KeyCode::F(5), KeyModifiers::NONE));
+        assert!(matches!(
+            app.popup,
+            Some(Popup::Workspace {
+                section: 0,
+                index: 0
+            })
+        ));
+        app.input(key(KeyCode::F(5), KeyModifiers::NONE));
+        assert!(app.popup.is_none());
+
+        app.input(key(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        assert!(matches!(app.popup, Some(Popup::Workspace { .. })));
+        app.input(key(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(matches!(
+            app.popup,
+            Some(Popup::Workspace { section: 1, .. })
+        ));
+        app.input(key(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(matches!(
+            app.popup,
+            Some(Popup::Workspace { section: 2, .. })
+        ));
+
+        // First item in section 2 is Claude Code (active & installed) -> Down goes to Codex (installed, inactive) -> Enter switches backend!
+        app.input(key(KeyCode::Down, KeyModifiers::NONE));
+        app.input(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.popup.is_none());
+        assert_eq!(app.chat().unwrap().backend, "codex");
+        let cat = outgoing.try_recv().unwrap();
+        assert_eq!(cat["op"], "catalog");
+        assert_eq!(cat["backend"], "codex");
+
+        // Re-open via /menu, jump to section 2, navigate to Antigravity (installed == false) -> Enter triggers agent_install!
+        app.command("/menu");
+        app.input(key(KeyCode::Tab, KeyModifiers::NONE));
+        app.input(key(KeyCode::Tab, KeyModifiers::NONE));
+        app.input(key(KeyCode::Down, KeyModifiers::NONE));
+        app.input(key(KeyCode::Down, KeyModifiers::NONE));
+        app.input(key(KeyCode::Enter, KeyModifiers::NONE));
+        let install_req = outgoing.try_recv().unwrap();
+        assert_eq!(install_req["op"], "agent_install");
+        assert_eq!(install_req["agent"], "agy");
+        assert_eq!(install_req["action"], "install");
+    }
+
+    #[test]
+    fn theme_picker_lists_all_24_themes_with_light_and_dark_details() {
+        let mut app = App::new(true).unwrap();
+        app.demo();
+        let items = app.items(Picker::Themes, "");
+        assert_eq!(items.len(), 24);
+        assert!(items.iter().any(|i| i.id == "graphite" && i.detail.contains("Тёмная тема")));
+        assert!(items.iter().any(|i| i.id == "paper" && i.detail.contains("Светлая тема")));
+        assert!(items.iter().any(|i| i.id == "frost" && i.detail.contains("Светлая тема")));
+        assert!(items.iter().any(|i| i.id == "oled" && i.detail.contains("Тёмная тема")));
+
+        for &(id, _, _, _) in &relay_desktop::model::THEME_SPECS {
+            app.command(&format!("/theme {id}"));
+            assert_eq!(app.theme(), id);
+        }
+        app.command("/theme nonexistent-theme");
+        assert_eq!(app.theme(), "frost");
+    }
+
+    #[test]
+    fn private_session_lock_relock_unlock_and_message_wiping() {
+        let (mut app, mut outgoing) = connected();
+        let sid = app.chat().unwrap().sid.clone();
+        app.chat_mut().unwrap().messages.push(relay_desktop::model::Message {
+            role: "assistant".into(),
+            text: "Приватные данные".into(),
+            ..Default::default()
+        });
+
+        // 1. Set lock on unlocked session
+        app.command("/lock");
+        assert!(matches!(
+            app.popup,
+            Some(Popup::Field {
+                kind: Field::SessionLockSet {
+                    has_existing: false,
+                    stage: 0,
+                    ..
+                },
+                ..
+            })
+        ));
+        app.input(Input::Paste("my-secret-pass\n".into()));
+        app.input(key(KeyCode::Enter, KeyModifiers::NONE));
+        let set_pkt = outgoing.try_recv().unwrap();
+        assert_eq!(set_pkt["op"], "session_lock");
+        assert_eq!(set_pkt["sid"], sid);
+        assert_eq!(set_pkt["remove"], false);
+        assert_eq!(set_pkt["password"], "my-secret-pass");
+        assert!(app.popup.is_none());
+
+        app.data(
+            "demo",
+            json!({"type":"session_lock_changed","sid":sid,"locked":true,"unlocked":true}),
+        );
+        assert!(app.chat().unwrap().locked);
+        assert!(app.chat().unwrap().unlocked);
+
+        // 2. /lock on unlocked session immediately relocks and wipes messages!
+        app.command("/lock");
+        let relock_pkt = outgoing.try_recv().unwrap();
+        assert_eq!(relock_pkt["op"], "session_relock");
+        assert_eq!(relock_pkt["sid"], sid);
+        assert!(app.chat().unwrap().is_locked_gate());
+        assert!(app.chat().unwrap().messages.is_empty());
+
+        // 3. Regular prompt submission is blocked while locked and opens SessionUnlock
+        app.chat_mut().unwrap().editor = Editor::new("Секретный вопрос".into());
+        app.submit();
+        assert!(outgoing.try_recv().is_err());
+        assert_eq!(app.chat().unwrap().editor.text, "Секретный вопрос");
+        assert!(matches!(
+            app.popup,
+            Some(Popup::Field {
+                kind: Field::SessionUnlock { .. },
+                ..
+            })
+        ));
+        app.popup = None;
+
+        // Safe global commands still work while locked
+        app.chat_mut().unwrap().editor = Editor::new("/help".into());
+        app.submit();
+        assert!(matches!(app.popup, Some(Popup::Help { .. })));
+        app.popup = None;
+
+        // 4. Unlocking requests history upon ok=true
+        app.command("/unlock");
+        app.input(Input::Paste("my-secret-pass".into()));
+        app.input(key(KeyCode::Enter, KeyModifiers::NONE));
+        let unlock_pkt = outgoing.try_recv().unwrap();
+        assert_eq!(unlock_pkt["op"], "session_unlock");
+        assert_eq!(unlock_pkt["sid"], sid);
+        assert_eq!(unlock_pkt["password"], "my-secret-pass");
+
+        app.data(
+            "demo",
+            json!({"type":"session_unlock_result","sid":sid,"ok":true}),
+        );
+        assert!(app.chat().unwrap().unlocked);
+        assert!(app.chat().unwrap().loading);
+        let hist_pkt = outgoing.try_recv().unwrap();
+        assert_eq!(hist_pkt["op"], "history");
+        assert_eq!(hist_pkt["sid"], sid);
+
+        // 5. /unlock-remove sends remove=true with current_password
+        app.command("/unlock-remove");
+        app.input(Input::Paste("my-secret-pass".into()));
+        app.input(key(KeyCode::Enter, KeyModifiers::NONE));
+        let rem_pkt = outgoing.try_recv().unwrap();
+        assert_eq!(rem_pkt["op"], "session_lock");
+        assert_eq!(rem_pkt["remove"], true);
+        assert_eq!(rem_pkt["current_password"], "my-secret-pass");
+
+        // 6. Opening a locked session from session list opens SessionUnlock instead of history
+        let locked_session = Session {
+            id: "33333333-3333-4333-8333-333333333333".into(),
+            title: "Закрытая сессия".into(),
+            cwd: "/opt/secret".into(),
+            locked: true,
+            unlocked: false,
+            ..Default::default()
+        };
+        app.open_session(locked_session);
+        assert!(outgoing.try_recv().is_err());
+        assert!(app.chat().unwrap().is_locked_gate());
+        assert!(matches!(
+            app.popup,
+            Some(Popup::Field {
+                kind: Field::SessionUnlock { .. },
+                ..
+            })
+        ));
+
+        // 7. Store never contains passwords
+        let serialized = serde_json::to_string(&app.store).unwrap();
+        assert!(!serialized.contains("my-secret-pass"));
+    }
+
+    #[test]
+    fn cli_installer_command_and_inbound_events_track_backend_status() {
+        let (mut app, mut outgoing) = connected();
+        app.command("/install");
+        assert!(matches!(
+            app.popup,
+            Some(Popup::Picker {
+                kind: Picker::Install,
+                ..
+            })
+        ));
+        let items = app.items(Picker::Install, "");
+        assert_eq!(items.len(), 4);
+        assert!(items.iter().any(|i| i.id == "claude" && i.detail.contains("2.1.12")));
+        assert!(items.iter().any(|i| i.id == "agy" && i.detail.contains("Не установлен")));
+        assert!(items.iter().any(|i| i.id == "all"));
+        app.popup = None;
+
+        // Uninstalled agent -> action: "install"
+        app.command("/install agy");
+        let pkt1 = outgoing.try_recv().unwrap();
+        assert_eq!(pkt1["op"], "agent_install");
+        assert_eq!(pkt1["agent"], "agy");
+        assert_eq!(pkt1["action"], "install");
+        assert!(app.remote["demo"].installing.contains("agy"));
+
+        // Installed agent -> action: "update"
+        app.command("/install claude");
+        let pkt2 = outgoing.try_recv().unwrap();
+        assert_eq!(pkt2["op"], "agent_install");
+        assert_eq!(pkt2["agent"], "claude");
+        assert_eq!(pkt2["action"], "update");
+
+        // Switch active chat to agy while still uninstalled -> active_backend_missing() is true
+        app.command("/backend agy");
+        let _ = outgoing.try_recv();
+        assert!(app.active_backend_missing());
+
+        // Inbound agent_install progress & completion + backends_status
+        app.data(
+            "demo",
+            json!({"type":"agent_install","agent":"agy","running":true,"message":"Устанавливаем Antigravity CLI (agy) на сервере…"}),
+        );
+        assert!(app.notice.contains("Устанавливаем Antigravity"));
+        assert!(app.remote["demo"].installing.contains("agy"));
+
+        app.data(
+            "demo",
+            json!({"type":"agent_install","agent":"agy","running":false,"ok":true,"installed":true,"version":"1.4.0","message":"Antigravity CLI (agy) готов (1.4.0)."}),
+        );
+        assert!(!app.remote["demo"].installing.contains("agy"));
+        assert!(app.notice.contains("готов (1.4.0)"));
+        assert!(!app.active_backend_missing());
+        let cat = outgoing.try_recv().unwrap();
+        assert_eq!(cat["op"], "catalog");
+        assert_eq!(cat["backend"], "agy");
+
+        app.data(
+            "demo",
+            json!({"type":"backends_status","backends":{"claude":{"installed":true,"version":"2.1.15","running":false},"codex":{"installed":true,"version":"0.99.0","running":false},"agy":{"installed":true,"version":"1.4.0","running":false}}}),
+        );
+        assert_eq!(app.remote["demo"].backends["claude"]["version"], "2.1.15");
     }
 }

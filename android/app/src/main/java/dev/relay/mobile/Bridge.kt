@@ -123,7 +123,10 @@ class Bridge(
     }
 
     private fun helperSource(): ByteArray =
-        helper(server.api.enabled) { name -> context.assets.open("bridge/$name").readBytes().toString(Charsets.UTF_8) }
+        helper(
+            apiDefault = server.effectiveBackend() == "api",
+            defaultBackend = server.effectiveBackend(),
+        ) { name -> context.assets.open("bridge/$name").readBytes().toString(Charsets.UTF_8) }
 
     /** Trust on first use: a remembered SHA256 fingerprint must match, an unknown one is asked. */
     private inner class Keys(private val expected: String?) : HostKeyRepository {
@@ -149,15 +152,23 @@ class Bridge(
             "ecdh-sha2-nistp521,diffie-hellman-group-exchange-sha256,diffie-hellman-group16-sha512,diffie-hellman-group14-sha256"
 
         /** DESKTOP_SOURCE = "...", ... then relay_bridge.py, exactly as the desktop builds it. */
-        fun helper(apiDefault: Boolean = false, read: (String) -> String): ByteArray = buildString {
+        fun helper(
+            apiDefault: Boolean = false,
+            defaultBackend: String = if (apiDefault) "api" else "claude",
+            read: (String) -> String,
+        ): ByteArray = buildString {
             append("DESKTOP_SOURCE = ").append(pythonString(read("desktop_mcp.py"))).append('\n')
             append("BOARD_SOURCE = ").append(pythonString(read("board.py"))).append('\n')
             append("CLUSTER_SOURCE = ").append(pythonString(read("cluster_mcp.py"))).append('\n')
             append("ATTACHMENTS_SOURCE = ").append(pythonString(read("attachments.py"))).append('\n')
             append("API_SOURCE = ").append(pythonString(read("api_engine.py"))).append('\n')
+            append("CODEX_SOURCE = ").append(pythonString(read("codex_engine.py"))).append('\n')
+            append("AGY_SOURCE = ").append(pythonString(read("agy_engine.py"))).append('\n')
+            append("INSTALLER_SOURCE = ").append(pythonString(read("agent_installer.py"))).append('\n')
             append("AUTH_SOURCE = ").append(pythonString(read("auth_flow.py"))).append('\n')
             append("BROWSER_SOURCE = ").append(pythonString(read("remote_browser.py"))).append('\n')
             append("API_DEFAULT = ").append(if (apiDefault) "True" else "False").append('\n')
+            append("DEFAULT_BACKEND = ").append(pythonString(defaultBackend)).append('\n')
             append(read("relay_bridge.py"))
         }.toByteArray(Charsets.UTF_8)
 

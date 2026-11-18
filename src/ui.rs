@@ -74,126 +74,19 @@ pub fn animated_palette(ctx: &egui::Context, light: bool) -> Palette {
 }
 /// Theme id, name, light or dark, and colours: base, side, rail, surface, line, text,
 /// muted, accent.
-pub const THEME_TABLE: [(&str, &str, bool, [u32; 8]); 13] = [
-    (
-        "graphite",
-        "Графит",
-        false,
-        [
-            0x10141a, 0x151b23, 0x0c1016, 0x1b242e, 0x2a3643, 0xe6edf3, 0x8d9cab, 0x83c4b3,
-        ],
-    ),
-    (
-        "midnight",
-        "Полночь",
-        false,
-        [
-            0x0f1520, 0x141d2b, 0x0b111b, 0x1b2739, 0x2b3b52, 0xe5edf9, 0x95a5bd, 0x89aef1,
-        ],
-    ),
-    (
-        "forest",
-        "Хвоя",
-        false,
-        [
-            0x111916, 0x17211c, 0x0c120f, 0x202e27, 0x2e4136, 0xe4eee8, 0x9aad9f, 0x83c6a9,
-        ],
-    ),
-    (
-        "plum",
-        "Слива",
-        false,
-        [
-            0x1b1721, 0x16121c, 0x120e18, 0x292331, 0x3b3246, 0xeee7f5, 0xab9bb8, 0xc39bff,
-        ],
-    ),
-    (
-        "ember",
-        "Угли",
-        false,
-        [
-            0x1d1816, 0x171311, 0x120f0d, 0x2a2320, 0x3d322d, 0xf3e9e4, 0xb0a097, 0xff8a5b,
-        ],
-    ),
-    (
-        "ocean",
-        "Океан",
-        false,
-        [
-            0x0f1b1e, 0x0c1619, 0x091214, 0x172a2e, 0x24393e, 0xe2f2f2, 0x8fadaf, 0x4fd1c5,
-        ],
-    ),
-    (
-        "nord",
-        "Север",
-        false,
-        [
-            0x2e3440, 0x292e39, 0x242933, 0x3b4252, 0x434c5e, 0xeceff4, 0x9aa5b8, 0x88c0d0,
-        ],
-    ),
-    (
-        "rose",
-        "Роза",
-        false,
-        [
-            0x1e1619, 0x181114, 0x130d10, 0x2c2024, 0x402e34, 0xf6e8ec, 0xb79aa3, 0xf28ba8,
-        ],
-    ),
-    (
-        "dracula",
-        "Дракула",
-        false,
-        [
-            0x282a36, 0x21222c, 0x1b1c24, 0x343746, 0x44475a, 0xf8f8f2, 0xa4a9c6, 0xbd93f9,
-        ],
-    ),
-    (
-        "oled",
-        "OLED",
-        false,
-        [
-            0x000000, 0x050506, 0x000000, 0x121214, 0x232327, 0xf2f2f4, 0x8a8a93, 0xa78bfa,
-        ],
-    ),
-    (
-        "paper",
-        "Бумага",
-        true,
-        [
-            0xfcfcfb, 0xf5f4f2, 0xedece9, 0xffffff, 0xe4e2de, 0x1e1e21, 0x78777e, 0x4a6fe3,
-        ],
-    ),
-    (
-        "sand",
-        "Песок",
-        true,
-        [
-            0xfbf7f0, 0xf4eee3, 0xece4d6, 0xfffdf9, 0xe3d8c6, 0x2b241c, 0x857865, 0xc2703d,
-        ],
-    ),
-    (
-        "mint",
-        "Мята",
-        true,
-        [
-            0xf6fbf8, 0xedf6f1, 0xe2efe8, 0xffffff, 0xd5e7dc, 0x17261e, 0x6c8478, 0x2f9e77,
-        ],
-    ),
-];
-pub const THEMES: [(&str, &str); 13] = {
-    let mut out = [("", ""); 13];
+pub use crate::model::THEME_SPECS as THEME_TABLE;
+
+pub const THEMES: [(&str, &str); THEME_TABLE.len()] = {
+    let mut out = [("", ""); THEME_TABLE.len()];
     let mut i = 0;
-    while i < 13 {
+    while i < THEME_TABLE.len() {
         out[i] = (THEME_TABLE[i].0, THEME_TABLE[i].1);
         i += 1;
     }
     out
 };
 fn theme_row(name: &str) -> &'static (&'static str, &'static str, bool, [u32; 8]) {
-    THEME_TABLE
-        .iter()
-        .find(|t| t.0 == name)
-        .unwrap_or(&THEME_TABLE[0])
+    crate::model::theme_spec(name)
 }
 fn rgb(n: u32) -> Color32 {
     Color32::from_rgb((n >> 16) as u8, (n >> 8) as u8, n as u8)
@@ -283,6 +176,9 @@ pub enum Icon {
     Cluster,
     Terminal,
     Pencil,
+    Lock,
+    Unlock,
+    Download,
 }
 pub fn icon(p: &egui::Painter, r: Rect, which: Icon, color: Color32) {
     let c = r.center();
@@ -510,6 +406,31 @@ pub fn icon(p: &egui::Painter, r: Rect, which: Icon, color: Color32) {
                 .collect();
             p.add(egui::Shape::line(pts, s));
             path(&[(1., -7.), (5., -6.), (5., -2.)]);
+        }
+        Icon::Lock => {
+            p.rect_stroke(
+                Rect::from_min_max(v(-6.5, -1.), v(6.5, 8.5)),
+                2.2 * z,
+                s,
+                egui::StrokeKind::Inside,
+            );
+            path(&[(-4., -1.), (-4., -4.5), (-2.5, -7.), (0., -7.8), (2.5, -7.), (4., -4.5), (4., -1.)]);
+            p.circle_filled(v(0., 3.5), 1.4 * z, color);
+        }
+        Icon::Unlock => {
+            p.rect_stroke(
+                Rect::from_min_max(v(-6.5, -1.), v(6.5, 8.5)),
+                2.2 * z,
+                s,
+                egui::StrokeKind::Inside,
+            );
+            path(&[(-4., -1.), (-4., -5.), (-2., -7.8), (1.5, -7.8), (4., -5.5)]);
+            p.circle_filled(v(0., 3.5), 1.4 * z, color);
+        }
+        Icon::Download => {
+            line((0., -8.), (0., 3.5));
+            path(&[(-4., -0.5), (0., 3.8), (4., -0.5)]);
+            path(&[(-7., 5.5), (-7., 8.), (7., 8.), (7., 5.5)]);
         }
     }
 }

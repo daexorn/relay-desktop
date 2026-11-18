@@ -27,6 +27,7 @@ import uuid
 import datetime
 import math
 import hashlib
+import hmac
 import stat
 import urllib.request
 import urllib.error
@@ -548,29 +549,113 @@ class SessionMeta:
         self.update(change)
         return created[0] if created else ident
 
-    def apply(self, sessions):
-        """Adds shared names, pins and folders to the transcript list."""
+    @staticmethod
+    def _hash_lock(password, salt_bytes):
+        return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt_bytes, 200_000).hex()
+
+    @staticmethod
+    def _validate_password(password):
+        if not isinstance(password, str) or not (1 <= len(password) <= 256) or "\x00" in password:
+            raise ValueError("Пароль сессии должен содержать от 1 до 256 символов.")
+
+    def is_locked(self, sid):
+        low = str(sid or "").lower()
+        sessions = self.read().get("sessions", {})
+        meta = sessions.get(sid) or sessions.get(low) or {}
+        lock = meta.get("lock")
+        return bool(isinstance(lock, dict) and lock.get("salt") and lock.get("verifier"))
+
+    def verify_lock(self, sid, password):
+        low = str(sid or "").lower()
+        sessions = self.read().get("sessions", {})
+        meta = sessions.get(sid) or sessions.get(low) or {}
+        lock = meta.get("lock")
+        if not (isinstance(lock, dict) and lock.get("salt") and lock.get("verifier")):
+            return True
+        if not isinstance(password, str) or not password or len(password) > 256:
+            return False
+        try:
+            salt = bytes.fromhex(lock["salt"])
+            expected = str(lock["verifier"])
+        except ValueError:
+            return False
+        computed = self._hash_lock(password, salt)
+        return hmac.compare_digest(computed, expected)
+
+    def set_lock(self, sid, password=None, current_password=None, remove=False, actor=""):
+        sid = valid_id(sid)
+        if self.is_locked(sid):
+            if not self.verify_lock(sid, current_password):
+                raise ValueError("Неверный текущий пароль сессии.")
+        elif remove:
+            return
+        if not remove:
+            self._validate_password(password)
+            salt = os.urandom(16)
+            lock_record = {
+                "salt": salt.hex(),
+                "verifier": self._hash_lock(password, salt),
+                "locked_at": time.time(),
+                "locked_by": str(actor)[:80],
+            }
+        else:
+            lock_record = None
+
+        def change(data):
+            meta = data["sessions"].setdefault(sid, {})
+            if remove:
+                meta.pop("lock", None)
+            else:
+                meta["lock"] = lock_record
+            meta["changed_by"] = str(actor)[:80]
+            if set(meta) <= {"changed_by"}:
+                data["sessions"].pop(sid, None)
+
+        self.update(change)
+
+    def apply(self, sessions, unlocked_ids=None):
+        """Adds shared names, pins, folders, and password-lock redaction to the transcript list."""
         data = self.read()
         folders = sorted(data["folders"], key=lambda f: f.get("order", 0))
         known = {f["id"] for f in folders}
+        unlocked = {str(x).lower() for x in (unlocked_ids or set())}
         rows = []
         for row in sessions:
-            meta = data["sessions"].get(row["id"], {})
+            sid = str(row["id"])
+            low = sid.lower()
+            meta = data["sessions"].get(sid) or data["sessions"].get(low) or {}
             row = dict(row)
             if meta.get("title"):
                 row["auto_title"] = row["title"]
                 row["title"] = meta["title"]
             row["pinned"] = float(meta.get("pinned") or 0)
             row["folder"] = meta.get("folder") if meta.get("folder") in known else ""
+            lock = meta.get("lock")
+            has_lock = bool(isinstance(lock, dict) and lock.get("salt") and lock.get("verifier"))
+            is_open = (low in unlocked) if has_lock else True
+            row["locked"] = has_lock
+            row["unlocked"] = is_open
+            if has_lock and not is_open:
+                row["title"] = "Защищённая сессия"
+                row["auto_title"] = ""
             rows.append(row)
         return rows, folders
 
     def forget(self, sid):
-        self.update(lambda data: data["sessions"].pop(sid, None))
+        low = str(sid or "").lower()
+        self.update(lambda data: (data["sessions"].pop(sid, None), data["sessions"].pop(low, None)))
 
 
 def claude_binary():
-    candidates = [shutil.which("claude"), str(Path.home() / ".local/bin/claude"), "/usr/local/bin/claude", "/usr/bin/claude"]
+    home = Path.home()
+    candidates = [
+        str(home / ".local/bin/claude"),
+        str(home / ".npm-global/bin/claude"),
+        shutil.which("claude"),
+        "/usr/local/bin/claude",
+        "/usr/bin/claude",
+        "/usr/sbin/claude",
+    ]
     for path in candidates:
         if path and os.path.isfile(path) and os.access(path, os.X_OK):
             return path
@@ -919,6 +1004,7 @@ class Bridge:
         self.send = send
         self._custom_transcripts = transcripts is not None
         self.transcripts = transcripts or Transcripts()
+        self._explicit_binary = binary
         try:self.binary = binary or claude_binary()
         except ValueError:self.binary = None
         api_source=globals().get('API_SOURCE') or Path(__file__).with_name('api_engine.py').read_text(encoding='utf-8')
@@ -927,6 +1013,12 @@ class Bridge:
         self.codex={'__name__':'relay_codex'};exec(codex_source,self.codex)
         agy_source=globals().get('AGY_SOURCE') or Path(__file__).with_name('agy_engine.py').read_text(encoding='utf-8')
         self.agy={'__name__':'relay_agy'};exec(agy_source,self.agy)
+        installer_source=globals().get('INSTALLER_SOURCE') or Path(__file__).with_name('agent_installer.py').read_text(encoding='utf-8')
+        self.installer_mod={'__name__':'relay_installer'};exec(installer_source,self.installer_mod)
+        self.installer_mod['ensure_user_bin_env']()
+        if not self.binary and not self._explicit_binary:
+            try:self.binary = claude_binary()
+            except ValueError:self.binary = None
         self.api_records=records
         default_b = globals().get('DEFAULT_BACKEND') or ('api' if globals().get('API_DEFAULT') else 'claude')
         self.last_backend = default_b if default_b in ('claude', 'codex', 'agy', 'api') else 'claude'
@@ -950,6 +1042,8 @@ class Bridge:
         self.actor = ""
         self.board, self.board_file = load_board()
         self.meta = SessionMeta()
+        self._local_unlocked = set()
+        self.host_ref = None
         self.catalog = None
         self.catalog_probe = False
         self.backend_catalogs = {"codex": None, "agy": None}
@@ -964,6 +1058,64 @@ class Bridge:
             binaries={'codex': self.codex['codex_binary'], 'agy': self.agy['agy_binary']},
             on_success=self._on_auth_success,
         )
+        self.installer = self.installer_mod['AgentInstaller'](
+            resolvers={
+                'claude': self._resolve_claude_bin,
+                'codex': self.codex['codex_binary'],
+                'agy': self.agy['agy_binary'],
+            },
+            versions={
+                'claude': self._claude_bin_version,
+                'codex': self.codex['codex_version'],
+                'agy': self.agy['agy_version'],
+            },
+            on_installed=self._on_agent_installed,
+        )
+
+    def _resolve_claude_bin(self):
+        if self._explicit_binary:
+            return self._explicit_binary if os.path.isfile(self._explicit_binary) and os.access(self._explicit_binary, os.X_OK) else None
+        try:
+            found = claude_binary()
+            self.binary = found
+            return found
+        except ValueError:
+            self.binary = None
+            return None
+
+    def _claude_bin_version(self, binary=None):
+        target = binary or self._resolve_claude_bin()
+        if not target:
+            return None
+        try:
+            return subprocess.check_output([target, "--version"], text=True, timeout=12, stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL).strip() or "Claude Code"
+        except (OSError, subprocess.SubprocessError):
+            return "Claude Code"
+
+    def _on_agent_installed(self, agent, after_bin, after_ver):
+        if agent == "claude":
+            self.binary = after_bin
+            self.auth.binary = after_bin
+            self.catalog = None
+            self.probe_catalog()
+        elif agent in ("codex", "agy"):
+            self.backend_catalogs[agent] = None
+            self.probe_backend_catalog(agent)
+
+    def _caller_unlocked(self, explicit_client=None):
+        client = explicit_client if explicit_client is not None else getattr(CLIENT, "value", None)
+        if client is not None and hasattr(client, "unlocked"):
+            return client.unlocked
+        return self._local_unlocked
+
+    def is_locked_for_caller(self, sid, explicit_client=None):
+        if not isinstance(sid, str) or not sid:
+            return False
+        return self.meta.is_locked(sid) and sid.lower() not in self._caller_unlocked(explicit_client)
+
+    def _require_unlocked(self, sid):
+        if self.is_locked_for_caller(sid):
+            raise ValueError("Сессия защищена паролем. Сначала разблокируй её.")
 
     def _on_auth_success(self, provider):
         if provider == "claude":
@@ -1183,7 +1335,7 @@ class Bridge:
                     run.close()
                     self.runs.pop(sid, None)
 
-    def send_sessions(self):
+    def _raw_sessions_list(self):
         sessions = list(self.transcripts.sessions())
         excluded = {s["id"].lower() for s in sessions}
         for linked in self.transcripts.linked_ids.values():
@@ -1201,26 +1353,39 @@ class Bridge:
             except Exception:
                 pass
         sessions.sort(key=lambda r: r["modified"], reverse=True)
-        sessions = sessions[:2000]
+        return sessions[:2000]
+
+    def _format_sessions_for(self, raw_sessions, unlocked_ids):
         try:
-            sessions, folders = self.meta.apply(sessions)
+            sessions, folders = self.meta.apply(raw_sessions, unlocked_ids=unlocked_ids)
         except OSError:
+            sessions = [dict(r) for r in raw_sessions]
             folders = []
         busy = self.running()
         for s in sessions:
             s["running"] = s.get("id") in busy
-        self.send({"type": "sessions", "sessions": sessions, "folders": folders})
+        return {"type": "sessions", "sessions": sessions, "folders": folders}
+
+    def send_sessions(self, only_caller=False):
+        raw = self._raw_sessions_list()
+        caller = getattr(CLIENT, "value", None)
+        if only_caller:
+            if caller is not None and hasattr(caller, "send"):
+                caller.send(self._format_sessions_for(raw, caller.unlocked))
+            else:
+                self.send(self._format_sessions_for(raw, self._local_unlocked))
+            return
+        if self.host_ref is not None:
+            with self.host_ref.lock:
+                clients = [c for c in self.host_ref.clients if c.alive]
+            for client in clients:
+                client.send(self._format_sessions_for(raw, client.unlocked))
+            return
+        self.send(self._format_sessions_for(raw, self._local_unlocked))
 
     def hello(self):
         version = self.claude_version()
-        codex_bin = self.codex["codex_binary"]()
-        agy_bin = self.agy["agy_binary"]()
-        backends = {
-            "claude": {"installed": bool(self.binary)},
-            "codex": {"installed": bool(codex_bin), "version": self.codex["codex_version"](codex_bin) or "" if codex_bin else ""},
-            "agy": {"installed": bool(agy_bin), "version": self.agy["agy_version"](agy_bin) or "" if agy_bin else ""},
-            "api": {"installed": True},
-        }
+        backends = self.installer.status()
         self.send({"type": "hello", "home": str(Path.home()), "hostname": os.uname().nodename,
                    "version": version, "protocol": 4, "api_available": True, "auth_available": True,
                    "remote_browser": True, "backends": backends, "host": bool(globals().get("RELAY_HOSTED"))})
@@ -1234,7 +1399,7 @@ class Bridge:
             elif b == "codex" and self._scan_codex_native():
                 cached = self.codex["models_from_cache"]()
                 if cached:
-                    self.learn_backend_catalog("codex", cached, backends["codex"]["version"])
+                    self.learn_backend_catalog("codex", cached, backends["codex"].get("version", ""))
         if self.last_backend in ("codex", "agy") and backends[self.last_backend]["installed"]:
             self.probe_backend_catalog(self.last_backend)
 
@@ -1271,17 +1436,65 @@ class Bridge:
                 self.send_sessions()
             elif op == "session_meta":
                 sid = valid_id(req.get("sid"))
+                self._require_unlocked(sid)
                 self.meta.session(sid, title=req.get("title"), pinned=req.get("pinned"),
                                   folder=req.get("folder"), actor=req.get("actor") or "")
                 self.send_sessions()
             elif op == "session_folder":
+                target_sid = valid_id(req.get("sid")) if req.get("sid") else None
+                if target_sid:
+                    self._require_unlocked(target_sid)
                 created = self.meta.folder(req.get("id"), name=req.get("name"), delete=bool(req.get("delete")),
                                            order=req.get("order"))
-                if req.get("sid") and created:
-                    self.meta.session(valid_id(req.get("sid")), folder=created, actor=req.get("actor") or "")
+                if target_sid and created:
+                    self.meta.session(target_sid, folder=created, actor=req.get("actor") or "")
                 self.send_sessions()
+            elif op == "session_lock":
+                sid = valid_id(req.get("sid"))
+                remove = bool(req.get("remove"))
+                self.meta.set_lock(
+                    sid,
+                    password=req.get("password"),
+                    current_password=req.get("current_password"),
+                    remove=remove,
+                    actor=req.get("actor") or "",
+                )
+                low = sid.lower()
+                caller = getattr(CLIENT, "value", None)
+                if self.host_ref is not None:
+                    with self.host_ref.lock:
+                        other_clients = [c for c in self.host_ref.clients if c.alive and c is not caller]
+                    for other in other_clients:
+                        other.unlocked.discard(low)
+                        other.send({"type": "session_lock_changed", "sid": sid, "locked": not remove, "unlocked": remove})
+                unlocked_set = self._caller_unlocked()
+                if remove:
+                    unlocked_set.discard(low)
+                else:
+                    unlocked_set.add(low)
+                self.send({"type": "session_lock_changed", "sid": sid, "locked": not remove, "unlocked": True})
+                self.send_sessions()
+            elif op == "session_unlock":
+                sid = valid_id(req.get("sid"))
+                if self.meta.verify_lock(sid, req.get("password")):
+                    self._caller_unlocked().add(sid.lower())
+                    self.send({"type": "session_unlock_result", "sid": sid, "ok": True})
+                    self.send_sessions(only_caller=True)
+                else:
+                    self.send({"type": "session_unlock_result", "sid": sid, "ok": False, "message": "Неверный пароль сессии."})
+            elif op == "session_relock":
+                sid = valid_id(req.get("sid"))
+                self._caller_unlocked().discard(sid.lower())
+                locked_now = self.meta.is_locked(sid)
+                self.send({"type": "session_lock_changed", "sid": sid, "locked": locked_now, "unlocked": not locked_now})
+                self.send_sessions(only_caller=True)
+            elif op == "agent_install":
+                self.installer.install(req.get("agent"), self.send, action=req.get("action") or "install")
+            elif op == "backends_status":
+                self.send({"type": "backends_status", "backends": self.installer.status()})
             elif op == "delete_session":
                 sid = valid_id(req.get('sid'))
+                self._require_unlocked(sid)
                 with self.run_lock:
                     run = self.runs.get(sid)
                     if run and run.busy:
@@ -1332,6 +1545,9 @@ class Bridge:
                     self.send({'type':'api_models','request':req.get('request'),'models':[],'error':self.api['clean_error'](error,(req.get('api') or {}).get('key',''))})
             elif op == "history":
                 sid = valid_id(req.get("sid"))
+                if self.is_locked_for_caller(sid):
+                    self.send({"type": "session_locked", "sid": sid, "message": "Сессия защищена паролем. Введи пароль, чтобы открыть историю."})
+                    return
                 if self.transcripts.find(sid) is not None:
                     messages = self.transcripts.history(sid)
                 elif self._scan_codex_native() and self.codex["has_native_session"](sid):
@@ -1354,6 +1570,7 @@ class Bridge:
                 self.send({"type": "folders", "path": str(path), "parent": str(path.parent), "folders": children[:1000], "request": req.get("request", 0)})
             elif op == "prompt":
                 sid = valid_id(req.get("sid"))
+                self._require_unlocked(sid)
                 backend=req.get('backend','claude')
                 if backend not in ('claude','codex','agy','api'):raise ValueError('Неизвестный источник модели.')
                 api=self.api['configuration'](req.get('api')) if backend=='api' else None
@@ -1477,11 +1694,15 @@ class Bridge:
             elif op == "cluster_reply":
                 if self.cluster:self.cluster.result(valid_id(req.get("id")),valid_id(req.get("sid")),valid_id(req.get("run")),req.get("result"))
             elif op == "permission":
-                run = self.runs.get(valid_id(req.get("sid")))
+                sid = valid_id(req.get("sid"))
+                self._require_unlocked(sid)
+                run = self.runs.get(sid)
                 if run:
                     run.permit(str(req.get("id", "")), bool(req.get("allow")), req.get("answers"))
             elif op == "control":
-                run = self.runs.get(valid_id(req.get("sid")))
+                sid = valid_id(req.get("sid"))
+                self._require_unlocked(sid)
+                run = self.runs.get(sid)
                 kind, value = req.get("action"), req.get("value")
                 if kind == "model" and isinstance(value, str) and len(value) <= 160:
                     if run and not run.closed:
@@ -1506,7 +1727,9 @@ class Bridge:
                     else:
                         self.probe_backend_catalog(target_backend)
             elif op == "stop":
-                run = self.runs.get(valid_id(req.get("sid")))
+                sid = valid_id(req.get("sid"))
+                self._require_unlocked(sid)
+                run = self.runs.get(sid)
                 if run:
                     run.stop()
             elif op == "board":
@@ -1611,7 +1834,7 @@ def store_files(sid, files, root=None):
 
 CLIENT = threading.local()
 # Replies go to the app that asked; what happens in a session goes to every app.
-BROADCAST = {"claude", "permission", "permission_cancelled", "run_closed", "run_state", "sessions", "session_deleted", "catalog", "claude_update"}
+BROADCAST = {"claude", "permission", "permission_cancelled", "run_closed", "run_state", "sessions", "session_deleted", "catalog", "claude_update", "agent_install", "backends_status"}
 UPDATE_EVERY = 6 * 3600
 OWNED = {"desktop_request", "desktop_cancel", "cluster_request", "cluster_cancelled"}
 HOST_IDLE = 30 * 60
@@ -1624,6 +1847,7 @@ class HostClient:
         self.queue = collections.deque()
         self.ready = threading.Condition()
         self.alive = True
+        self.unlocked = set()
         threading.Thread(target=self.writer, daemon=True).start()
 
     def send(self, event):
@@ -1731,6 +1955,7 @@ class Host:
         self.retiring = False
         self.peers = []
         self.bridge = (bridge_factory or Bridge)(send=self.route)
+        self.bridge.host_ref = self
         self.bridge.peer_running = {}
 
     def peers_changed(self):
@@ -1776,7 +2001,16 @@ class Host:
         if asking is not None and kind not in BROADCAST:
             asking.send(event)
             return
+        sid = event.get("sid")
+        locked_stream = (
+            kind in ("claude", "permission", "permission_cancelled")
+            and isinstance(sid, str)
+            and self.bridge.meta.is_locked(sid)
+        )
+        sid_low = sid.lower() if isinstance(sid, str) else ""
         for client in clients:
+            if locked_stream and not getattr(client, "peer", False) and sid_low not in client.unlocked:
+                continue
             client.send(event)
 
     def replay(self, client):
@@ -1784,15 +2018,17 @@ class Host:
         for peer in list(self.peers):
             for sid in list(peer.running):
                 client.send({"type": "run_state", "sid": sid, "busy": True, "queued": 0})
-                for event in list(peer.pending.get(sid, {}).values()):
-                    client.send(event)
+                if getattr(client, "peer", False) or not self.bridge.is_locked_for_caller(sid, client):
+                    for event in list(peer.pending.get(sid, {}).values()):
+                        client.send(event)
         for run in list(self.bridge.runs.values()):
             if run.busy and not run.closed:
                 client.send({"type": "run_state", "sid": run.sid, "busy": True, "queued": max(0, run.turns - 1),
                              "background": list(run.background), "backend": getattr(run, "backend", "claude")})
-                for ident, req in list(run.pending.items()):
-                    client.send({"type": "permission", "sid": run.sid, "id": ident,
-                                 "tool": req.get("tool_name", "Действие"), "input": req.get("input", {})})
+                if getattr(client, "peer", False) or not self.bridge.is_locked_for_caller(run.sid, client):
+                    for ident, req in list(run.pending.items()):
+                        client.send({"type": "permission", "sid": run.sid, "id": ident,
+                                     "tool": req.get("tool_name", "Действие"), "input": req.get("input", {})})
 
     def serve_client(self, conn):
         client = HostClient(conn)
@@ -1820,6 +2056,9 @@ class Host:
                     continue
                 peer = self.peer_for(req.get("sid")) if req.get("op") in ("permission", "stop", "control", "prompt") else None
                 if peer is not None:
+                    if self.bridge.is_locked_for_caller(req.get("sid"), client):
+                        client.send({'type':'error','op':req.get('op'),'sid':req.get('sid'),'message':'Сессия защищена паролем. Сначала разблокируй её.'})
+                        continue
                     if req.get('op')=='prompt' and req.get('backend') in ('api','codex','agy'):
                         client.send({'type':'error','op':'prompt','sid':req.get('sid'),'message':'Этот разговор ещё работает в предыдущем процессе хоста. Дождись завершения ответа.'})
                         continue

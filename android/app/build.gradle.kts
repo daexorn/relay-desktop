@@ -12,8 +12,8 @@ android {
         applicationId = "dev.relay.mobile"
         minSdk = 26
         targetSdk = 35
-        versionCode = 17
-        versionName = "0.3.1"
+        versionCode = 18
+        versionName = "0.4.0"
     }
     buildTypes {
         release {
@@ -37,7 +37,11 @@ android {
 
 val copyBridge by tasks.registering(Copy::class) {
     from(rootProject.file("../bridge")) {
-        include("relay_bridge.py", "desktop_mcp.py", "board.py", "cluster_mcp.py", "attachments.py", "api_engine.py", "auth_flow.py", "remote_browser.py")
+        include(
+            "relay_bridge.py", "desktop_mcp.py", "board.py", "cluster_mcp.py",
+            "attachments.py", "api_engine.py", "auth_flow.py", "remote_browser.py",
+            "codex_engine.py", "agy_engine.py", "agent_installer.py",
+        )
     }
     into(layout.buildDirectory.dir("generated/bridge/bridge"))
 }

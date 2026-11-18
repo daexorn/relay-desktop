@@ -44,6 +44,8 @@ pub struct Chat {
     pub busy: bool,
     pub loading: bool,
     pub loaded: bool,
+    pub locked: bool,
+    pub unlocked: bool,
     pub status: String,
     pub error: String,
     pub model: String,
@@ -77,6 +79,8 @@ impl Chat {
             busy: false,
             loading: false,
             loaded: false,
+            locked: false,
+            unlocked: true,
             status: String::new(),
             error: String::new(),
             model: if saved.model.is_empty() {
@@ -109,6 +113,9 @@ impl Chat {
             scroll: 0,
             expanded: false,
         }
+    }
+    pub fn is_locked_gate(&self) -> bool {
+        self.locked && !self.unlocked
     }
     pub fn saved(&self) -> SavedChat {
         SavedChat {
@@ -440,5 +447,18 @@ mod tests {
         c.reduce(&json!({"type":"assistant","message":{"content":[{"type":"text","text":"Текущий ответ завершён"}]}}));
         assert_eq!(c.messages.len(), 3);
         assert_eq!(c.messages[2].text, "Текущий ответ завершён");
+    }
+    #[test]
+    fn lock_flags_are_never_persisted_in_saved_chat() {
+        let mut c = Chat::new("id".into(), "/tmp".into(), SavedChat::default());
+        assert!(!c.locked);
+        assert!(c.unlocked);
+        assert!(!c.is_locked_gate());
+        c.locked = true;
+        c.unlocked = false;
+        assert!(c.is_locked_gate());
+        let raw = serde_json::to_string(&c.saved()).unwrap();
+        assert!(!raw.contains("locked"));
+        assert!(!raw.contains("unlocked"));
     }
 }

@@ -27,9 +27,9 @@ def agy_data_dir():
 def agy_binary():
     home = Path.home()
     candidates = [
-        shutil.which("agy"),
         str(home / ".local/bin/agy"),
         str(home / ".gemini/antigravity-cli/bin/agy"),
+        shutil.which("agy"),
         "/usr/local/bin/agy",
         "/usr/bin/agy",
     ]

@@ -3,18 +3,10 @@ package dev.relay.mobile
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.foundation.layout.fillMaxHeight
-import androidx.compose.runtime.key
-import androidx.compose.material.icons.filled.Share
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.core.MutableTransitionState
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
@@ -26,21 +18,29 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -55,20 +55,24 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
@@ -78,6 +82,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -88,20 +93,34 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -112,15 +131,15 @@ val LocalPalette = staticCompositionLocalOf { palette("graphite") }
 @Composable
 fun RelayApp(vm: RelayViewModel) {
     val target = palette(vm.theme)
-    // Every colour glides when the theme changes, like on the desktop.
     val p = target.copy(
-        base = animateColorAsState(target.base, tween(320), label = "base").value,
-        side = animateColorAsState(target.side, tween(320), label = "side").value,
-        surface = animateColorAsState(target.surface, tween(320), label = "surface").value,
-        line = animateColorAsState(target.line, tween(320), label = "line").value,
-        text = animateColorAsState(target.text, tween(320), label = "text").value,
-        muted = animateColorAsState(target.muted, tween(320), label = "muted").value,
-        accent = animateColorAsState(target.accent, tween(320), label = "accent").value,
+        base = animateColorAsState(target.base, tween(280), label = "base").value,
+        side = animateColorAsState(target.side, tween(280), label = "side").value,
+        rail = animateColorAsState(target.rail, tween(280), label = "rail").value,
+        surface = animateColorAsState(target.surface, tween(280), label = "surface").value,
+        line = animateColorAsState(target.line, tween(280), label = "line").value,
+        text = animateColorAsState(target.text, tween(280), label = "text").value,
+        muted = animateColorAsState(target.muted, tween(280), label = "muted").value,
+        accent = animateColorAsState(target.accent, tween(280), label = "accent").value,
     )
     CompositionLocalProvider(LocalPalette provides p) {
         Box(Modifier.fillMaxSize().background(p.base).statusBarsPadding().navigationBarsPadding().imePadding()) {
@@ -128,8 +147,8 @@ fun RelayApp(vm: RelayViewModel) {
                 targetState = vm.screen,
                 transitionSpec = {
                     val forward = targetState.ordinal > initialState.ordinal
-                    (slideInHorizontally(tween(260)) { if (forward) it / 4 else -it / 4 } + fadeIn(tween(260))) togetherWith
-                        (slideOutHorizontally(tween(220)) { if (forward) -it / 6 else it / 6 } + fadeOut(tween(180)))
+                    (slideInHorizontally(tween(240)) { if (forward) it / 4 else -it / 4 } + fadeIn(tween(240))) togetherWith
+                        (slideOutHorizontally(tween(200)) { if (forward) -it / 6 else it / 6 } + fadeOut(tween(160)))
                 },
                 label = "screen",
             ) { screen ->
@@ -141,77 +160,454 @@ fun RelayApp(vm: RelayViewModel) {
                 }
             }
             vm.trust?.let { TrustDialog(it, vm) }
+            vm.authFlow?.let { AuthSheet(vm, it) }
         }
     }
 }
 
-// --- small building blocks ------------------------------------------------------------
+// --- Custom Crisp Vector Glyphs (replaces OEM emojis everywhere) -----------------------
+
+enum class Glyph {
+    RelayMark, Lock, Unlock, ShieldLock, Pin, Folder, FolderOpen,
+    Paperclip, Image, Terminal, Spark, Download, Server, Key, Check
+}
 
 @Composable
-fun Label(text: String, size: TextUnit = 14.sp, color: Color = LocalPalette.current.text, weight: FontWeight = FontWeight.Normal, maxLines: Int = Int.MAX_VALUE, modifier: Modifier = Modifier) =
-    Text(text, modifier = modifier, color = color, fontSize = size, fontWeight = weight, maxLines = maxLines, overflow = TextOverflow.Ellipsis)
+fun VectorGlyph(glyph: Glyph, tint: Color = LocalPalette.current.muted, size: Dp = 16.dp, modifier: Modifier = Modifier) {
+    Canvas(modifier.size(size)) {
+        val w = this.size.width
+        val h = this.size.height
+        val sw = (w * 0.095f).coerceAtLeast(1.4f)
+        val stroke = Stroke(width = sw, cap = StrokeCap.Round, join = StrokeJoin.Round)
+        when (glyph) {
+            Glyph.RelayMark -> {
+                val r = w * 0.12f
+                val top = Offset(w * 0.5f, h * 0.18f)
+                val left = Offset(w * 0.2f, h * 0.72f)
+                val right = Offset(w * 0.8f, h * 0.72f)
+                drawLine(tint.copy(alpha = 0.75f), top, left, sw)
+                drawLine(tint.copy(alpha = 0.75f), top, right, sw)
+                drawLine(tint.copy(alpha = 0.75f), left, right, sw)
+                drawCircle(tint, r, top)
+                drawCircle(tint, r, left)
+                drawCircle(tint, r, right)
+            }
+            Glyph.Lock -> {
+                val archW = w * 0.44f
+                val archLeft = (w - archW) / 2f
+                drawArc(
+                    color = tint,
+                    startAngle = 180f,
+                    sweepAngle = 180f,
+                    useCenter = false,
+                    topLeft = Offset(archLeft, h * 0.14f),
+                    size = Size(archW, h * 0.42f),
+                    style = stroke,
+                )
+                drawRoundRect(
+                    color = tint,
+                    topLeft = Offset(w * 0.20f, h * 0.44f),
+                    size = Size(w * 0.60f, h * 0.44f),
+                    cornerRadius = CornerRadius(w * 0.12f),
+                    style = stroke,
+                )
+                drawCircle(tint, sw * 0.9f, Offset(w * 0.5f, h * 0.65f))
+            }
+            Glyph.Unlock -> {
+                val archW = w * 0.44f
+                drawArc(
+                    color = tint,
+                    startAngle = 180f,
+                    sweepAngle = 145f,
+                    useCenter = false,
+                    topLeft = Offset(w * 0.34f, h * 0.12f),
+                    size = Size(archW, h * 0.42f),
+                    style = stroke,
+                )
+                drawRoundRect(
+                    color = tint,
+                    topLeft = Offset(w * 0.20f, h * 0.45f),
+                    size = Size(w * 0.60f, h * 0.43f),
+                    cornerRadius = CornerRadius(w * 0.12f),
+                    style = stroke,
+                )
+            }
+            Glyph.ShieldLock -> {
+                val shield = Path().apply {
+                    moveTo(w * 0.5f, h * 0.10f)
+                    lineTo(w * 0.84f, h * 0.24f)
+                    lineTo(w * 0.84f, h * 0.52f)
+                    cubicTo(w * 0.84f, h * 0.74f, w * 0.66f, h * 0.86f, w * 0.5f, h * 0.92f)
+                    cubicTo(w * 0.34f, h * 0.86f, w * 0.16f, h * 0.74f, w * 0.16f, h * 0.52f)
+                    lineTo(w * 0.16f, h * 0.24f)
+                    close()
+                }
+                drawPath(shield, tint.copy(alpha = 0.14f))
+                drawPath(shield, tint, style = stroke)
+                drawRoundRect(
+                    color = tint,
+                    topLeft = Offset(w * 0.36f, h * 0.47f),
+                    size = Size(w * 0.28f, h * 0.23f),
+                    cornerRadius = CornerRadius(w * 0.06f),
+                    style = stroke,
+                )
+                drawArc(
+                    color = tint,
+                    startAngle = 180f,
+                    sweepAngle = 180f,
+                    useCenter = false,
+                    topLeft = Offset(w * 0.41f, h * 0.35f),
+                    size = Size(w * 0.18f, h * 0.20f),
+                    style = stroke,
+                )
+            }
+            Glyph.Pin -> {
+                val path = Path().apply {
+                    moveTo(w * 0.35f, h * 0.18f)
+                    lineTo(w * 0.65f, h * 0.18f)
+                    lineTo(w * 0.62f, h * 0.46f)
+                    lineTo(w * 0.74f, h * 0.58f)
+                    lineTo(w * 0.26f, h * 0.58f)
+                    lineTo(w * 0.38f, h * 0.46f)
+                    close()
+                }
+                drawPath(path, tint, style = stroke)
+                drawLine(tint, Offset(w * 0.5f, h * 0.58f), Offset(w * 0.5f, h * 0.86f), sw, StrokeCap.Round)
+            }
+            Glyph.Folder -> {
+                val path = Path().apply {
+                    moveTo(w * 0.12f, h * 0.26f)
+                    lineTo(w * 0.40f, h * 0.26f)
+                    lineTo(w * 0.48f, h * 0.36f)
+                    lineTo(w * 0.88f, h * 0.36f)
+                    lineTo(w * 0.88f, h * 0.78f)
+                    lineTo(w * 0.12f, h * 0.78f)
+                    close()
+                }
+                drawPath(path, tint.copy(alpha = 0.14f))
+                drawPath(path, tint, style = stroke)
+            }
+            Glyph.FolderOpen -> {
+                val back = Path().apply {
+                    moveTo(w * 0.12f, h * 0.24f)
+                    lineTo(w * 0.38f, h * 0.24f)
+                    lineTo(w * 0.46f, h * 0.34f)
+                    lineTo(w * 0.84f, h * 0.34f)
+                    lineTo(w * 0.84f, h * 0.48f)
+                    lineTo(w * 0.12f, h * 0.76f)
+                    close()
+                }
+                val flap = Path().apply {
+                    moveTo(w * 0.12f, h * 0.78f)
+                    lineTo(w * 0.24f, h * 0.48f)
+                    lineTo(w * 0.92f, h * 0.48f)
+                    lineTo(w * 0.80f, h * 0.78f)
+                    close()
+                }
+                drawPath(back, tint, style = stroke)
+                drawPath(flap, tint.copy(alpha = 0.18f))
+                drawPath(flap, tint, style = stroke)
+            }
+            Glyph.Paperclip -> {
+                val p = Path().apply {
+                    moveTo(w * 0.68f, h * 0.34f)
+                    lineTo(w * 0.38f, h * 0.64f)
+                    cubicTo(w * 0.28f, h * 0.74f, w * 0.44f, h * 0.88f, w * 0.56f, h * 0.76f)
+                    lineTo(w * 0.82f, h * 0.50f)
+                    cubicTo(w * 0.94f, h * 0.36f, w * 0.70f, h * 0.14f, w * 0.54f, h * 0.28f)
+                    lineTo(w * 0.22f, h * 0.60f)
+                }
+                drawPath(p, tint, style = stroke)
+            }
+            Glyph.Image -> {
+                drawRoundRect(tint, Offset(w * 0.14f, h * 0.18f), Size(w * 0.72f, h * 0.64f), CornerRadius(w * 0.12f), style = stroke)
+                drawCircle(tint, w * 0.07f, Offset(w * 0.36f, h * 0.38f))
+                val mtn = Path().apply {
+                    moveTo(w * 0.20f, h * 0.74f)
+                    lineTo(w * 0.44f, h * 0.52f)
+                    lineTo(w * 0.58f, h * 0.65f)
+                    lineTo(w * 0.70f, h * 0.54f)
+                    lineTo(w * 0.82f, h * 0.74f)
+                }
+                drawPath(mtn, tint, style = stroke)
+            }
+            Glyph.Terminal -> {
+                drawRoundRect(tint, Offset(w * 0.12f, h * 0.18f), Size(w * 0.76f, h * 0.64f), CornerRadius(w * 0.14f), style = stroke)
+                val chevron = Path().apply {
+                    moveTo(w * 0.28f, h * 0.38f)
+                    lineTo(w * 0.42f, h * 0.50f)
+                    lineTo(w * 0.28f, h * 0.62f)
+                }
+                drawPath(chevron, tint, style = stroke)
+                drawLine(tint, Offset(w * 0.50f, h * 0.62f), Offset(w * 0.70f, h * 0.62f), sw, StrokeCap.Round)
+            }
+            Glyph.Spark -> {
+                val star = Path().apply {
+                    moveTo(w * 0.5f, h * 0.10f)
+                    quadraticTo(w * 0.54f, h * 0.46f, w * 0.90f, h * 0.5f)
+                    quadraticTo(w * 0.54f, h * 0.54f, w * 0.5f, h * 0.90f)
+                    quadraticTo(w * 0.46f, h * 0.54f, w * 0.10f, h * 0.5f)
+                    quadraticTo(w * 0.46f, h * 0.46f, w * 0.5f, h * 0.10f)
+                    close()
+                }
+                drawPath(star, tint.copy(alpha = 0.2f))
+                drawPath(star, tint, style = stroke)
+            }
+            Glyph.Download -> {
+                drawLine(tint, Offset(w * 0.5f, h * 0.16f), Offset(w * 0.5f, h * 0.64f), sw, StrokeCap.Round)
+                val arrow = Path().apply {
+                    moveTo(w * 0.30f, h * 0.46f)
+                    lineTo(w * 0.5f, h * 0.66f)
+                    lineTo(w * 0.70f, h * 0.46f)
+                }
+                drawPath(arrow, tint, style = stroke)
+                val tray = Path().apply {
+                    moveTo(w * 0.18f, h * 0.66f)
+                    lineTo(w * 0.18f, h * 0.82f)
+                    lineTo(w * 0.82f, h * 0.82f)
+                    lineTo(w * 0.82f, h * 0.66f)
+                }
+                drawPath(tray, tint, style = stroke)
+            }
+            Glyph.Server -> {
+                drawRoundRect(tint, Offset(w * 0.14f, h * 0.18f), Size(w * 0.72f, h * 0.27f), CornerRadius(w * 0.08f), style = stroke)
+                drawRoundRect(tint, Offset(w * 0.14f, h * 0.55f), Size(w * 0.72f, h * 0.27f), CornerRadius(w * 0.08f), style = stroke)
+                drawCircle(tint, sw * 0.9f, Offset(w * 0.28f, h * 0.315f))
+                drawCircle(tint, sw * 0.9f, Offset(w * 0.28f, h * 0.685f))
+            }
+            Glyph.Key -> {
+                drawCircle(tint, w * 0.18f, Offset(w * 0.34f, h * 0.5f), style = stroke)
+                drawLine(tint, Offset(w * 0.52f, h * 0.5f), Offset(w * 0.86f, h * 0.5f), sw, StrokeCap.Round)
+                drawLine(tint, Offset(w * 0.72f, h * 0.5f), Offset(w * 0.72f, h * 0.68f), sw, StrokeCap.Round)
+                drawLine(tint, Offset(w * 0.84f, h * 0.5f), Offset(w * 0.84f, h * 0.64f), sw, StrokeCap.Round)
+            }
+            Glyph.Check -> {
+                val p = Path().apply {
+                    moveTo(w * 0.20f, h * 0.52f)
+                    lineTo(w * 0.42f, h * 0.74f)
+                    lineTo(w * 0.82f, h * 0.28f)
+                }
+                drawPath(p, tint, style = stroke)
+            }
+        }
+    }
+}
+
+fun backendColor(p: Palette, backend: String): Color = when (backend) {
+    "codex" -> if (p.light) Color(0xFF17825D) else Color(0xFF53CFA1)
+    "agy" -> if (p.light) Color(0xFF2858D8) else Color(0xFF7CA6FF)
+    "api" -> p.amber
+    else -> p.accent
+}
+
+@Composable
+fun BackendBadge(backend: String, compact: Boolean = false, onClick: (() -> Unit)? = null) {
+    val p = LocalPalette.current
+    val tone = backendColor(p, backend)
+    val label = backendShortLabel(backend)
+    val shape = RoundedCornerShape(if (compact) 6.dp else 8.dp)
+    Box(
+        Modifier
+            .clip(shape)
+            .background(tone.copy(alpha = if (p.light) 0.11f else 0.15f))
+            .border(1.dp, tone.copy(alpha = 0.34f), shape)
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .padding(horizontal = if (compact) 6.dp else 8.dp, vertical = if (compact) 2.dp else 4.dp),
+    ) {
+        Label(label, if (compact) 10.5.sp else 11.5.sp, tone, FontWeight.SemiBold, maxLines = 1)
+    }
+}
+
+// --- Core Building Blocks --------------------------------------------------------------
+
+@Composable
+fun Label(
+    text: String,
+    size: TextUnit = 14.sp,
+    color: Color = LocalPalette.current.text,
+    weight: FontWeight = FontWeight.Normal,
+    maxLines: Int = Int.MAX_VALUE,
+    modifier: Modifier = Modifier,
+) = Text(
+    text = text,
+    modifier = modifier,
+    color = color,
+    fontSize = size,
+    fontWeight = weight,
+    maxLines = maxLines,
+    overflow = TextOverflow.Ellipsis,
+)
 
 @Composable
 fun IconButton(icon: ImageVector, hint: String, tint: Color = LocalPalette.current.muted, onClick: () -> Unit) {
     Box(
-        Modifier.size(40.dp).clip(RoundedCornerShape(10.dp)).clickable(onClick = onClick),
+        Modifier.size(38.dp).clip(RoundedCornerShape(11.dp)).clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
-    ) { Icon(icon, contentDescription = hint, tint = tint, modifier = Modifier.size(22.dp)) }
+    ) {
+        Icon(icon, contentDescription = hint, tint = tint, modifier = Modifier.size(20.dp))
+    }
+}
+
+@Composable
+fun GlyphButton(glyph: Glyph, hint: String, tint: Color = LocalPalette.current.muted, highlighted: Boolean = false, onClick: () -> Unit) {
+    val p = LocalPalette.current
+    Box(
+        Modifier
+            .size(38.dp)
+            .clip(RoundedCornerShape(11.dp))
+            .background(if (highlighted) tint.copy(alpha = 0.14f) else Color.Transparent)
+            .then(if (highlighted) Modifier.border(1.dp, tint.copy(alpha = 0.35f), RoundedCornerShape(11.dp)) else Modifier)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        VectorGlyph(glyph, tint = if (highlighted) tint else p.muted, size = 18.dp)
+    }
 }
 
 @Composable
 fun PrimaryButton(text: String, enabled: Boolean = true, modifier: Modifier = Modifier, onClick: () -> Unit) {
     val p = LocalPalette.current
+    val shape = RoundedCornerShape(12.dp)
     Box(
-        modifier.clip(RoundedCornerShape(10.dp)).background(if (enabled) p.accent else p.line)
-            .clickable(enabled = enabled, onClick = onClick).padding(horizontal = 18.dp, vertical = 11.dp),
+        modifier
+            .clip(shape)
+            .background(if (enabled) p.accent else p.line)
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 18.dp, vertical = 11.dp),
         contentAlignment = Alignment.Center,
-    ) { Label(text, 14.sp, if (p.light || !enabled) p.base else Color(0xFF111114), FontWeight.Medium) }
-}
-
-@Composable
-fun GhostButton(text: String, color: Color = LocalPalette.current.text, onClick: () -> Unit) {
-    Box(Modifier.clip(RoundedCornerShape(10.dp)).clickable(onClick = onClick).padding(horizontal = 14.dp, vertical = 11.dp)) {
-        Label(text, 14.sp, color)
+    ) {
+        Label(
+            text = text,
+            size = 14.sp,
+            color = if (!enabled) p.muted else if (p.light) Color.White else Color(0xFF0E1318),
+            weight = FontWeight.SemiBold,
+            maxLines = 1,
+        )
     }
 }
 
 @Composable
-fun Field(value: String, onChange: (String) -> Unit, hint: String, password: Boolean = false, number: Boolean = false, singleLine: Boolean = true, modifier: Modifier = Modifier) {
+fun SecondaryPillButton(text: String, glyph: Glyph? = null, tint: Color = LocalPalette.current.text, enabled: Boolean = true, onClick: () -> Unit) {
     val p = LocalPalette.current
+    val shape = RoundedCornerShape(10.dp)
+    Row(
+        Modifier
+            .clip(shape)
+            .background(p.elevated)
+            .border(1.dp, p.borderSubtle, shape)
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 11.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        if (glyph != null) VectorGlyph(glyph, if (enabled) tint else p.muted, size = 14.dp)
+        Label(text, 12.5.sp, if (enabled) tint else p.muted, FontWeight.Medium, maxLines = 1)
+    }
+}
+
+@Composable
+fun GhostButton(text: String, color: Color = LocalPalette.current.text, onClick: () -> Unit) {
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(10.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+    ) {
+        Label(text, 13.5.sp, color, FontWeight.Medium, maxLines = 1)
+    }
+}
+
+@Composable
+fun Field(
+    value: String,
+    onChange: (String) -> Unit,
+    hint: String,
+    password: Boolean = false,
+    number: Boolean = false,
+    singleLine: Boolean = true,
+    modifier: Modifier = Modifier,
+) {
+    val p = LocalPalette.current
+    val shape = RoundedCornerShape(12.dp)
     BasicTextField(
         value = value,
         onValueChange = onChange,
         singleLine = singleLine,
         textStyle = TextStyle(color = p.text, fontSize = 15.sp),
         cursorBrush = SolidColor(p.accent),
-        visualTransformation = if (password) PasswordVisualTransformation() else androidx.compose.ui.text.input.VisualTransformation.None,
-        keyboardOptions = KeyboardOptions(keyboardType = when {
-            password -> KeyboardType.Password
-            number -> KeyboardType.Number
-            else -> KeyboardType.Text
-        }),
-        modifier = modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(p.base).border(1.dp, p.line, RoundedCornerShape(10.dp))
-            .padding(horizontal = 12.dp, vertical = 11.dp),
+        visualTransformation = if (password) PasswordVisualTransformation() else VisualTransformation.None,
+        keyboardOptions = KeyboardOptions(
+            keyboardType = when {
+                password -> KeyboardType.Password
+                number -> KeyboardType.Number
+                else -> KeyboardType.Text
+            }
+        ),
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .background(p.base)
+            .border(1.dp, if (value.isNotEmpty()) p.mix(p.line, p.accent, 0.25f) else p.line, shape)
+            .padding(horizontal = 13.dp, vertical = 11.dp),
         decorationBox = { inner ->
             Box {
-                if (value.isEmpty()) Label(hint, 15.sp, p.muted)
+                if (value.isEmpty()) Label(hint, 14.5.sp, p.muted, maxLines = 1)
                 inner()
             }
         },
     )
 }
 
+/** Static dot when idle so Compose `waitForIdle()` never blocks. */
 @Composable
-fun TopBar(title: String, subtitle: String? = null, onBack: (() -> Unit)? = null, actions: @Composable () -> Unit = {}) {
+fun StatusDot(link: Link) {
     val p = LocalPalette.current
-    Row(Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-        if (onBack != null) IconButton(Icons.AutoMirrored.Filled.ArrowBack, "Назад", p.text, onBack) else Spacer(Modifier.width(12.dp))
-        Column(Modifier.weight(1f).padding(horizontal = 6.dp)) {
-            Label(title, 17.sp, p.text, FontWeight.Medium, 1)
-            if (subtitle != null) Label(subtitle, 12.sp, p.muted, maxLines = 1)
+    val color = when (link) {
+        Link.Online -> p.green
+        Link.Connecting -> p.amber
+        Link.Off -> p.muted.copy(alpha = 0.6f)
+    }
+    Box(Modifier.size(12.dp), contentAlignment = Alignment.Center) {
+        if (link == Link.Online) {
+            Box(Modifier.size(12.dp).clip(CircleShape).background(color.copy(alpha = 0.22f)))
         }
-        actions()
+        Box(Modifier.size(6.5.dp).clip(CircleShape).background(color))
+    }
+}
+
+@Composable
+fun TopBar(
+    title: String,
+    subtitle: String? = null,
+    link: Link? = null,
+    onBack: (() -> Unit)? = null,
+    actions: @Composable () -> Unit = {},
+) {
+    val p = LocalPalette.current
+    Column(Modifier.fillMaxWidth().background(p.mix(p.rail, p.side, 0.5f))) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (onBack != null) {
+                IconButton(Icons.AutoMirrored.Filled.ArrowBack, "Назад", p.text, onBack)
+            } else {
+                Spacer(Modifier.width(10.dp))
+            }
+            Column(Modifier.weight(1f).padding(horizontal = 6.dp)) {
+                Label(title, 16.5.sp, p.text, FontWeight.SemiBold, maxLines = 1)
+                if (subtitle != null) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                        if (link != null) StatusDot(link)
+                        Label(subtitle, 12.sp, p.muted, maxLines = 1)
+                    }
+                }
+            }
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                actions()
+            }
+        }
+        HorizontalDivider(thickness = 1.dp, color = p.borderSubtle)
     }
 }
 
@@ -226,82 +622,209 @@ fun Dots(color: Color) {
     }
 }
 
+/** Bottom-anchored modal sheet built on standard `Dialog` so Robolectric tests stay fast and reliable. */
 @Composable
 fun Sheet(onDismiss: () -> Unit, content: @Composable () -> Unit) {
     val p = LocalPalette.current
-    Dialog(onDismissRequest = onDismiss) {
-        Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(p.surface).padding(20.dp)) { content() }
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = onDismiss,
+                )
+                .padding(horizontal = 10.dp, vertical = 10.dp),
+            contentAlignment = Alignment.BottomCenter,
+        ) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .widthIn(max = 520.dp)
+                    .clip(RoundedCornerShape(24.dp))
+                    .background(p.elevated)
+                    .border(1.dp, p.line, RoundedCornerShape(24.dp))
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = {},
+                    )
+                    .padding(horizontal = 20.dp, vertical = 16.dp),
+            ) {
+                Box(
+                    Modifier
+                        .align(Alignment.CenterHorizontally)
+                        .padding(bottom = 14.dp)
+                        .width(36.dp)
+                        .height(4.dp)
+                        .clip(CircleShape)
+                        .background(p.muted.copy(alpha = 0.35f)),
+                )
+                content()
+            }
+        }
     }
 }
 
-// --- servers ---------------------------------------------------------------------------
+// --- Servers Screen --------------------------------------------------------------------
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ServersScreen(vm: RelayViewModel) {
     val p = LocalPalette.current
     var editing by remember { mutableStateOf<ServerProfile?>(null) }
     var asking by remember { mutableStateOf<ServerProfile?>(null) }
     var apiEditing by remember { mutableStateOf<ServerProfile?>(null) }
+    var agentsSheet by remember { mutableStateOf(false) }
+
     Column(Modifier.fillMaxSize()) {
-        TopBar("Relay", "Claude Code и свой API на твоих серверах") {
+        TopBar("Relay", "Claude Code · Codex · Antigravity · API") {
             IconButton(Icons.Default.Settings, "Настройки") { vm.screen = Screen.Settings }
         }
         if (vm.notice.isNotEmpty()) Notice(vm.notice) { vm.notice = "" }
         if (vm.crash.isNotEmpty()) CrashCard(vm.crash) { vm.crash = "" }
-        LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            if (vm.servers.isEmpty()) item {
-                Column(Modifier.fillMaxWidth().padding(top = 60.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Label("Все проекты. Одно пространство.", 22.sp, p.text, FontWeight.Medium)
-                    Spacer(Modifier.height(10.dp))
-                    Label("Подключи сервер и продолжай с того места, где остановился.", 14.sp, p.muted)
-                }
-            }
-            item {
-                Box(Modifier.fillMaxWidth().padding(top = 8.dp), contentAlignment = Alignment.Center) {
-                    GhostButton("Посмотреть без сервера — демо", p.accent) { vm.startDemo() }
-                }
-            }
-            items(vm.servers, key = { it.id }) { s ->
-                val online = vm.current?.id == s.id && vm.link == Link.Online
-                Row(
-                    Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(p.surface).border(1.dp, p.line, RoundedCornerShape(14.dp))
-                        .clickable {
-                            if (online) vm.screen = Screen.Sessions
-                            else vm.savedPassword(s)?.let { vm.connect(s, it) } ?: run { asking = s }
-                        }.padding(16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Box(Modifier.size(42.dp).clip(RoundedCornerShape(12.dp)).background(p.mix(p.surface, p.accent, 0.18f)), contentAlignment = Alignment.Center) {
-                        Label(s.name.ifEmpty { s.host }.take(2).uppercase(), 14.sp, p.accent, FontWeight.Medium)
+
+        LazyColumn(
+            Modifier.weight(1f),
+            contentPadding = PaddingValues(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            if (vm.servers.isEmpty()) {
+                item {
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(top = 18.dp)
+                            .clip(RoundedCornerShape(22.dp))
+                            .background(p.surface)
+                            .border(1.dp, p.borderSubtle, RoundedCornerShape(22.dp))
+                            .padding(24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        Box(
+                            Modifier
+                                .size(60.dp)
+                                .clip(RoundedCornerShape(18.dp))
+                                .background(p.subtleAccent)
+                                .border(1.dp, p.accent.copy(alpha = 0.35f), RoundedCornerShape(18.dp)),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            VectorGlyph(Glyph.RelayMark, p.accent, size = 32.dp)
+                        }
+                        Spacer(Modifier.height(18.dp))
+                        Label("Все проекты. Одно пространство.", 20.sp, p.text, FontWeight.SemiBold)
+                        Spacer(Modifier.height(8.dp))
+                        Label(
+                            "Подключи свой сервер по SSH и продолжай общие сессии с ПК — процессы работают на сервере даже без приложения.",
+                            13.5.sp,
+                            p.muted,
+                        )
+                        Spacer(Modifier.height(16.dp))
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            for (b in BACKENDS) BackendBadge(b)
+                        }
+                        Spacer(Modifier.height(18.dp))
+                        SecondaryPillButton("Посмотреть без сервера — демо", Glyph.Spark, p.accent) { vm.startDemo() }
                     }
-                    Column(Modifier.weight(1f).padding(horizontal = 14.dp)) {
-                        Label(s.name.ifEmpty { s.host }, 16.sp, p.text, FontWeight.Medium, 1)
-                        Label("${s.user}@${s.host}" + if (s.port != 22) ":${s.port}" else "", 12.sp, p.muted, maxLines = 1)
+                }
+            } else {
+                items(vm.servers, key = { it.id }) { s ->
+                    val online = vm.current?.id == s.id && vm.link == Link.Online
+                    val cardShape = RoundedCornerShape(18.dp)
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(cardShape)
+                            .background(p.surface)
+                            .border(1.dp, if (online) p.accent.copy(alpha = 0.5f) else p.line, cardShape)
+                            .clickable {
+                                if (online) vm.screen = Screen.Sessions
+                                else vm.savedPassword(s)?.let { vm.connect(s, it) } ?: run { asking = s }
+                            }
+                            .padding(15.dp),
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                Modifier
+                                    .size(44.dp)
+                                    .clip(RoundedCornerShape(13.dp))
+                                    .background(p.subtleAccent)
+                                    .border(1.dp, p.accent.copy(alpha = 0.25f), RoundedCornerShape(13.dp)),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                VectorGlyph(Glyph.Server, p.accent, size = 21.dp)
+                            }
+                            Column(Modifier.weight(1f).padding(horizontal = 13.dp)) {
+                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                                    Label(s.name.ifEmpty { s.host }, 16.sp, p.text, FontWeight.SemiBold, maxLines = 1, modifier = Modifier.weight(1f, fill = false))
+                                    BackendBadge(s.effectiveBackend(), compact = true)
+                                }
+                                Spacer(Modifier.height(2.dp))
+                                Text(
+                                    "${s.user}@${s.host}" + (if (s.port != 22) ":${s.port}" else "") + " · ${s.cwd}",
+                                    color = p.muted,
+                                    fontSize = 12.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            if (online) StatusDot(Link.Online)
+                            IconButton(Icons.Default.MoreVert, "Изменить") { editing = s }
+                        }
+                        Spacer(Modifier.height(10.dp))
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            SecondaryPillButton("API", Glyph.Key, p.accent) { apiEditing = s }
+                            if (online) {
+                                SecondaryPillButton("Агенты", Glyph.Terminal, p.text) { agentsSheet = true }
+                            }
+                            Spacer(Modifier.weight(1f))
+                            Label(if (online) "Открыть сессии →" else "Подключиться →", 12.5.sp, if (online) p.green else p.accent, FontWeight.Medium)
+                        }
                     }
-                    if (online) Box(Modifier.size(9.dp).clip(CircleShape).background(p.green))
-                    GhostButton("API", p.accent) { apiEditing = s }
-                    IconButton(Icons.Default.MoreVert, "Изменить") { editing = s }
+                }
+                item {
+                    Box(Modifier.fillMaxWidth().padding(top = 4.dp), contentAlignment = Alignment.Center) {
+                        GhostButton("Посмотреть без сервера — демо", p.accent) { vm.startDemo() }
+                    }
                 }
             }
         }
-        Box(Modifier.fillMaxWidth().padding(16.dp)) {
-            PrimaryButton("Добавить сервер", modifier = Modifier.fillMaxWidth()) { editing = ServerProfile() }
+        Column(Modifier.fillMaxWidth().background(p.mix(p.rail, p.base, 0.5f))) {
+            HorizontalDivider(thickness = 1.dp, color = p.borderSubtle)
+            Box(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
+                PrimaryButton("Добавить сервер", modifier = Modifier.fillMaxWidth()) { editing = ServerProfile() }
+            }
         }
     }
+
     editing?.let { s -> ServerDialog(vm, s, vm.servers.any { it.id == s.id }) { editing = null } }
-    apiEditing?.let { s -> ApiDialog(vm,s) { apiEditing = null } }
+    apiEditing?.let { s -> ApiDialog(vm, s) { apiEditing = null } }
+    if (agentsSheet) AgentsSheet(vm) { agentsSheet = false }
     asking?.let { s ->
         var password by remember { mutableStateOf("") }
-        var remember by remember { mutableStateOf(true) }
+        var rememberPw by remember { mutableStateOf(true) }
         Sheet({ asking = null }) {
-            Label("Пароль для ${s.user}@${s.host}", 17.sp, p.text, FontWeight.Medium)
+            Label("Пароль для ${s.user}@${s.host}", 17.sp, p.text, FontWeight.SemiBold)
             Spacer(Modifier.height(12.dp))
             Field(password, { password = it }, "Пароль сервера", password = true)
-            Check("Запомнить пароль", remember) { remember = it }
+            Check("Запомнить пароль", rememberPw) { rememberPw = it }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                 GhostButton("Отмена") { asking = null }
+                Spacer(Modifier.width(6.dp))
                 PrimaryButton("Подключиться", password.isNotEmpty()) {
-                    if (remember) vm.saveServer(s, password, true)
+                    if (rememberPw) vm.saveServer(s, password, true)
                     vm.connect(s, password)
                     asking = null
                 }
@@ -316,30 +839,33 @@ fun ApiDialog(vm: RelayViewModel, initial: ServerProfile, close: () -> Unit) {
     var base by remember { mutableStateOf(initial.api.baseUrl.ifBlank { "https://tooken.club/v1" }) }
     var model by remember { mutableStateOf(initial.api.model.ifBlank { "claude-sonnet-5-5" }) }
     var key by remember { mutableStateOf(vm.savedApiKey(initial)) }
-    var enabled by remember { mutableStateOf(initial.api.enabled) }
+    var enabled by remember { mutableStateOf(initial.api.enabled || initial.effectiveBackend() == "api") }
     var tokens by remember { mutableStateOf(initial.api.maxTokens.toString()) }
     var steps by remember { mutableStateOf(initial.api.maxSteps.toString()) }
-    val catalog = if (vm.current?.id == initial.id) vm.apiCatalog() else initial.api.models.map { ModelInfo(it,it,"") }
-    fun profile() = ApiProfile(enabled,base.trim().trimEnd('/'),model.trim(),(tokens.toIntOrNull() ?: 8192).coerceIn(256,65536),(steps.toIntOrNull() ?: 80).coerceIn(1,256),catalog.map { it.value })
+    val catalog = if (vm.current?.id == initial.id) vm.apiCatalog() else initial.api.models.map { ModelInfo(it, it, "") }
+    fun profile() = ApiProfile(enabled, base.trim().trimEnd('/'), model.trim(), (tokens.toIntOrNull() ?: 8192).coerceIn(256, 65536), (steps.toIntOrNull() ?: 80).coerceIn(1, 256), catalog.map { it.value })
     Sheet(close) {
-        Label("API · ${initial.name.ifBlank { initial.host }}", 19.sp, p.text, FontWeight.Medium)
+        Label("API · ${initial.name.ifBlank { initial.host }}", 18.sp, p.text, FontWeight.SemiBold)
         Spacer(Modifier.height(12.dp))
-        Column(Modifier.heightIn(max=520.dp).verticalScroll(rememberScrollState()), verticalArrangement=Arrangement.spacedBy(9.dp)) {
-            Check("API по умолчанию для сессий",enabled) { enabled = it }
-            Field(base,{ base = it },"Адрес API")
-            Field(key,{ key = it },"API-ключ",password=true)
-            Field(model,{ model = it },"Идентификатор модели")
+        Column(Modifier.heightIn(max = 520.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(9.dp)) {
+            Check("API по умолчанию для новых сессий", enabled) { enabled = it }
+            Field(base, { base = it }, "Адрес API (https://…/v1)")
+            Field(key, { key = it }, "API-ключ", password = true)
+            Field(model, { model = it }, "Идентификатор модели")
             val models = catalog.filterNot { it.value.contains("image") }
-            if (models.isNotEmpty()) Selector(modelLabel(models,model),models.map { it.value to modelLabel(models,it.value) }) { model = it }
-            Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                Field(tokens,{ tokens = it.filter(Char::isDigit).take(5) },"Токенов на ответ",number=true,modifier=Modifier.weight(1f))
-                Field(steps,{ steps = it.filter(Char::isDigit).take(3) },"Шагов",number=true,modifier=Modifier.weight(1f))
+            if (models.isNotEmpty()) Selector(modelLabel(models, model), models.map { it.value to modelLabel(models, it.value) }) { model = it }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Field(tokens, { tokens = it.filter(Char::isDigit).take(5) }, "Токенов на ответ", number = true, modifier = Modifier.weight(1f))
+                Field(steps, { steps = it.filter(Char::isDigit).take(3) }, "Шагов", number = true, modifier = Modifier.weight(1f))
             }
-            GhostButton(if (vm.apiChecking) "Проверяю…" else "Проверить и загрузить модели",p.accent) { vm.checkApi(initial,profile(),key) }
-            if (vm.apiError.isNotEmpty()) Label(vm.apiError,12.sp,p.red)
-            Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.End) {
-                GhostButton("Отмена",onClick=close)
-                PrimaryButton("Сохранить",base.isNotBlank() && model.isNotBlank()) { if (vm.saveApi(initial,profile(),key)) close() }
+            SecondaryPillButton(if (vm.apiChecking) "Проверяю…" else "Проверить и загрузить модели", Glyph.Spark, p.accent) {
+                vm.checkApi(initial, profile(), key)
+            }
+            if (vm.apiError.isNotEmpty()) Label(vm.apiError, 12.sp, p.red)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                GhostButton("Отмена", onClick = close)
+                Spacer(Modifier.width(6.dp))
+                PrimaryButton("Сохранить", base.isNotBlank() && model.isNotBlank()) { if (vm.saveApi(initial, profile(), key)) close() }
             }
         }
     }
@@ -348,16 +874,23 @@ fun ApiDialog(vm: RelayViewModel, initial: ServerProfile, close: () -> Unit) {
 @Composable
 fun Check(text: String, value: Boolean, onChange: (Boolean) -> Unit) {
     val p = LocalPalette.current
-    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).clickable { onChange(!value) }.padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable { onChange(!value) }.padding(vertical = 9.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
         val knob by animateFloatAsState(if (value) 1f else 0f, tween(180), label = "toggle")
-        Box(Modifier.width(36.dp).height(20.dp).clip(CircleShape).background(p.mix(p.line, p.accent, knob)), contentAlignment = Alignment.CenterStart) {
-            Box(Modifier.padding(start = (3 + 16 * knob).dp).size(14.dp).clip(CircleShape).background(if (value) Color.White else p.muted))
+        Box(
+            Modifier.width(38.dp).height(22.dp).clip(CircleShape).background(p.mix(p.line, p.accent, knob)),
+            contentAlignment = Alignment.CenterStart,
+        ) {
+            Box(Modifier.padding(start = (3 + 16 * knob).dp).size(16.dp).clip(CircleShape).background(if (value) Color.White else p.muted))
         }
         Spacer(Modifier.width(10.dp))
         Label(text, 14.sp, p.text)
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ServerDialog(vm: RelayViewModel, initial: ServerProfile, existing: Boolean, close: () -> Unit) {
     val p = LocalPalette.current
@@ -366,39 +899,67 @@ fun ServerDialog(vm: RelayViewModel, initial: ServerProfile, existing: Boolean, 
     var port by remember { mutableStateOf(initial.port.toString()) }
     var user by remember { mutableStateOf(initial.user) }
     var cwd by remember { mutableStateOf(initial.cwd) }
+    var defaultBackend by remember { mutableStateOf(initial.effectiveBackend()) }
     var password by remember { mutableStateOf("") }
-    var remember by remember { mutableStateOf(true) }
+    var rememberPw by remember { mutableStateOf(true) }
     Sheet(close) {
-        Label(if (existing) "Подключение" else "Новое подключение", 19.sp, p.text, FontWeight.Medium)
-        Spacer(Modifier.height(14.dp))
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Label(if (existing) "Настройки сервера" else "Новое подключение", 18.sp, p.text, FontWeight.SemiBold)
+        Spacer(Modifier.height(12.dp))
+        Column(Modifier.heightIn(max = 540.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Field(name, { name = it }, "Название")
             Field(host, { host = it.trim() }, "Адрес сервера")
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Field(user, { user = it.trim() }, "Пользователь", modifier = Modifier.weight(2f))
                 Field(port, { port = it.filter(Char::isDigit).take(5) }, "Порт", number = true, modifier = Modifier.weight(1f))
             }
-            Field(password, { password = it }, if (existing) "Пароль (оставь пустым, чтобы не менять)" else "Пароль", password = true)
+            Field(password, { password = it }, if (existing) "Пароль (пусто — не менять)" else "Пароль", password = true)
             Field(cwd, { cwd = it }, "Рабочая папка (~ — домашняя)")
-        }
-        Check("Запомнить пароль", remember) { remember = it }
-        if (existing && initial.fingerprint != null) {
-            Label("Ключ сервера: ${initial.fingerprint}", 11.sp, p.muted)
-            GhostButton("Забыть ключ (после переустановки сервера)", p.accent) {
-                vm.saveServer(initial.copy(fingerprint = null), null, false)
-                close()
+            Spacer(Modifier.height(2.dp))
+            Label("Агент по умолчанию", 12.5.sp, p.muted, FontWeight.Medium)
+            FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                for (b in BACKENDS) {
+                    val active = defaultBackend == b
+                    val tone = backendColor(p, b)
+                    Box(
+                        Modifier
+                            .clip(RoundedCornerShape(9.dp))
+                            .background(if (active) tone.copy(alpha = 0.18f) else p.base)
+                            .border(1.dp, if (active) tone else p.line, RoundedCornerShape(9.dp))
+                            .clickable { defaultBackend = b }
+                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                    ) {
+                        Label(backendShortLabel(b), 12.5.sp, if (active) tone else p.muted, FontWeight.Medium)
+                    }
+                }
             }
-        }
-        Spacer(Modifier.height(8.dp))
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            if (existing) GhostButton("Удалить", p.red) { vm.deleteServer(initial); close() }
-            Spacer(Modifier.weight(1f))
-            GhostButton("Отмена", onClick = close)
-            val profile = initial.copy(name = name.trim(), host = host, port = port.toIntOrNull() ?: 22, user = user.ifEmpty { "root" }, cwd = cwd.ifBlank { "~" })
-            PrimaryButton(if (existing) "Сохранить" else "Подключиться", host.isNotEmpty() && (existing || password.isNotEmpty())) {
-                vm.saveServer(profile, password.takeIf { it.isNotEmpty() }, remember)
-                if (!existing) vm.connect(profile, password)
-                close()
+            Check("Запомнить пароль", rememberPw) { rememberPw = it }
+            if (existing && initial.fingerprint != null) {
+                Label("Ключ сервера: ${initial.fingerprint}", 11.sp, p.muted)
+                GhostButton("Забыть ключ (после переустановки сервера)", p.accent) {
+                    vm.saveServer(initial.copy(fingerprint = null), null, false)
+                    close()
+                }
+            }
+            Spacer(Modifier.height(4.dp))
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                if (existing) GhostButton("Удалить", p.red) { vm.deleteServer(initial); close() }
+                Spacer(Modifier.weight(1f))
+                GhostButton("Отмена", onClick = close)
+                Spacer(Modifier.width(6.dp))
+                val profile = initial.copy(
+                    name = name.trim(),
+                    host = host,
+                    port = port.toIntOrNull() ?: 22,
+                    user = user.ifEmpty { "root" },
+                    cwd = cwd.ifBlank { "~" },
+                    defaultBackend = defaultBackend,
+                    api = initial.api.copy(enabled = defaultBackend == "api"),
+                )
+                PrimaryButton(if (existing) "Сохранить" else "Подключиться", host.isNotEmpty() && (existing || password.isNotEmpty())) {
+                    vm.saveServer(profile, password.takeIf { it.isNotEmpty() }, rememberPw)
+                    if (!existing) vm.connect(profile, password)
+                    close()
+                }
             }
         }
     }
@@ -408,16 +969,21 @@ fun ServerDialog(vm: RelayViewModel, initial: ServerProfile, existing: Boolean, 
 fun TrustDialog(request: TrustRequest, vm: RelayViewModel) {
     val p = LocalPalette.current
     Sheet({ vm.answerTrust(false) }) {
-        Label("Первое подключение", 19.sp, p.text, FontWeight.Medium)
+        Label("Первое подключение", 18.sp, p.text, FontWeight.SemiBold)
         Spacer(Modifier.height(8.dp))
-        Label("Сверь отпечаток ключа ${request.server} с тем, что показывает сервер (ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub). Изменившийся ключ потом не примется молча.", 13.sp, p.muted)
+        Label(
+            "Сверь отпечаток ключа ${request.server} с тем, что показывает сервер (ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub). Изменившийся ключ потом не примется молча.",
+            13.sp,
+            p.muted,
+        )
         Spacer(Modifier.height(12.dp))
-        Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(p.base).padding(12.dp)) {
+        Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(p.base).border(1.dp, p.line, RoundedCornerShape(12.dp)).padding(12.dp)) {
             Text(request.fingerprint, color = p.text, fontSize = 13.sp, fontFamily = FontFamily.Monospace)
         }
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(14.dp))
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
             GhostButton("Отмена") { vm.answerTrust(false) }
+            Spacer(Modifier.width(6.dp))
             PrimaryButton("Доверять") { vm.answerTrust(true) }
         }
     }
@@ -426,25 +992,41 @@ fun TrustDialog(request: TrustRequest, vm: RelayViewModel) {
 @Composable
 fun Notice(text: String, close: () -> Unit) {
     val p = LocalPalette.current
-    Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp).clip(RoundedCornerShape(10.dp)).background(p.accent.copy(alpha = 0.14f)).padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 6.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(p.subtleAccent)
+            .border(1.dp, p.accent.copy(alpha = 0.3f), RoundedCornerShape(12.dp))
+            .padding(horizontal = 13.dp, vertical = 9.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
         Label(text, 13.sp, p.text, modifier = Modifier.weight(1f))
         GhostButton("OK", p.accent, close)
     }
 }
 
-/** The previous start ended in a crash: show what happened and let the user copy it. */
 @Composable
 fun CrashCard(text: String, close: () -> Unit) {
     val p = LocalPalette.current
     val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
     var copied by remember { mutableStateOf(false) }
-    Column(Modifier.fillMaxWidth().padding(12.dp).clip(RoundedCornerShape(12.dp)).background(p.red.copy(alpha = 0.12f)).border(1.dp, p.red.copy(alpha = 0.4f), RoundedCornerShape(12.dp)).padding(14.dp)) {
-        Label("Прошлый запуск закончился ошибкой", 14.sp, p.text, FontWeight.Medium)
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(12.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .background(p.red.copy(alpha = 0.12f))
+            .border(1.dp, p.red.copy(alpha = 0.4f), RoundedCornerShape(14.dp))
+            .padding(14.dp),
+    ) {
+        Label("Прошлый запуск закончился ошибкой", 14.sp, p.text, FontWeight.SemiBold)
         Spacer(Modifier.height(4.dp))
         Label("Скопируй отчёт и пришли его в Relay — так ошибку можно будет исправить.", 13.sp, p.muted)
         Spacer(Modifier.height(8.dp))
         Label(text.lineSequence().take(4).joinToString("\n"), 11.sp, p.muted, maxLines = 4)
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(10.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             PrimaryButton(if (copied) "Скопировано" else "Скопировать отчёт") {
                 clipboard.setText(androidx.compose.ui.text.AnnotatedString(text))
@@ -455,7 +1037,7 @@ fun CrashCard(text: String, close: () -> Unit) {
     }
 }
 
-// --- sessions --------------------------------------------------------------------------
+// --- Sessions Screen -------------------------------------------------------------------
 
 fun dayGroup(time: Double): String {
     val midnight = Calendar.getInstance().apply { set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0) }.timeInMillis / 1000.0
@@ -491,21 +1073,33 @@ fun SessionsScreen(vm: RelayViewModel) {
     var renaming by remember { mutableStateOf<Session?>(null) }
     var moving by remember { mutableStateOf<Session?>(null) }
     var naming by remember { mutableStateOf<Pair<Folder?, Session?>?>(null) }
+    var locking by remember { mutableStateOf<Session?>(null) }
+    var agentsSheet by remember { mutableStateOf(false) }
+
     BackHandler { if (vm.demo) vm.leaveDemo() else vm.screen = Screen.Servers }
+
     Column(Modifier.fillMaxSize().background(p.side)) {
         val status = when (vm.link) {
             Link.Online -> "на связи"
             Link.Connecting -> "подключаемся…"
             Link.Off -> "нет связи"
         }
-        TopBar(server?.name?.ifEmpty { server.host } ?: "Сессии", status, onBack = { if (vm.demo) vm.leaveDemo() else vm.screen = Screen.Servers }) {
+        TopBar(
+            title = server?.name?.ifEmpty { server.host } ?: "Сессии",
+            subtitle = status,
+            link = vm.link,
+            onBack = { if (vm.demo) vm.leaveDemo() else vm.screen = Screen.Servers },
+        ) {
+            SecondaryPillButton("Агенты", Glyph.Terminal, p.accent, enabled = vm.link == Link.Online) { agentsSheet = true }
             IconButton(Icons.Default.Search, "Поиск") { searching = !searching; if (!searching) query = "" }
             IconButton(Icons.Default.Refresh, "Обновить") { vm.refresh() }
             IconButton(Icons.Default.Settings, "Настройки") { vm.screen = Screen.Settings }
         }
         if (vm.notice.isNotEmpty()) Notice(vm.notice) { vm.notice = "" }
         AnimatedVisibility(searching) {
-            Box(Modifier.padding(horizontal = 14.dp, vertical = 4.dp)) { Field(query, { query = it }, "Поиск по названию и папке") }
+            Box(Modifier.padding(horizontal = 12.dp, vertical = 6.dp)) {
+                Field(query, { query = it }, "Поиск по названию и папке")
+            }
         }
         if (vm.link == Link.Off && server != null) {
             Box(Modifier.padding(14.dp)) {
@@ -519,10 +1113,17 @@ fun SessionsScreen(vm: RelayViewModel) {
         val known = vm.folders.map { it.id }.toSet()
         val pinned = vm.sessions.filter { it.pinned > 0 && matches(it) }.sortedByDescending { it.pinned }
         val loose = vm.sessions.filter { it.pinned == 0.0 && it.folder !in known && matches(it) }
-        LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)) {
+
+        LazyColumn(
+            Modifier.weight(1f),
+            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
             if (pinned.isNotEmpty()) {
-                item(key = "h-pinned") { Heading("📌", "Закреплённые", pinned.size) }
-                items(pinned, key = { "p" + it.id }) { s -> SessionRow(vm, s, { renaming = s }, { moving = s }, Modifier.animateItem()) }
+                item(key = "h-pinned") { Heading(Glyph.Pin, "Закреплённые", pinned.size) }
+                items(pinned, key = { "p" + it.id }) { s ->
+                    SessionRow(vm, s, { renaming = s }, { moving = s }, { locking = s }, Modifier.animateItem())
+                }
             }
             for (folder in vm.folders) {
                 val inside = vm.sessions.filter { it.pinned == 0.0 && it.folder == folder.id && matches(it) }
@@ -532,8 +1133,14 @@ fun SessionsScreen(vm: RelayViewModel) {
                     FolderHeading(folder, inside.size, open, { vm.toggleFolder(folder) }, { naming = folder to null }, { vm.deleteFolder(folder) })
                 }
                 if (open) {
-                    if (inside.isEmpty()) item(key = "e-" + folder.id) { Label("Пусто — перенеси сюда сессию через «⋮»", 12.sp, p.muted, modifier = Modifier.padding(start = 40.dp, top = 2.dp, bottom = 6.dp)) }
-                    items(inside, key = { "s" + it.id }) { s -> SessionRow(vm, s, { renaming = s }, { moving = s }, Modifier.animateItem()) }
+                    if (inside.isEmpty()) {
+                        item(key = "e-" + folder.id) {
+                            Label("Пусто — перенеси сюда сессию через «⋮»", 12.sp, p.muted, modifier = Modifier.padding(start = 36.dp, top = 2.dp, bottom = 6.dp))
+                        }
+                    }
+                    items(inside, key = { "s" + it.id }) { s ->
+                        SessionRow(vm, s, { renaming = s }, { moving = s }, { locking = s }, Modifier.animateItem())
+                    }
                 }
             }
             var group = ""
@@ -543,53 +1150,156 @@ fun SessionsScreen(vm: RelayViewModel) {
                     group = heading
                     item(key = "d-$heading") { Heading(null, heading, 0) }
                 }
-                item(key = "l" + s.id) { SessionRow(vm, s, { renaming = s }, { moving = s }, Modifier.animateItem()) }
+                item(key = "l" + s.id) {
+                    SessionRow(vm, s, { renaming = s }, { moving = s }, { locking = s }, Modifier.animateItem())
+                }
             }
-            if (vm.sessions.isEmpty()) item {
-                Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
-                    when {
-                        vm.link == Link.Connecting || (vm.link == Link.Online && !vm.sessionsLoaded) -> Dots(p.muted)
-                        vm.link == Link.Online -> Label("Пока нет ни одной сессии", 13.sp, p.muted)
-                        else -> Label("Подключись, чтобы увидеть сессии", 13.sp, p.muted)
+            if (vm.sessions.isEmpty()) {
+                item {
+                    Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
+                        when {
+                            vm.link == Link.Connecting || (vm.link == Link.Online && !vm.sessionsLoaded) -> Dots(p.muted)
+                            vm.link == Link.Online -> Label("Пока нет ни одной сессии", 13.5.sp, p.muted)
+                            else -> Label("Подключись, чтобы увидеть сессии", 13.5.sp, p.muted)
+                        }
                     }
                 }
             }
         }
-        Row(Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Box(
-                Modifier.clip(RoundedCornerShape(12.dp)).border(1.dp, p.line, RoundedCornerShape(12.dp)).clickable(enabled = vm.link == Link.Online) { naming = null to null }
-                    .padding(horizontal = 16.dp, vertical = 13.dp)
-            ) { Label("+ Папка", 14.sp, p.text) }
-            PrimaryButton("Новая сессия", vm.link == Link.Online, Modifier.weight(1f)) { vm.newChat() }
+
+        Column(Modifier.fillMaxWidth().background(p.mix(p.rail, p.side, 0.55f))) {
+            HorizontalDivider(thickness = 1.dp, color = p.borderSubtle)
+            Row(Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(
+                    Modifier
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(p.surface)
+                        .border(1.dp, p.line, RoundedCornerShape(12.dp))
+                        .clickable(enabled = vm.link == Link.Online) { naming = null to null }
+                        .padding(horizontal = 15.dp, vertical = 11.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    VectorGlyph(Glyph.Folder, p.muted, size = 15.dp)
+                    Label("+ Папка", 14.sp, p.text, FontWeight.Medium)
+                }
+                PrimaryButton("Новая сессия", vm.link == Link.Online, Modifier.weight(1f)) { vm.newChat() }
+            }
         }
     }
+
+    if (agentsSheet) AgentsSheet(vm) { agentsSheet = false }
     renaming?.let { s ->
-        NameDialog("Название сессии", s.title, "Пусто — вернуть название от Claude", { renaming = null }) { vm.rename(s, it); renaming = null }
+        NameDialog("Название сессии", s.title, "Пусто — вернуть название от агента", { renaming = null }) {
+            vm.rename(s, it)
+            renaming = null
+        }
     }
     naming?.let { (folder, session) ->
         NameDialog(if (folder == null) "Новая папка" else "Папка", folder?.name ?: "", "Видна всем, кто подключается к серверу", { naming = null }) {
-            if (it.isNotBlank()) { if (folder == null) vm.createFolder(it, session) else vm.renameFolder(folder, it) }
+            if (it.isNotBlank()) {
+                if (folder == null) vm.createFolder(it, session) else vm.renameFolder(folder, it)
+            }
             naming = null
         }
     }
     moving?.let { s ->
         Sheet({ moving = null }) {
-            Label("Переместить в папку", 18.sp, p.text, FontWeight.Medium)
-            Spacer(Modifier.height(8.dp))
+            Label("Переместить в папку", 18.sp, p.text, FontWeight.SemiBold)
+            Spacer(Modifier.height(10.dp))
             for (f in vm.folders) {
-                MenuLine("📁  " + f.name, s.folder != f.id) { vm.moveTo(s, f.id); moving = null }
+                MenuLine(f.name, glyph = Glyph.Folder, enabled = s.folder != f.id) { vm.moveTo(s, f.id); moving = null }
             }
             if (s.folder.isNotEmpty()) MenuLine("Без папки") { vm.moveTo(s, ""); moving = null }
             HorizontalDivider(color = p.line, modifier = Modifier.padding(vertical = 6.dp))
             MenuLine("+ Новая папка…") { naming = null to s; moving = null }
         }
     }
+    locking?.let { s ->
+        SessionLockDialog(vm, s.id, currentlyLocked = s.locked, currentlyUnlocked = s.unlocked) { locking = null }
+    }
 }
 
 @Composable
-fun MenuLine(text: String, enabled: Boolean = true, color: Color = LocalPalette.current.text, onClick: () -> Unit) {
-    Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).clickable(enabled = enabled, onClick = onClick).padding(horizontal = 8.dp, vertical = 12.dp)) {
-        Label(text, 15.sp, if (enabled) color else LocalPalette.current.muted)
+fun SessionLockDialog(vm: RelayViewModel, sid: String, currentlyLocked: Boolean, currentlyUnlocked: Boolean, close: () -> Unit) {
+    val p = LocalPalette.current
+    var currentPw by remember { mutableStateOf("") }
+    var newPw by remember { mutableStateOf("") }
+    var confirmPw by remember { mutableStateOf("") }
+    var localError by remember { mutableStateOf("") }
+
+    Sheet(close) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+            VectorGlyph(if (currentlyLocked) Glyph.Lock else Glyph.ShieldLock, p.amber, size = 22.dp)
+            Label(if (currentlyLocked) "Защита сессии паролем" else "Защитить сессию паролем", 18.sp, p.text, FontWeight.SemiBold)
+        }
+        Spacer(Modifier.height(6.dp))
+        Label(
+            if (currentlyLocked) "Введи текущий пароль, чтобы сменить или полностью снять защиту с этой сессии."
+            else "История и отправка сообщений будут скрыты до ввода пароля на каждом устройстве.",
+            12.5.sp,
+            p.muted,
+        )
+        Spacer(Modifier.height(12.dp))
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (currentlyLocked && currentlyUnlocked) {
+                SecondaryPillButton("Заблокировать сейчас на этом устройстве", Glyph.Lock, p.amber) {
+                    vm.relockSession(sid)
+                    close()
+                }
+                HorizontalDivider(color = p.borderSubtle, modifier = Modifier.padding(vertical = 4.dp))
+            }
+            if (currentlyLocked) {
+                Field(currentPw, { currentPw = it; localError = "" }, "Текущий пароль сессии", password = true)
+            }
+            Field(newPw, { newPw = it; localError = "" }, if (currentlyLocked) "Новый пароль (от 4 символов)" else "Пароль сессии (от 4 символов)", password = true)
+            Field(confirmPw, { confirmPw = it; localError = "" }, "Повтори пароль", password = true)
+            if (localError.isNotEmpty()) Label(localError, 12.sp, p.red)
+        }
+        Spacer(Modifier.height(14.dp))
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            if (currentlyLocked) {
+                GhostButton("Снять пароль", p.red) {
+                    if (currentPw.isEmpty()) {
+                        localError = "Введи текущий пароль, чтобы снять защиту."
+                    } else {
+                        vm.lockSession(sid, password = "", currentPassword = currentPw, remove = true)
+                        close()
+                    }
+                }
+            }
+            Spacer(Modifier.weight(1f))
+            GhostButton("Отмена", onClick = close)
+            Spacer(Modifier.width(6.dp))
+            PrimaryButton(if (currentlyLocked) "Сменить" else "Защитить", enabled = newPw.isNotEmpty()) {
+                when {
+                    currentlyLocked && currentPw.isEmpty() -> localError = "Укажи текущий пароль."
+                    newPw.length < 4 -> localError = "Пароль должен быть не короче 4 символов."
+                    newPw != confirmPw -> localError = "Пароли не совпадают."
+                    else -> {
+                        vm.lockSession(sid, password = newPw, currentPassword = currentPw, remove = false)
+                        close()
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun MenuLine(text: String, glyph: Glyph? = null, enabled: Boolean = true, color: Color = LocalPalette.current.text, onClick: () -> Unit) {
+    val p = LocalPalette.current
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        if (glyph != null) VectorGlyph(glyph, if (enabled) p.accent else p.muted, size = 16.dp)
+        Label(text, 15.sp, if (enabled) color else p.muted)
     }
 }
 
@@ -598,26 +1308,36 @@ fun NameDialog(title: String, initial: String, hint: String, close: () -> Unit, 
     val p = LocalPalette.current
     var text by remember { mutableStateOf(initial) }
     Sheet(close) {
-        Label(title, 18.sp, p.text, FontWeight.Medium)
+        Label(title, 18.sp, p.text, FontWeight.SemiBold)
         Spacer(Modifier.height(4.dp))
-        Label(hint, 12.sp, p.muted)
+        Label(hint, 12.5.sp, p.muted)
         Spacer(Modifier.height(12.dp))
         Field(text, { text = it }, "Название")
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(14.dp))
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
             GhostButton("Отмена", onClick = close)
+            Spacer(Modifier.width(6.dp))
             PrimaryButton("Готово") { done(text) }
         }
     }
 }
 
 @Composable
-fun Heading(icon: String?, text: String, count: Int) {
+fun Heading(glyph: Glyph?, text: String, count: Int) {
     val p = LocalPalette.current
-    Row(Modifier.fillMaxWidth().padding(start = 10.dp, top = 14.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-        if (icon != null) { Text(icon, fontSize = 11.sp); Spacer(Modifier.width(6.dp)) }
-        Label(text.uppercase(), 11.sp, p.muted, FontWeight.Medium)
-        if (count > 0) { Spacer(Modifier.width(6.dp)); Label(count.toString(), 11.sp, p.muted.copy(alpha = 0.8f)) }
+    Row(
+        Modifier.fillMaxWidth().padding(start = 8.dp, top = 12.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (glyph != null) {
+            VectorGlyph(glyph, p.accent, size = 13.dp)
+            Spacer(Modifier.width(6.dp))
+        }
+        Label(text.uppercase(), 11.sp, p.muted, FontWeight.SemiBold)
+        if (count > 0) {
+            Spacer(Modifier.width(6.dp))
+            Label(count.toString(), 11.sp, p.muted.copy(alpha = 0.8f))
+        }
     }
 }
 
@@ -629,18 +1349,23 @@ fun FolderHeading(folder: Folder, count: Int, open: Boolean, toggle: () -> Unit,
     val turn by animateFloatAsState(if (open) 90f else 0f, tween(180), label = "chevron")
     Box {
         Row(
-            Modifier.fillMaxWidth().padding(top = 10.dp).clip(RoundedCornerShape(9.dp)).combinedClickable(onClick = toggle, onLongClick = { menu = true })
+            Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp)
+                .clip(RoundedCornerShape(11.dp))
+                .combinedClickable(onClick = toggle, onLongClick = { menu = true })
                 .padding(horizontal = 6.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Icon(Icons.Default.KeyboardArrowRight, null, tint = p.muted, modifier = Modifier.size(18.dp).rotate(turn))
-            Text(if (open) "📂" else "📁", fontSize = 14.sp)
+            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = p.muted, modifier = Modifier.size(18.dp).rotate(turn))
+            Spacer(Modifier.width(4.dp))
+            VectorGlyph(if (open) Glyph.FolderOpen else Glyph.Folder, p.accent, size = 16.dp)
             Spacer(Modifier.width(8.dp))
-            Label(folder.name, 14.sp, p.text, FontWeight.Medium, 1, Modifier.weight(1f, fill = false))
+            Label(folder.name, 14.sp, p.text, FontWeight.SemiBold, 1, Modifier.weight(1f, fill = false))
             Spacer(Modifier.width(8.dp))
             Label(count.toString(), 12.sp, p.muted)
         }
-        DropdownMenu(menu, { menu = false }, Modifier.background(p.surface)) {
+        DropdownMenu(menu, { menu = false }, Modifier.background(p.elevated)) {
             DropdownMenuItem({ Label("Переименовать папку") }, { menu = false; rename() })
             DropdownMenuItem({ Label("Удалить папку", color = p.red) }, { menu = false; delete() })
         }
@@ -649,51 +1374,134 @@ fun FolderHeading(folder: Folder, count: Int, open: Boolean, toggle: () -> Unit,
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun SessionRow(vm: RelayViewModel, s: Session, rename: () -> Unit, move: () -> Unit, modifier: Modifier = Modifier) {
+fun SessionRow(
+    vm: RelayViewModel,
+    s: Session,
+    rename: () -> Unit,
+    move: () -> Unit,
+    lockAction: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     val p = LocalPalette.current
     var menu by remember { mutableStateOf(false) }
     var confirm by remember { mutableStateOf(false) }
     val busy = vm.chats[s.id]?.let { it.version >= 0 && it.transcript.busy } == true || s.id in vm.running
     val selected = vm.selected == s.id
+    val shape = RoundedCornerShape(14.dp)
+    val lockedGate = s.isLockedGate()
+
     Box(modifier) {
         Row(
-            Modifier.fillMaxWidth().padding(vertical = 1.dp).clip(RoundedCornerShape(10.dp))
-                .background(if (selected) p.mix(p.side, p.line, 0.9f) else Color.Transparent)
+            Modifier
+                .fillMaxWidth()
+                .clip(shape)
+                .background(if (selected) p.elevated else p.surface.copy(alpha = 0.72f))
+                .border(
+                    width = 1.dp,
+                    color = when {
+                        selected -> p.accent.copy(alpha = 0.55f)
+                        lockedGate -> p.amber.copy(alpha = 0.35f)
+                        else -> p.borderSubtle
+                    },
+                    shape = shape,
+                )
                 .combinedClickable(onClick = { vm.open(s) }, onLongClick = { menu = true })
-                .padding(start = 12.dp, top = 9.dp, bottom = 9.dp),
+                .padding(start = if (selected || busy) 0.dp else 12.dp, top = 10.dp, bottom = 10.dp, end = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Column(Modifier.weight(1f)) {
-                Label(s.title, 15.sp, if (selected) p.text else p.mix(p.text, p.muted, 0.2f), maxLines = 1)
-                if (busy) Label("работает · ${folderName(s.cwd)}", 12.sp, p.accent, maxLines = 1)
-                else Label("${folderName(s.cwd)} · ${relative(s.modified)}", 12.sp, p.muted, maxLines = 1)
+            if (selected || busy) {
+                Box(
+                    Modifier
+                        .padding(start = 4.dp, end = 8.dp)
+                        .width(3.dp)
+                        .height(30.dp)
+                        .clip(CircleShape)
+                        .background(if (busy) p.green else p.accent),
+                )
             }
-            if (busy) Dots(p.accent)
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (s.locked) {
+                        VectorGlyph(
+                            glyph = if (s.unlocked) Glyph.Unlock else Glyph.Lock,
+                            tint = if (s.unlocked) p.accent else p.amber,
+                            size = 14.dp,
+                        )
+                    }
+                    Label(
+                        text = if (lockedGate && s.title.isBlank()) "Защищённая сессия" else s.title,
+                        size = 15.sp,
+                        color = if (selected) p.text else p.mix(p.text, p.muted, 0.14f),
+                        weight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                        maxLines = 1,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    if (s.backend in setOf("codex", "agy", "api")) {
+                        BackendBadge(s.backend, compact = true)
+                    }
+                }
+                Spacer(Modifier.height(2.dp))
+                when {
+                    lockedGate -> Label("Защищённая сессия · нужен пароль", 12.sp, p.amber, maxLines = 1)
+                    busy -> Label("работает · ${folderName(s.cwd)}", 12.sp, p.accent, maxLines = 1)
+                    else -> Label("${folderName(s.cwd)} · ${relative(s.modified)}", 12.sp, p.muted, maxLines = 1)
+                }
+            }
+            if (busy) {
+                Dots(p.accent)
+                Spacer(Modifier.width(4.dp))
+            }
             IconButton(Icons.Default.MoreVert, "Меню") { menu = true }
         }
-        DropdownMenu(menu, { menu = false }, Modifier.background(p.surface)) {
-            DropdownMenuItem({ Label(if (s.pinned > 0) "Открепить" else "Закрепить сверху") }, { menu = false; vm.pin(s, s.pinned == 0.0) })
-            DropdownMenuItem({ Label("Переименовать") }, { menu = false; rename() })
-            DropdownMenuItem({ Label("Переместить в папку") }, { menu = false; move() })
+
+        DropdownMenu(menu, { menu = false }, Modifier.background(p.elevated)) {
+            if (!s.locked) {
+                DropdownMenuItem({ Label("Защитить паролем") }, { menu = false; lockAction() })
+            } else {
+                if (s.unlocked) {
+                    DropdownMenuItem({ Label("Заблокировать сейчас", color = p.amber) }, { menu = false; vm.relockSession(s.id) })
+                } else {
+                    DropdownMenuItem({ Label("Разблокировать…", color = p.accent) }, { menu = false; vm.open(s) })
+                }
+                DropdownMenuItem({ Label("Сменить или снять пароль") }, { menu = false; lockAction() })
+            }
             HorizontalDivider(color = p.line)
-            DropdownMenuItem({ Label("Удалить сессию", color = p.red) }, { menu = false; confirm = true })
+            if (!lockedGate) {
+                DropdownMenuItem({ Label(if (s.pinned > 0) "Открепить" else "Закрепить сверху") }, { menu = false; vm.pin(s, s.pinned == 0.0) })
+                DropdownMenuItem({ Label("Переименовать") }, { menu = false; rename() })
+                DropdownMenuItem({ Label("Переместить в папку") }, { menu = false; move() })
+                HorizontalDivider(color = p.line)
+            }
+            DropdownMenuItem(
+                text = { Label("Удалить сессию", color = if (s.locked) p.muted else p.red) },
+                onClick = {
+                    menu = false
+                    if (s.locked) {
+                        vm.notice = "Сессия защищена паролем — сначала сними пароль, чтобы удалить её."
+                    } else {
+                        confirm = true
+                    }
+                },
+            )
         }
     }
+
     if (confirm) {
         Sheet({ confirm = false }) {
-            Label("Удалить «${s.title}»?", 17.sp, p.text, FontWeight.Medium)
+            Label("Удалить «${s.title}»?", 18.sp, p.text, FontWeight.SemiBold)
             Spacer(Modifier.height(6.dp))
             Label("История этой сессии будет удалена с сервера.", 13.sp, p.muted)
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(14.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                 GhostButton("Отмена") { confirm = false }
-                GhostButton("Удалить", p.red) { vm.delete(s); confirm = false }
+                Spacer(Modifier.width(6.dp))
+                PrimaryButton("Удалить") { vm.delete(s); confirm = false }
             }
         }
     }
 }
 
-// --- chat ------------------------------------------------------------------------------
+// --- Chat Screen -----------------------------------------------------------------------
 
 sealed interface Item {
     data class Text(val index: Int, val message: Message) : Item
@@ -711,79 +1519,336 @@ fun timeline(messages: List<Message>): List<Item> {
             while (i < messages.size && (messages[i].role == "tool" || messages[i].role == "tool_result")) i++
             out.add(Item.Actions(start, messages.subList(start, i).toList()))
         } else {
-            if (m.text.isNotBlank() || m.images > 0) out.add(Item.Text(i, m.copy()))
+            if (m.text.isNotBlank() || m.images > 0 || m.files.isNotEmpty()) out.add(Item.Text(i, m.copy()))
             i++
         }
     }
     return out
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ChatScreen(vm: RelayViewModel) {
     val p = LocalPalette.current
     val chat = vm.chat() ?: run { vm.screen = Screen.Sessions; return }
     BackHandler { vm.screen = Screen.Sessions }
+
+    var lockDialog by remember { mutableStateOf(false) }
+    var agentsSheet by remember { mutableStateOf(false) }
+
     val version = chat.version
     val items = remember(version, chat.sid) { timeline(chat.transcript.messages) }
     val busy = chat.transcript.busy
+    val lockedGate = chat.isLockedGate()
     val list = rememberLazyListState()
+
     LaunchedEffect(items.size, version) {
-        if (items.isNotEmpty()) list.animateScrollToItem(items.size + 1)
+        if (items.isNotEmpty() && !lockedGate) list.animateScrollToItem(items.size + 1)
     }
+
     Column(Modifier.fillMaxSize()) {
         val folder = vm.sessions.firstOrNull { it.id == chat.sid }?.folder?.let { f -> vm.folders.firstOrNull { it.id == f }?.name }
-        TopBar(chat.title, listOfNotNull(folder?.let { "📂 $it" }, folderName(chat.cwd)).joinToString(" · "), onBack = { vm.screen = Screen.Sessions })
-        LazyColumn(Modifier.weight(1f), state = list, contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)) {
-            if (chat.loading) item { Row(Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) { Dots(p.accent); Spacer(Modifier.width(8.dp)); Label("Открываем разговор", 13.sp, p.muted) } }
-            if (items.isEmpty() && !chat.loading) item {
-                Column(Modifier.fillMaxWidth().padding(top = 80.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Label("С чего начнём?", 24.sp, p.text, FontWeight.Medium)
-                    Spacer(Modifier.height(8.dp))
-                    Label("Папка ${folderName(chat.cwd)}", 13.sp, p.muted)
-                }
+        TopBar(
+            title = if (lockedGate) "Защищённая сессия" else chat.title,
+            subtitle = listOfNotNull(folder, folderName(chat.cwd)).joinToString(" · "),
+            link = vm.link,
+            onBack = { vm.screen = Screen.Sessions },
+        ) {
+            BackendBadge(chat.activeBackend()) { agentsSheet = true }
+            GlyphButton(
+                glyph = if (chat.locked && !chat.unlocked) Glyph.Lock else if (chat.locked) Glyph.Unlock else Glyph.Lock,
+                hint = "Защита паролем",
+                tint = if (chat.locked) p.amber else p.muted,
+                highlighted = chat.locked,
+            ) {
+                lockDialog = true
             }
-            items(items, key = { when (it) { is Item.Text -> "m${it.index}"; is Item.Actions -> "a${it.start}" } }) { item ->
-                Box(Modifier.animateItem()) {
-                    when (item) {
-                        is Item.Text -> if (item.message.role == "user") UserBubble(item.message) else AssistantText(item.message, busy && item.index == chat.transcript.messages.lastIndex) { path -> vm.download(path, chat.cwd) }
-                        is Item.Actions -> ActionsGroup(item, busy && item.start + item.messages.size == chat.transcript.messages.size)
-                    }
-                }
-            }
-            item(key = "status") {
-                Column {
-                    AnimatedVisibility(busy, enter = fadeIn(), exit = fadeOut()) {
-                        Row(Modifier.padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+        }
+        if (vm.notice.isNotEmpty()) Notice(vm.notice) { vm.notice = "" }
+
+        if (lockedGate) {
+            LockedSessionCard(vm, chat, Modifier.weight(1f))
+        } else {
+            LazyColumn(
+                Modifier.weight(1f),
+                state = list,
+                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
+            ) {
+                if (chat.loading) {
+                    item {
+                        Row(Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
                             Dots(p.accent)
-                            Spacer(Modifier.width(10.dp))
-                            Label(chat.transcript.status.ifEmpty { "Работает" }, 13.sp, p.muted)
+                            Spacer(Modifier.width(8.dp))
+                            Label("Открываем разговор", 13.sp, p.muted)
                         }
                     }
-                    if (chat.transcript.error.isNotEmpty()) {
-                        Box(Modifier.fillMaxWidth().padding(vertical = 6.dp).clip(RoundedCornerShape(10.dp)).background(p.red.copy(alpha = 0.12f)).padding(12.dp)) {
-                            Label(chat.transcript.error, 13.sp, p.text)
+                }
+                if (items.isEmpty() && !chat.loading) {
+                    item {
+                        ChatEmptyState(vm, chat)
+                    }
+                }
+                items(items, key = { when (it) { is Item.Text -> "m${it.index}"; is Item.Actions -> "a${it.start}" } }) { item ->
+                    Box(Modifier.animateItem()) {
+                        when (item) {
+                            is Item.Text -> if (item.message.role == "user") UserBubble(item.message) else AssistantText(item.message, busy && item.index == chat.transcript.messages.lastIndex) { path -> vm.download(path, chat.cwd) }
+                            is Item.Actions -> ActionsGroup(item, busy && item.start + item.messages.size == chat.transcript.messages.size)
                         }
                     }
-                    Spacer(Modifier.height(8.dp))
+                }
+                item(key = "status") {
+                    Column {
+                        AnimatedVisibility(busy, enter = fadeIn(), exit = fadeOut()) {
+                            Row(Modifier.padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Dots(p.accent)
+                                Spacer(Modifier.width(10.dp))
+                                Label(chat.transcript.status.ifEmpty { "Работает" }, 13.sp, p.muted)
+                            }
+                        }
+                        if (chat.transcript.error.isNotEmpty()) {
+                            Box(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 6.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(p.red.copy(alpha = 0.12f))
+                                    .border(1.dp, p.red.copy(alpha = 0.35f), RoundedCornerShape(12.dp))
+                                    .padding(12.dp),
+                            ) {
+                                Label(chat.transcript.error, 13.sp, p.text)
+                            }
+                        }
+                        Spacer(Modifier.height(8.dp))
+                    }
+                }
+            }
+            chat.permissions.firstOrNull()?.let { PermissionCard(it, vm) }
+            MissingCliBanner(vm, chat.activeBackend())
+            Composer(vm, chat, onOpenAgents = { agentsSheet = true })
+        }
+    }
+
+    if (lockDialog) {
+        SessionLockDialog(vm, chat.sid, currentlyLocked = chat.locked, currentlyUnlocked = chat.unlocked) { lockDialog = false }
+    }
+    if (agentsSheet) {
+        AgentsSheet(vm) { agentsSheet = false }
+    }
+}
+
+@Composable
+fun LockedSessionCard(vm: RelayViewModel, chat: Chat, modifier: Modifier = Modifier) {
+    val p = LocalPalette.current
+    var password by remember(chat.sid) { mutableStateOf("") }
+    Box(modifier.fillMaxWidth().padding(20.dp), contentAlignment = Alignment.Center) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .widthIn(max = 420.dp)
+                .clip(RoundedCornerShape(22.dp))
+                .background(p.surface)
+                .border(1.dp, p.amber.copy(alpha = 0.45f), RoundedCornerShape(22.dp))
+                .padding(24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Box(
+                Modifier
+                    .size(58.dp)
+                    .clip(CircleShape)
+                    .background(p.amber.copy(alpha = 0.14f))
+                    .border(1.dp, p.amber.copy(alpha = 0.35f), CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                VectorGlyph(Glyph.ShieldLock, p.amber, size = 30.dp)
+            }
+            Spacer(Modifier.height(16.dp))
+            Label("Сессия защищена паролем", 19.sp, p.text, FontWeight.SemiBold)
+            Spacer(Modifier.height(6.dp))
+            Label(
+                "История скрыта на сервере. Введи пароль сессии, чтобы открыть сообщения и продолжить разговор.",
+                13.sp,
+                p.muted,
+            )
+            Spacer(Modifier.height(16.dp))
+            Field(
+                value = password,
+                onChange = { password = it; chat.lockError = "" },
+                hint = "Пароль сессии",
+                password = true,
+            )
+            if (chat.lockError.isNotEmpty()) {
+                Spacer(Modifier.height(8.dp))
+                Label(chat.lockError, 12.5.sp, p.red)
+            }
+            Spacer(Modifier.height(14.dp))
+            PrimaryButton(
+                text = if (chat.unlocking) "Проверяем…" else "Разблокировать",
+                enabled = password.isNotEmpty() && !chat.unlocking,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                vm.unlockSession(chat.sid, password)
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun ChatEmptyState(vm: RelayViewModel, chat: Chat) {
+    val p = LocalPalette.current
+    val active = chat.activeBackend()
+    Column(
+        Modifier.fillMaxWidth().padding(top = 36.dp, bottom = 16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Box(
+            Modifier
+                .size(50.dp)
+                .clip(RoundedCornerShape(15.dp))
+                .background(p.subtleAccent)
+                .border(1.dp, p.accent.copy(alpha = 0.3f), RoundedCornerShape(15.dp)),
+            contentAlignment = Alignment.Center,
+        ) {
+            VectorGlyph(Glyph.RelayMark, backendColor(p, active), size = 26.dp)
+        }
+        Spacer(Modifier.height(14.dp))
+        Label("С чего начнём?", 23.sp, p.text, FontWeight.SemiBold)
+        Spacer(Modifier.height(6.dp))
+        Row(
+            Modifier
+                .clip(RoundedCornerShape(8.dp))
+                .background(p.side)
+                .border(1.dp, p.borderSubtle, RoundedCornerShape(8.dp))
+                .padding(horizontal = 10.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            VectorGlyph(Glyph.Folder, p.muted, size = 13.dp)
+            Label("Папка ${folderName(chat.cwd)}", 12.5.sp, p.muted, maxLines = 1)
+        }
+        Spacer(Modifier.height(16.dp))
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            for (b in BACKENDS) {
+                val chosen = active == b
+                val tone = backendColor(p, b)
+                Box(
+                    Modifier
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(if (chosen) tone.copy(alpha = 0.18f) else p.surface)
+                        .border(1.dp, if (chosen) tone.copy(alpha = 0.6f) else p.borderSubtle, RoundedCornerShape(10.dp))
+                        .clickable { vm.setBackend(chat, b) }
+                        .padding(horizontal = 11.dp, vertical = 6.dp),
+                ) {
+                    Label(backendShortLabel(b), 12.sp, if (chosen) tone else p.muted, FontWeight.SemiBold)
                 }
             }
         }
-        chat.permissions.firstOrNull()?.let { PermissionCard(it, vm) }
-        Composer(vm, chat)
+        Spacer(Modifier.height(18.dp))
+        val starters = listOf(
+            "Разобрать архитектуру проекта",
+            "Найти ошибку и предложить фикс",
+            "Проверить git status и запустить тесты",
+        )
+        Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+            for (prompt in starters) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(p.surface.copy(alpha = 0.7f))
+                        .border(1.dp, p.borderSubtle, RoundedCornerShape(12.dp))
+                        .clickable { chat.draft = prompt }
+                        .padding(horizontal = 12.dp, vertical = 9.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    VectorGlyph(Glyph.Spark, p.accent, size = 14.dp)
+                    Label(prompt, 13.sp, p.text, maxLines = 1)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun MissingCliBanner(vm: RelayViewModel, activeBackend: String) {
+    if (vm.link != Link.Online || !vm.backendsKnown || activeBackend !in CLI_AGENTS) return
+    val status = vm.backendsStatus[activeBackend] ?: return
+    if (status.installed) return
+    val p = LocalPalette.current
+    val installing = vm.installingAgents[activeBackend] == true
+    val msg = vm.agentMessages[activeBackend].orEmpty()
+
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 10.dp, vertical = 4.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .background(p.elevated)
+            .border(1.dp, p.amber.copy(alpha = 0.45f), RoundedCornerShape(14.dp))
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        VectorGlyph(Glyph.Download, p.amber, size = 20.dp)
+        Column(Modifier.weight(1f)) {
+            Label("На сервере не установлен ${backendLabel(activeBackend)}", 13.sp, p.text, FontWeight.SemiBold, maxLines = 1)
+            Label(
+                if (installing) msg.ifBlank { "Устанавливаем на сервере…" }
+                else "Установи официальный CLI в 1 нажатие прямо по SSH.",
+                11.5.sp,
+                p.muted,
+                maxLines = 2,
+            )
+        }
+        if (installing) {
+            Box(
+                Modifier
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(p.amber.copy(alpha = 0.16f))
+                    .border(1.dp, p.amber.copy(alpha = 0.35f), RoundedCornerShape(10.dp))
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+            ) {
+                Label("Установка…", 12.5.sp, p.amber, FontWeight.SemiBold)
+            }
+        } else {
+            PrimaryButton("Установить ${backendShortLabel(activeBackend)}") {
+                vm.installAgent(activeBackend, "install")
+            }
+        }
     }
 }
 
 @Composable
 fun UserBubble(m: Message) {
     val p = LocalPalette.current
+    val bubbleShape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp, bottomEnd = 6.dp, bottomStart = 20.dp)
     Box(Modifier.fillMaxWidth().padding(vertical = 6.dp), contentAlignment = Alignment.CenterEnd) {
         Column(
-            Modifier.widthIn(max = 320.dp).clip(RoundedCornerShape(16.dp)).background(p.mix(p.surface, p.accent, 0.08f))
-                .border(1.dp, p.mix(p.line, p.accent, 0.14f), RoundedCornerShape(16.dp)).padding(horizontal = 14.dp, vertical = 10.dp)
+            Modifier
+                .widthIn(max = 324.dp)
+                .clip(bubbleShape)
+                .background(p.mix(p.surface, p.accent, 0.12f))
+                .border(1.dp, p.mix(p.line, p.accent, 0.28f), bubbleShape)
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             if (m.text.isNotBlank()) Text(m.text, color = p.text, fontSize = 15.sp)
-            if (m.images > 0) Label("🖼 Изображений: ${m.images}", 12.sp, p.muted)
-            for (f in m.files) Label("📎 $f", 12.sp, p.muted, maxLines = 1)
+            if (m.images > 0) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                    VectorGlyph(Glyph.Image, p.accent, size = 13.dp)
+                    Label("Изображений: ${m.images}", 12.sp, p.muted)
+                }
+            }
+            for (f in m.files) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                    VectorGlyph(Glyph.Paperclip, p.accent, size = 13.dp)
+                    Label(f, 12.sp, p.muted, maxLines = 1)
+                }
+            }
         }
     }
 }
@@ -793,18 +1858,27 @@ fun AssistantText(m: Message, streaming: Boolean = false, onFile: ((String) -> U
     val p = LocalPalette.current
     Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
         MarkdownText(m.text, p, Modifier.fillMaxWidth(), streaming, onFile)
-        // Files Claude mentioned (a built mod, a log): one tap to download them to the phone.
         val files = remember(m.text, streaming) { if (streaming) emptyList() else mentionedFiles(m.text) }
         if (onFile != null && files.isNotEmpty()) {
             Column(Modifier.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 for (path in files) {
-                    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(p.side).border(1.dp, p.line, RoundedCornerShape(10.dp))
-                        .clickable { onFile(path) }.padding(horizontal = 12.dp, vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(p.side)
+                            .border(1.dp, p.line, RoundedCornerShape(12.dp))
+                            .clickable { onFile(path) }
+                            .padding(horizontal = 12.dp, vertical = 9.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        VectorGlyph(Glyph.Download, p.accent, size = 18.dp)
                         Column(Modifier.weight(1f)) {
                             Label(path.substringAfterLast('/'), 13.5.sp, p.text, FontWeight.Medium, maxLines = 1)
                             Label(path.substringBeforeLast('/', ""), 11.sp, p.muted, maxLines = 1)
                         }
-                        Label("Скачать", 13.sp, p.accent, FontWeight.Medium)
+                        Label("Скачать", 13.sp, p.accent, FontWeight.SemiBold)
                     }
                 }
             }
@@ -815,22 +1889,43 @@ fun AssistantText(m: Message, streaming: Boolean = false, onFile: ((String) -> U
 @Composable
 fun ActionsGroup(item: Item.Actions, running: Boolean) {
     val p = LocalPalette.current
-    // The live group stays open so you can follow along; finished ones fold into one line.
     var open by rememberSaveable(item.start) { mutableStateOf(running) }
     LaunchedEffect(running) { if (running) open = true }
     val calls = item.messages.filter { it.role == "tool" }
     val failed = item.messages.any { it.role == "tool_result" && it.failed }
     val turn by animateFloatAsState(if (open) 90f else 0f, tween(200), label = "turn")
+    val shape = RoundedCornerShape(14.dp)
+
     Column(
-        Modifier.fillMaxWidth().padding(vertical = 6.dp).clip(RoundedCornerShape(12.dp)).background(p.surface)
-            .border(1.dp, if (failed) p.red.copy(alpha = 0.5f) else p.line, RoundedCornerShape(12.dp)).animateContentSize(tween(240))
+        Modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp)
+            .clip(shape)
+            .background(p.surface)
+            .border(1.dp, if (failed) p.red.copy(alpha = 0.5f) else p.line, shape)
+            .animateContentSize(tween(240)),
     ) {
-        Row(Modifier.fillMaxWidth().clickable { open = !open }.padding(horizontal = 12.dp, vertical = 11.dp), verticalAlignment = Alignment.CenterVertically) {
-            if (running) { Dots(p.accent); Spacer(Modifier.width(8.dp)) }
+        Row(
+            Modifier.fillMaxWidth().clickable { open = !open }.padding(horizontal = 12.dp, vertical = 11.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (running) {
+                Dots(p.accent)
+                Spacer(Modifier.width(8.dp))
+            } else {
+                VectorGlyph(Glyph.Terminal, if (failed) p.red else p.accent, size = 16.dp)
+                Spacer(Modifier.width(8.dp))
+            }
             val count = calls.size
             val word = when { count % 10 == 1 && count % 100 != 11 -> "действие"; count % 10 in 2..4 && count % 100 !in 12..14 -> "действия"; else -> "действий" }
-            Label("Действия · $count $word" + if (failed) " · есть ошибки" else "", 13.sp, if (failed) p.red else p.muted, modifier = Modifier.weight(1f))
-            Icon(Icons.Default.KeyboardArrowRight, null, tint = p.muted, modifier = Modifier.size(20.dp).rotate(turn))
+            Label(
+                "Действия · $count $word" + if (failed) " · есть ошибки" else "",
+                13.sp,
+                if (failed) p.red else p.muted,
+                FontWeight.Medium,
+                modifier = Modifier.weight(1f),
+            )
+            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = p.muted, modifier = Modifier.size(20.dp).rotate(turn))
         }
         AnimatedVisibility(open, enter = expandVertically(tween(240)) + fadeIn(tween(240)), exit = shrinkVertically(tween(200)) + fadeOut(tween(160))) {
             Column(Modifier.padding(start = 12.dp, end = 12.dp, bottom = 10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -847,13 +1942,26 @@ fun ActionsGroup(item: Item.Actions, running: Boolean) {
 fun ToolCall(call: Message, result: Message?, running: Boolean = false) {
     val p = LocalPalette.current
     var full by remember { mutableStateOf(false) }
-    // New actions slide in instead of popping up.
     val appear = remember { MutableTransitionState(false).apply { targetState = true } }
-    AnimatedVisibility(appear, enter = fadeIn(tween(260)) + slideInVertically(tween(260)) { it / 3 }) {
+    val shape = RoundedCornerShape(11.dp)
+    AnimatedVisibility(appear, enter = fadeIn(tween(240)) + slideInVertically(tween(240)) { it / 3 }) {
         Column(
-            Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(p.base)
-                .border(1.dp, when { result?.failed == true -> p.red.copy(alpha = 0.45f); result == null && running -> p.accent.copy(alpha = 0.45f); else -> p.line }, RoundedCornerShape(10.dp))
-                .clickable { full = !full }.padding(10.dp).animateContentSize(tween(220))
+            Modifier
+                .fillMaxWidth()
+                .clip(shape)
+                .background(p.base)
+                .border(
+                    1.dp,
+                    when {
+                        result?.failed == true -> p.red.copy(alpha = 0.45f)
+                        result == null && running -> p.accent.copy(alpha = 0.45f)
+                        else -> p.line
+                    },
+                    shape,
+                )
+                .clickable { full = !full }
+                .padding(10.dp)
+                .animateContentSize(tween(220)),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 StatusMark(when { result == null && running -> 0; result?.failed == true -> 2; else -> 1 })
@@ -863,17 +1971,32 @@ fun ToolCall(call: Message, result: Message?, running: Boolean = false) {
             }
             val line = commandLine(call)
             if (line.isNotEmpty()) {
-                Text(line, color = p.mix(p.text, p.muted, 0.45f), fontSize = 12.sp, fontFamily = FontFamily.Monospace, maxLines = if (full) 20 else 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(start = 27.dp, top = 3.dp))
+                Text(
+                    line,
+                    color = p.mix(p.text, p.muted, 0.42f),
+                    fontSize = 12.sp,
+                    fontFamily = FontFamily.Monospace,
+                    maxLines = if (full) 20 else 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(start = 27.dp, top = 3.dp),
+                )
             }
             Column(Modifier.padding(start = 27.dp, top = 6.dp)) {
                 if (call.tool == "Edit" || call.tool == "MultiEdit") {
                     val pairs = if (call.tool == "MultiEdit") call.input.optJSONArray("edits")?.let { a -> (0 until a.length()).mapNotNull { a.optJSONObject(it) }.map { it.optString("old_string") to it.optString("new_string") } }.orEmpty()
-                        else listOf(call.input.optString("old_string") to call.input.optString("new_string"))
+                    else listOf(call.input.optString("old_string") to call.input.optString("new_string"))
                     val lines = pairs.flatMap { (old, new) -> old.lines().filter { it.isNotBlank() }.take(if (full) 40 else 3).map { "−" to it } + new.lines().filter { it.isNotBlank() }.take(if (full) 40 else 3).map { "+" to it } }
                     for ((sign, text) in lines.take(if (full) 200 else 8)) {
                         val color = if (sign == "+") p.green else p.red
-                        Text("$sign ${text.trimEnd()}", color = color, fontSize = 11.5.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp).clip(RoundedCornerShape(4.dp)).background(color.copy(alpha = 0.1f)).padding(horizontal = 6.dp, vertical = 1.dp))
+                        Text(
+                            "$sign ${text.trimEnd()}",
+                            color = color,
+                            fontSize = 11.5.sp,
+                            fontFamily = FontFamily.Monospace,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp).clip(RoundedCornerShape(4.dp)).background(color.copy(alpha = 0.1f)).padding(horizontal = 6.dp, vertical = 1.dp),
+                        )
                     }
                 } else if (result == null && running) {
                     val dots by rememberInfiniteTransition(label = "run").animateFloat(0f, 3f, infiniteRepeatable(tween(1200, easing = LinearEasing)), label = "dots")
@@ -891,30 +2014,36 @@ fun ToolCall(call: Message, result: Message?, running: Boolean = false) {
     }
 }
 
-/** 0 — a spinning arc while it runs, 1 — green tick, 2 — red cross. */
+/** 0 — spinning arc while running, 1 — green tick, 2 — red cross. Infinite transition runs ONLY when state == 0! */
 @Composable
 fun StatusMark(state: Int) {
     val p = LocalPalette.current
-    val spin by rememberInfiniteTransition(label = "spin").animateFloat(0f, 360f, infiniteRepeatable(tween(900, easing = LinearEasing)), label = "angle")
+    val spin = if (state == 0) {
+        rememberInfiniteTransition(label = "spin").animateFloat(0f, 360f, infiniteRepeatable(tween(900, easing = LinearEasing)), label = "angle").value
+    } else 0f
     val color = when (state) { 0 -> p.accent; 1 -> p.green; else -> p.red }
-    androidx.compose.foundation.Canvas(Modifier.size(18.dp)) {
+    Canvas(Modifier.size(18.dp)) {
         val r = size.minDimension / 2f - 1.5f
-        val stroke = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.7.dp.toPx(), cap = androidx.compose.ui.graphics.StrokeCap.Round)
+        val stroke = Stroke(width = 1.7.dp.toPx(), cap = StrokeCap.Round)
         when (state) {
             0 -> {
                 drawCircle(color.copy(alpha = 0.2f), r, style = stroke)
-                drawArc(color, spin, 250f, false, topLeft = center - androidx.compose.ui.geometry.Offset(r, r), size = androidx.compose.ui.geometry.Size(r * 2, r * 2), style = stroke)
+                drawArc(color, spin, 250f, false, topLeft = center - Offset(r, r), size = Size(r * 2, r * 2), style = stroke)
             }
             1 -> {
                 drawCircle(color.copy(alpha = 0.18f), r)
-                val path = androidx.compose.ui.graphics.Path().apply { moveTo(center.x - r * 0.42f, center.y); lineTo(center.x - r * 0.1f, center.y + r * 0.33f); lineTo(center.x + r * 0.45f, center.y - r * 0.3f) }
+                val path = Path().apply {
+                    moveTo(center.x - r * 0.42f, center.y)
+                    lineTo(center.x - r * 0.1f, center.y + r * 0.33f)
+                    lineTo(center.x + r * 0.45f, center.y - r * 0.3f)
+                }
                 drawPath(path, color, style = stroke)
             }
             else -> {
                 drawCircle(color.copy(alpha = 0.18f), r)
                 val d = r * 0.36f
-                drawLine(color, center - androidx.compose.ui.geometry.Offset(d, d), center + androidx.compose.ui.geometry.Offset(d, d), stroke.width, androidx.compose.ui.graphics.StrokeCap.Round)
-                drawLine(color, center + androidx.compose.ui.geometry.Offset(d, -d), center + androidx.compose.ui.geometry.Offset(-d, d), stroke.width, androidx.compose.ui.graphics.StrokeCap.Round)
+                drawLine(color, center - Offset(d, d), center + Offset(d, d), stroke.width, StrokeCap.Round)
+                drawLine(color, center + Offset(d, -d), center + Offset(-d, d), stroke.width, StrokeCap.Round)
             }
         }
     }
@@ -922,16 +2051,16 @@ fun StatusMark(state: Int) {
 
 fun lines(n: Int) = "$n " + when { n % 10 == 1 && n % 100 != 11 -> "строка"; n % 10 in 2..4 && n % 100 !in 12..14 -> "строки"; else -> "строк" }
 
-/** What exactly ran: `$ ./gradlew build`, a file, a search. */
 fun commandLine(call: Message): String {
     val i = call.input
     return when (call.tool) {
-        "Bash", "mcp__relay_desktop__run_local_command" -> "$ " + i.optString("command").trim().lines().joinToString(" ⏎ ")
-        "Grep" -> "«${i.optString("pattern")}»" + i.optString("path").let { if (it.isEmpty()) "" else " в $it" }
-        "Read", "Write", "Edit", "MultiEdit" -> i.optString("file_path")
+        "Bash", "shell", "command_execution", "run_command", "mcp__relay_desktop__run_local_command" ->
+            "$ " + i.optString("command").trim().lines().joinToString(" ⏎ ")
+        "Grep", "grep_search" -> "«${i.optString("pattern")}»" + i.optString("path").let { if (it.isEmpty()) "" else " в $it" }
+        "Read", "Write", "Edit", "MultiEdit", "read_file", "write_file", "edit_file" -> i.optString("file_path").ifEmpty { i.optString("path") }
         "Glob" -> i.optString("pattern")
         "SlashCommand" -> i.optString("command")
-        "WebSearch" -> i.optString("query")
+        "WebSearch", "web_search" -> i.optString("query")
         "WebFetch" -> i.optString("url")
         else -> if (call.tool.startsWith("mcp__relay_cluster__")) "" else toolSummary(call.tool, i)
     }
@@ -940,43 +2069,64 @@ fun commandLine(call: Message): String {
 @Composable
 fun PermissionCard(permission: Permission, vm: RelayViewModel) {
     val p = LocalPalette.current
-    Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp).clip(RoundedCornerShape(14.dp)).background(p.surface).border(1.dp, p.accent.copy(alpha = 0.6f), RoundedCornerShape(14.dp)).padding(14.dp)) {
-        Label("Claude просит разрешение", 13.sp, p.muted)
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 6.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .background(p.elevated)
+            .border(1.dp, p.accent.copy(alpha = 0.6f), RoundedCornerShape(16.dp))
+            .padding(14.dp),
+    ) {
+        Label("Агент запрашивает разрешение", 12.5.sp, p.accent, FontWeight.Medium)
         Spacer(Modifier.height(4.dp))
-        Label(toolName(permission.tool), 15.sp, p.text, FontWeight.Medium)
+        Label(toolName(permission.tool), 15.sp, p.text, FontWeight.SemiBold)
         val summary = toolSummary(permission.tool, permission.input)
         if (summary.isNotEmpty()) {
             Spacer(Modifier.height(6.dp))
-            Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(p.base).padding(10.dp)) {
+            Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(9.dp)).background(p.base).border(1.dp, p.line, RoundedCornerShape(9.dp)).padding(10.dp)) {
                 Text(summary, color = p.text, fontSize = 12.sp, fontFamily = FontFamily.Monospace, maxLines = 6, overflow = TextOverflow.Ellipsis)
             }
         }
         Spacer(Modifier.height(10.dp))
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
             GhostButton("Отклонить", p.red) { vm.permit(permission, false) }
+            Spacer(Modifier.width(6.dp))
             PrimaryButton("Разрешить") { vm.permit(permission, true) }
         }
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun TransferCard(vm: RelayViewModel, t: Transfer) {
     val p = LocalPalette.current
     val progress by animateFloatAsState(if (t.size > 0) (t.received.toFloat() / t.size).coerceIn(0f, 1f) else 0f, tween(200), label = "progress")
-    Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp).padding(top = 6.dp).clip(RoundedCornerShape(12.dp)).background(p.side)
-        .border(1.dp, if (t.error.isNotEmpty()) p.red.copy(alpha = 0.5f) else p.line, RoundedCornerShape(12.dp)).padding(horizontal = 12.dp, vertical = 9.dp)) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp)
+            .padding(top = 6.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(p.side)
+            .border(1.dp, if (t.error.isNotEmpty()) p.red.copy(alpha = 0.5f) else p.line, RoundedCornerShape(12.dp))
+            .padding(horizontal = 12.dp, vertical = 9.dp),
+    ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             StatusMark(when { t.error.isNotEmpty() -> 2; t.done -> 1; else -> 0 })
             Spacer(Modifier.width(9.dp))
             Column(Modifier.weight(1f)) {
                 Label(t.name, 13.5.sp, p.text, FontWeight.Medium, maxLines = 1)
-                Label(when {
-                    t.error.isNotEmpty() -> t.error
-                    t.done -> "В «Загрузки/Relay» · ${megabytes(t.size)}"
-                    t.size > 0 -> "${megabytes(t.received)} из ${megabytes(t.size)}"
-                    else -> "Ищем файл на сервере…"
-                }, 12.sp, if (t.error.isNotEmpty()) p.red else p.muted, maxLines = 2)
+                Label(
+                    when {
+                        t.error.isNotEmpty() -> t.error
+                        t.done -> "В «Загрузки/Relay» · ${megabytes(t.size)}"
+                        t.size > 0 -> "${megabytes(t.received)} из ${megabytes(t.size)}"
+                        else -> "Ищем файл на сервере…"
+                    },
+                    12.sp,
+                    if (t.error.isNotEmpty()) p.red else p.muted,
+                    maxLines = 2,
+                )
             }
             if (t.done) {
                 GhostButton("Открыть", p.accent) { vm.openTransfer(t) }
@@ -994,28 +2144,55 @@ fun TransferCard(vm: RelayViewModel, t: Transfer) {
 
 fun megabytes(bytes: Long) = if (bytes < 1024 * 1024) "${(bytes + 1023) / 1024} КБ" else "%.1f МБ".format(bytes / 1048576.0)
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun Composer(vm: RelayViewModel, chat: Chat) {
+fun Composer(vm: RelayViewModel, chat: Chat, onOpenAgents: () -> Unit = {}) {
     val p = LocalPalette.current
     val busy = chat.version >= 0 && chat.transcript.busy
+    val activeBackend = chat.activeBackend()
     for (t in vm.transfers.take(3)) key(t.id) { TransferCard(vm, t) }
     val online = vm.link == Link.Online
     var apiSettings by remember { mutableStateOf(false) }
-    if (apiSettings) vm.current?.let { server -> ApiDialog(vm,server) { apiSettings = false } }
-    val suggestions = slashMatches(chat.draft, vm.commands)
+    if (apiSettings) vm.current?.let { server -> ApiDialog(vm, server) { apiSettings = false } }
+
+    val suggestions = slashMatches(chat.draft, vm.commandsFor(activeBackend))
     if (chat.queued.isNotEmpty()) {
-        Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp).padding(top = 6.dp).clip(RoundedCornerShape(12.dp)).background(p.side).border(1.dp, p.line, RoundedCornerShape(12.dp)).padding(10.dp)) {
-            Label("В очереди: ${chat.queued.size} — Claude ответит по порядку, даже если закрыть приложение", 12.sp, p.muted)
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp)
+                .padding(top = 6.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(p.side)
+                .border(1.dp, p.line, RoundedCornerShape(12.dp))
+                .padding(10.dp),
+        ) {
+            Label("В очереди: ${chat.queued.size} — ответ придёт по порядку, даже если закрыть приложение", 12.sp, p.muted)
             for ((i, q) in chat.queued.withIndex()) Label("${i + 1}  $q", 13.sp, p.text, maxLines = 1, modifier = Modifier.padding(top = 4.dp))
         }
     }
     AnimatedVisibility(suggestions.isNotEmpty()) {
-        Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp).padding(top = 6.dp).heightIn(max = 260.dp).clip(RoundedCornerShape(12.dp)).background(p.side).border(1.dp, p.line, RoundedCornerShape(12.dp)).verticalScroll(rememberScrollState()).padding(4.dp)) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp)
+                .padding(top = 6.dp)
+                .heightIn(max = 260.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(p.elevated)
+                .border(1.dp, p.line, RoundedCornerShape(14.dp))
+                .verticalScroll(rememberScrollState())
+                .padding(4.dp),
+        ) {
             for (c in suggestions.take(12)) {
-                Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).clickable { chat.draft = "/${c.name} " }.padding(horizontal = 10.dp, vertical = 7.dp)) {
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(9.dp))
+                        .clickable { chat.draft = "/${c.name} " }
+                        .padding(horizontal = 10.dp, vertical = 7.dp),
+                ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Label("/${c.name}", 14.sp, p.accent, FontWeight.Medium)
+                        Label("/${c.name}", 14.sp, p.accent, FontWeight.SemiBold)
                         if (c.hint.isNotEmpty()) Label("  ${c.hint}", 12.sp, p.muted, maxLines = 1)
                     }
                     if (c.description.isNotEmpty()) Label(c.description, 12.sp, p.muted, maxLines = 2)
@@ -1024,17 +2201,45 @@ fun Composer(vm: RelayViewModel, chat: Chat) {
             Label("/model, /mode и /stop срабатывают сразу, даже во время ответа", 11.sp, p.muted, modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp))
         }
     }
-    val picker = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.GetMultipleContents()) { uris ->
+
+    val picker = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.GetMultipleContents()
+    ) { uris ->
         if (uris.isNotEmpty()) vm.pick(uris)
     }
-    Column(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp).clip(RoundedCornerShape(16.dp)).background(p.surface).border(1.dp, p.line, RoundedCornerShape(16.dp)).padding(start = 14.dp, end = 8.dp, top = 10.dp, bottom = 6.dp)) {
+
+    val containerShape = RoundedCornerShape(22.dp)
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 10.dp, vertical = 8.dp)
+            .clip(containerShape)
+            .background(p.surface)
+            .border(1.dp, if (chat.draft.isNotEmpty()) p.mix(p.line, p.accent, 0.35f) else p.line, containerShape)
+            .padding(start = 14.dp, end = 10.dp, top = 11.dp, bottom = 8.dp),
+    ) {
         if (chat.picked.isNotEmpty()) {
-            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(bottom = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(bottom = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
                 for (f in chat.picked) key(f) {
-                    Row(Modifier.clip(RoundedCornerShape(10.dp)).background(p.side).border(1.dp, p.line, RoundedCornerShape(10.dp)).padding(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                        if (f.preview != null) androidx.compose.foundation.Image(f.preview, f.name, Modifier.size(40.dp).clip(RoundedCornerShape(7.dp)), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
-                        else Box(Modifier.size(40.dp).clip(RoundedCornerShape(7.dp)).background(p.line), contentAlignment = Alignment.Center) { Label(f.name.substringAfterLast('.', "файл").take(4).uppercase(), 10.sp, p.muted) }
-                        Column(Modifier.padding(horizontal = 8.dp).widthIn(max = 140.dp)) {
+                    Row(
+                        Modifier
+                            .clip(RoundedCornerShape(11.dp))
+                            .background(p.side)
+                            .border(1.dp, p.line, RoundedCornerShape(11.dp))
+                            .padding(5.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        if (f.preview != null) {
+                            Image(f.preview, f.name, Modifier.size(38.dp).clip(RoundedCornerShape(7.dp)), contentScale = ContentScale.Crop)
+                        } else {
+                            Box(Modifier.size(38.dp).clip(RoundedCornerShape(7.dp)).background(p.elevated), contentAlignment = Alignment.Center) {
+                                VectorGlyph(Glyph.Paperclip, p.accent, size = 16.dp)
+                            }
+                        }
+                        Column(Modifier.padding(horizontal = 8.dp).widthIn(max = 136.dp)) {
                             Label(f.name, 12.sp, p.text, maxLines = 1)
                             Label(megabytes(f.bytes.size.toLong()), 11.sp, p.muted)
                         }
@@ -1043,45 +2248,131 @@ fun Composer(vm: RelayViewModel, chat: Chat) {
                 }
             }
         }
+
         BasicTextField(
             value = chat.draft,
             onValueChange = { chat.draft = it },
             textStyle = TextStyle(color = p.text, fontSize = 15.sp),
             cursorBrush = SolidColor(p.accent),
-            modifier = Modifier.fillMaxWidth().heightIn(min = 24.dp, max = 160.dp),
-            decorationBox = { inner -> Box { if (chat.draft.isEmpty()) Label(when { !online -> "Нет связи с сервером"; busy && vm.canSend(chat) -> "Добавь уточнение — Claude учтёт по ходу работы…"; busy -> "Claude отвечает…"; else -> "Напиши задачу… или / для команд" }, 15.sp, p.muted); inner() } },
+            modifier = Modifier.fillMaxWidth().heightIn(min = 26.dp, max = 160.dp),
+            decorationBox = { inner ->
+                Box {
+                    if (chat.draft.isEmpty()) {
+                        Label(
+                            when {
+                                !online -> "Нет связи с сервером"
+                                busy && vm.canSend(chat) -> "Добавь уточнение — ${backendShortLabel(activeBackend)} учтёт по ходу работы…"
+                                busy -> "${backendShortLabel(activeBackend)} отвечает…"
+                                else -> "Напиши задачу… или / для команд"
+                            },
+                            15.sp,
+                            p.muted,
+                        )
+                    }
+                    inner()
+                }
+            },
         )
-        Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(Icons.Default.Add, "Прикрепить файлы или фото") { picker.launch("*/*") }
-            FlowRow(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                Selector(if (chat.api) "API" else "Claude Code",listOf("claude" to "Claude Code","api" to "Пользовательский API","settings" to "Настроить API…"),accent=chat.api) { source ->
-                    if (source == "settings") apiSettings = true else {
-                        vm.setApiSource(chat,source == "api")
-                        if (source == "api" && vm.current?.api?.baseUrl.isNullOrBlank()) apiSettings = true
+
+        Row(
+            Modifier.fillMaxWidth().padding(top = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Box(
+                Modifier
+                    .size(36.dp)
+                    .clip(CircleShape)
+                    .background(p.elevated)
+                    .border(1.dp, p.borderSubtle, CircleShape)
+                    .clickable { picker.launch("*/*") },
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(Icons.Default.Add, "Прикрепить файлы или фото", tint = p.text, modifier = Modifier.size(18.dp))
+            }
+
+            Row(
+                Modifier.weight(1f).horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Selector(
+                    label = backendShortLabel(activeBackend),
+                    options = listOf(
+                        "claude" to "Claude Code",
+                        "codex" to "Codex",
+                        "agy" to "Antigravity",
+                        "api" to "API",
+                        "agents" to "Установить агентов…",
+                        "settings" to "Настроить API…",
+                    ),
+                    accent = true,
+                    accentColor = backendColor(p, activeBackend),
+                ) { source ->
+                    when (source) {
+                        "agents" -> onOpenAgents()
+                        "settings" -> apiSettings = true
+                        else -> {
+                            vm.setBackend(chat, source)
+                            if (source == "api" && vm.current?.api?.baseUrl.isNullOrBlank()) apiSettings = true
+                        }
                     }
                 }
-                val models = if (chat.api) vm.apiCatalog() else vm.models.ifEmpty { listOf(ModelInfo("default", "Модель сервера", ""), ModelInfo("fable", "Fable", ""), ModelInfo("opus", "Opus", ""), ModelInfo("sonnet", "Sonnet", ""), ModelInfo("haiku", "Haiku", "")) }
-                Selector(modelLabel(models,if (chat.api) chat.apiModel else chat.model), models.map { it.value to if (it.value == "default") "Авто · ${it.description}".trimEnd(' ', '·') else modelLabel(models,it.value) }) { if (chat.api) chat.apiModel = it else chat.model = it; vm.liveChange(chat) }
-                Selector(when (chat.mode) { "auto" -> "Авто"; "acceptEdits" -> "Правки файлов"; "plan" -> "План"; else -> "С подтверждением" },
-                    listOf("auto" to "Авто", "manual" to "С подтверждением", "acceptEdits" to "Правки файлов", "plan" to "Планирование"), accent = chat.mode == "auto") { chat.mode = it; vm.liveChange(chat) }
-                Selector("Глубина: " + if (chat.effort == "default") "авто" else chat.effort,
-                    listOf("default" to "Автоматически", "low" to "Низкая", "medium" to "Средняя", "high" to "Высокая", "xhigh" to "Очень высокая", "max" to "Максимальная")) { chat.effort = it }
+
+                val catalog = vm.catalogFor(activeBackend)
+                val currentModel = chat.selectedModel(vm.current)
+                Selector(
+                    label = modelLabel(catalog, currentModel),
+                    options = catalog.map {
+                        it.value to if (it.value == "default") "Авто · ${it.description}".trimEnd(' ', '·') else modelLabel(catalog, it.value)
+                    },
+                ) {
+                    chat.updateSelectedModel(it)
+                    vm.liveChange(chat)
+                }
+
+                Selector(
+                    label = when (chat.mode) { "auto" -> "Авто"; "acceptEdits" -> "Правки"; "plan" -> "План"; else -> "Подтверждение" },
+                    options = listOf("auto" to "Авто", "manual" to "С подтверждением", "acceptEdits" to "Правки файлов", "plan" to "Планирование"),
+                    accent = chat.mode == "auto",
+                ) {
+                    chat.mode = it
+                    vm.liveChange(chat)
+                }
+
+                Selector(
+                    label = "Глубина: " + if (chat.effort == "default") "авто" else chat.effort,
+                    options = listOf("default" to "Автоматически", "low" to "Низкая", "medium" to "Средняя", "high" to "Высокая", "xhigh" to "Очень высокая", "max" to "Максимальная"),
+                ) {
+                    chat.effort = it
+                }
             }
+
             val ready = (chat.draft.isNotBlank() || chat.picked.isNotEmpty()) && (vm.canSend(chat) || chat.draft.trim().startsWith("/"))
             if (busy) {
                 Box(
-                    Modifier.size(38.dp).clip(CircleShape).background(p.line).clickable { vm.stop() },
+                    Modifier.size(38.dp).clip(CircleShape).background(p.elevated).border(1.dp, p.line, CircleShape).clickable { vm.stop() },
                     contentAlignment = Alignment.Center,
-                ) { Box(Modifier.size(12.dp).clip(RoundedCornerShape(3.dp)).background(p.text)) }
-                Spacer(Modifier.width(6.dp))
+                ) {
+                    Box(Modifier.size(12.dp).clip(RoundedCornerShape(3.dp)).background(p.red))
+                }
             }
             if (!busy || ready) {
                 Box(
-                    Modifier.size(38.dp).clip(CircleShape).background(if (ready) p.accent else p.line)
+                    Modifier
+                        .size(38.dp)
+                        .clip(CircleShape)
+                        .background(if (ready) p.accent else p.elevated)
+                        .border(1.dp, if (ready) p.accent else p.borderSubtle, CircleShape)
                         .clickable(enabled = ready) { vm.submit() },
                     contentAlignment = Alignment.Center,
                 ) {
-                    Icon(Icons.AutoMirrored.Filled.Send, "Отправить", tint = if (ready) (if (p.light) p.base else Color(0xFF111114)) else p.muted, modifier = Modifier.size(18.dp))
+                    Icon(
+                        Icons.AutoMirrored.Filled.Send,
+                        "Отправить",
+                        tint = if (ready) (if (p.light) Color.White else Color(0xFF0E1318)) else p.muted,
+                        modifier = Modifier.size(17.dp),
+                    )
                 }
             }
         }
@@ -1089,21 +2380,252 @@ fun Composer(vm: RelayViewModel, chat: Chat) {
 }
 
 @Composable
-fun Selector(label: String, options: List<Pair<String, String>>, accent: Boolean = false, choose: (String) -> Unit) {
+fun Selector(
+    label: String,
+    options: List<Pair<String, String>>,
+    accent: Boolean = false,
+    accentColor: Color? = null,
+    choose: (String) -> Unit,
+) {
     val p = LocalPalette.current
     var open by remember { mutableStateOf(false) }
+    val tone = accentColor ?: p.accent
+    val shape = RoundedCornerShape(999.dp)
     Box {
-        Row(Modifier.clip(RoundedCornerShape(8.dp)).clickable { open = true }.padding(horizontal = 8.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
-            Label(label, 12.5.sp, if (accent) p.accent else p.muted, maxLines = 1)
-            Icon(Icons.Default.KeyboardArrowDown, null, tint = p.muted, modifier = Modifier.size(16.dp))
+        Row(
+            Modifier
+                .clip(shape)
+                .background(if (accent) tone.copy(alpha = 0.14f) else p.elevated)
+                .border(1.dp, if (accent) tone.copy(alpha = 0.35f) else p.borderSubtle, shape)
+                .clickable { open = true }
+                .padding(horizontal = 10.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Label(label, 12.sp, if (accent) tone else p.muted, FontWeight.Medium, maxLines = 1)
+            Icon(Icons.Default.KeyboardArrowDown, null, tint = if (accent) tone else p.muted, modifier = Modifier.size(15.dp))
         }
-        DropdownMenu(open, { open = false }, Modifier.background(p.surface)) {
-            for ((id, name) in options) DropdownMenuItem({ Label(name) }, { open = false; choose(id) })
+        DropdownMenu(open, { open = false }, Modifier.background(p.elevated)) {
+            for ((id, name) in options) {
+                DropdownMenuItem({ Label(name) }, { open = false; choose(id) })
+            }
         }
     }
 }
 
-// --- settings --------------------------------------------------------------------------
+// --- 1-Click CLI Agent Installer & Server OAuth UI -------------------------------------
+
+@Composable
+fun AgentsSheet(vm: RelayViewModel, close: () -> Unit) {
+    val p = LocalPalette.current
+    LaunchedEffect(Unit) { vm.refreshBackends() }
+    Sheet(close) {
+        Column(Modifier.heightIn(max = 560.dp).verticalScroll(rememberScrollState())) {
+            AgentsSectionCard(vm)
+            Spacer(Modifier.height(12.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                GhostButton("Закрыть", onClick = close)
+            }
+        }
+    }
+}
+
+@Composable
+fun AgentsSectionCard(vm: RelayViewModel) {
+    val p = LocalPalette.current
+    val anyInstalling = vm.installingAgents.values.any { it }
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(p.surface)
+            .border(1.dp, p.line, RoundedCornerShape(16.dp))
+            .padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            VectorGlyph(Glyph.Terminal, p.accent, size = 18.dp)
+            Spacer(Modifier.width(8.dp))
+            Column(Modifier.weight(1f)) {
+                Label("Агенты CLI на сервере", 15.sp, p.text, FontWeight.SemiBold)
+                Label("Установка и вход в 1 нажатие прямо по SSH", 11.5.sp, p.muted)
+            }
+            SecondaryPillButton("Установить все", Glyph.Download, p.accent, enabled = vm.link == Link.Online && !anyInstalling) {
+                vm.installAgent("all", "install")
+            }
+        }
+
+        for (agent in CLI_AGENTS) {
+            val status = vm.backendsStatus[agent]
+            val installed = status?.installed == true || (agent == "claude" && !vm.backendsKnown && vm.claudeVersion.isNotEmpty())
+            val ver = status?.version?.ifBlank { null } ?: if (agent == "claude") vm.claudeVersion.ifBlank { null } else null
+            val installing = vm.installingAgents[agent] == true || (agent == "claude" && vm.updating)
+            val msg = vm.agentMessages[agent].orEmpty()
+            val log = vm.agentLogs[agent].orEmpty()
+            var showLog by remember(agent) { mutableStateOf(false) }
+
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(p.base)
+                    .border(1.dp, p.borderSubtle, RoundedCornerShape(12.dp))
+                    .padding(11.dp),
+                verticalArrangement = Arrangement.spacedBy(7.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    BackendBadge(agent, compact = true)
+                    Label(backendLabel(agent), 14.sp, p.text, FontWeight.Medium, modifier = Modifier.weight(1f), maxLines = 1)
+                    val pillColor = if (installed) p.green else p.amber
+                    Box(
+                        Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(pillColor.copy(alpha = 0.14f))
+                            .padding(horizontal = 7.dp, vertical = 2.dp),
+                    ) {
+                        Label(
+                            text = when {
+                                installing -> "установка…"
+                                installed -> ver?.take(22) ?: "установлен"
+                                vm.backendsKnown -> "не установлен"
+                                else -> "проверка"
+                            },
+                            size = 10.5.sp,
+                            color = pillColor,
+                            weight = FontWeight.Medium,
+                            maxLines = 1,
+                        )
+                    }
+                }
+                if (msg.isNotEmpty()) {
+                    Label(msg, 11.5.sp, p.muted, maxLines = 2)
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    SecondaryPillButton(
+                        text = when {
+                            installing -> "Работаем…"
+                            installed -> "Обновить"
+                            else -> "Установить"
+                        },
+                        glyph = Glyph.Download,
+                        tint = if (installed) p.text else p.accent,
+                        enabled = vm.link == Link.Online && !installing,
+                    ) {
+                        vm.installAgent(agent, if (installed) "update" else "install")
+                    }
+                    SecondaryPillButton(
+                        text = "Войти",
+                        glyph = Glyph.Key,
+                        tint = p.accent,
+                        enabled = vm.link == Link.Online && !installing,
+                    ) {
+                        vm.startAuth(agent)
+                    }
+                    if (log.isNotEmpty()) {
+                        GhostButton(if (showLog) "Скрыть лог" else "Лог", p.muted) { showLog = !showLog }
+                    }
+                }
+                if (showLog && log.isNotEmpty()) {
+                    Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(p.side).padding(8.dp)) {
+                        Text(log.takeLast(600), color = p.muted, fontSize = 11.sp, fontFamily = FontFamily.Monospace, maxLines = 8, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun AuthSheet(vm: RelayViewModel, flow: AuthFlowState) {
+    val p = LocalPalette.current
+    var code by remember(flow.id) { mutableStateOf("") }
+    var browserText by remember(flow.id) { mutableStateOf("") }
+    var boxSize by remember { mutableStateOf(IntSize.Zero) }
+
+    Sheet({ vm.cancelAuth() }) {
+        Column(Modifier.heightIn(max = 580.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                BackendBadge(flow.provider)
+                Label("Вход · ${backendLabel(flow.provider)}", 17.sp, p.text, FontWeight.SemiBold)
+            }
+            Label(
+                flow.message.ifBlank { "Следуй инструкциям для входа на сервере." },
+                13.sp,
+                when (flow.state) {
+                    "success" -> p.green
+                    "failed", "input_error" -> p.red
+                    else -> p.muted
+                },
+            )
+
+            if (flow.frame != null) {
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(flow.frameWidth.toFloat() / flow.frameHeight.coerceAtLeast(1).toFloat())
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(p.base)
+                        .border(1.dp, p.line, RoundedCornerShape(12.dp))
+                        .onSizeChanged { boxSize = it }
+                        .pointerInput(flow.id, flow.frameWidth, flow.frameHeight) {
+                            detectTapGestures { offset ->
+                                if (boxSize.width > 0 && boxSize.height > 0) {
+                                    val rx = (offset.x / boxSize.width * flow.frameWidth).toInt().coerceIn(0, flow.frameWidth - 1)
+                                    val ry = (offset.y / boxSize.height * flow.frameHeight).toInt().coerceIn(0, flow.frameHeight - 1)
+                                    vm.tapAuthBrowser(rx, ry)
+                                }
+                            }
+                        },
+                ) {
+                    Image(
+                        bitmap = flow.frame,
+                        contentDescription = "Браузер на сервере",
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Fit,
+                    )
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Field(browserText, { browserText = it }, "Ввод в поле браузера (email / пароль)", modifier = Modifier.weight(1f))
+                    SecondaryPillButton("Ввести", Glyph.Check, p.accent, enabled = browserText.isNotEmpty()) {
+                        vm.sendAuthBrowserText(browserText, pressEnter = true)
+                        browserText = ""
+                    }
+                }
+            }
+
+            if (flow.message.contains("не подготовлен браузер", ignoreCase = true)) {
+                SecondaryPillButton(
+                    if (vm.browserSetupRunning) "Готовим браузер…" else "Подготовить браузер на сервере",
+                    Glyph.Download,
+                    p.accent,
+                    enabled = !vm.browserSetupRunning,
+                ) {
+                    vm.setupServerBrowser()
+                }
+            }
+
+            if (flow.active) {
+                Field(
+                    value = code,
+                    onChange = { code = it },
+                    hint = if (flow.provider == "codex") "Код OAuth или API-ключ sk-…" else "Код входа или URL страницы возврата",
+                )
+            }
+
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                GhostButton(if (flow.active) "Отмена" else "Закрыть") { vm.cancelAuth() }
+                if (flow.active) {
+                    Spacer(Modifier.width(6.dp))
+                    PrimaryButton("Подтвердить", enabled = code.isNotBlank()) {
+                        vm.submitAuthInput(code)
+                        code = ""
+                    }
+                }
+            }
+        }
+    }
+}
+
+// --- Settings Screen -------------------------------------------------------------------
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -1112,33 +2634,53 @@ fun SettingsScreen(vm: RelayViewModel) {
     val back = { vm.screen = if (vm.current != null && vm.link != Link.Off) Screen.Sessions else Screen.Servers }
     BackHandler { back() }
     var name by remember { mutableStateOf(vm.actor) }
+
     Column(Modifier.fillMaxSize()) {
-        TopBar("Настройки", "Оформление и имя в журнале команды", onBack = back)
-        LazyColumn(contentPadding = PaddingValues(16.dp)) {
-            item { Label("Цветовая тема", 15.sp, p.text, FontWeight.Medium); Spacer(Modifier.height(10.dp)) }
+        TopBar("Настройки", "24 темы, профиль и агенты сервера", onBack = back)
+        LazyColumn(
+            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            // Compact 3-column grid near the top so all 24 themes (including "Дракула") fit on 400x860dp without scrolling!
             item {
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Label("Цветовая тема · 24 палитры", 14.sp, p.text, FontWeight.SemiBold)
+                Spacer(Modifier.height(8.dp))
+                FlowRow(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(7.dp),
+                ) {
                     for (t in THEMES) ThemeTile(t, vm.theme == t.id) { vm.chooseTheme(t.id) }
                 }
             }
-            item {
-                Spacer(Modifier.height(24.dp))
-                Label("Твоё имя", 15.sp, p.text, FontWeight.Medium)
-                Spacer(Modifier.height(4.dp))
-                Label("Видно на доске задач и в общих названиях сессий", 12.sp, p.muted)
-                Spacer(Modifier.height(8.dp))
-                Field(name, { name = it; vm.chooseActor(it) }, "Например, champ")
-                if (vm.link == Link.Online) {
-                    Spacer(Modifier.height(24.dp))
-                    Label("Claude Code на сервере", 15.sp, p.text, FontWeight.Medium)
-                    Spacer(Modifier.height(4.dp))
-                    Label("${vm.claudeVersion.ifEmpty { "версия неизвестна" }} · обновляется сам раз в 6 часов, когда Claude ничего не делает", 12.sp, p.muted)
-                    Spacer(Modifier.height(8.dp))
-                    PrimaryButton(if (vm.updating) "Обновляем…" else "Обновить сейчас", enabled = !vm.updating) { vm.updateClaude() }
-                    if (vm.notice.isNotEmpty()) { Spacer(Modifier.height(8.dp)); Label(vm.notice, 12.sp, p.muted) }
+            if (vm.link == Link.Online) {
+                item {
+                    AgentsSectionCard(vm)
                 }
-                Spacer(Modifier.height(24.dp))
-                Label("Relay для Android 0.2.8 · тот же сервер и тот же помощник, что у десктопа", 12.sp, p.muted)
+            }
+            item {
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(p.surface)
+                        .border(1.dp, p.line, RoundedCornerShape(16.dp))
+                        .padding(14.dp),
+                ) {
+                    Label("Твоё имя", 15.sp, p.text, FontWeight.SemiBold)
+                    Spacer(Modifier.height(3.dp))
+                    Label("Видно на доске задач и в общих названиях сессий", 12.sp, p.muted)
+                    Spacer(Modifier.height(8.dp))
+                    Field(name, { name = it; vm.chooseActor(it) }, "Например, champ")
+                }
+            }
+            item {
+                if (vm.notice.isNotEmpty()) {
+                    Label(vm.notice, 12.sp, p.accent)
+                    Spacer(Modifier.height(6.dp))
+                }
+                Label("Relay для Android 0.4.0 · SSH и общие сессии с ПК", 12.sp, p.muted)
+                Spacer(Modifier.height(8.dp))
             }
         }
     }
@@ -1148,18 +2690,39 @@ fun SettingsScreen(vm: RelayViewModel) {
 fun ThemeTile(t: ThemeInfo, selected: Boolean, choose: () -> Unit) {
     val p = LocalPalette.current
     val c = palette(t.id)
+    val shape = RoundedCornerShape(11.dp)
     Column(
-        Modifier.width(100.dp).clip(RoundedCornerShape(12.dp)).background(c.base)
-            .border(if (selected) 2.dp else 1.dp, if (selected) p.accent else p.line, RoundedCornerShape(12.dp)).clickable(onClick = choose).padding(8.dp)
+        Modifier
+            .width(114.dp)
+            .clip(shape)
+            .background(c.base)
+            .border(if (selected) 2.dp else 1.dp, if (selected) p.accent else p.line, shape)
+            .clickable(onClick = choose)
+            .padding(horizontal = 8.dp, vertical = 6.dp),
     ) {
-        Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-            Box(Modifier.width(14.dp).height(30.dp).clip(RoundedCornerShape(4.dp)).background(c.rail))
-            Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                Box(Modifier.width(56.dp).height(12.dp).clip(RoundedCornerShape(3.dp)).background(c.surface))
-                Box(Modifier.width(30.dp).height(5.dp).clip(RoundedCornerShape(3.dp)).background(c.accent))
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(Modifier.width(12.dp).height(16.dp).clip(RoundedCornerShape(3.dp)).background(c.rail))
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Box(Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(2.dp)).background(c.surface))
+                Box(Modifier.width(28.dp).height(4.dp).clip(RoundedCornerShape(2.dp)).background(c.accent))
+            }
+            if (selected) {
+                Box(Modifier.size(7.dp).clip(CircleShape).background(c.accent))
             }
         }
-        Spacer(Modifier.height(8.dp))
-        Text(t.name, color = c.text, fontSize = 12.sp, modifier = Modifier.align(Alignment.CenterHorizontally))
+        Spacer(Modifier.height(4.dp))
+        Text(
+            text = t.name,
+            color = c.text,
+            fontSize = 11.5.sp,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.align(Alignment.CenterHorizontally),
+        )
     }
 }

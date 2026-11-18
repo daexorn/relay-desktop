@@ -405,6 +405,50 @@ pub fn hostname() -> String {
         .unwrap_or_else(|_| "pc".into())
 }
 
+fn default_true() -> bool {
+    true
+}
+
+/// Shared 24-theme catalog across Desktop GUI and Relay TUI:
+/// `(id, label, is_light, [base, side, rail, surface, line, text, muted, accent])`.
+pub const THEME_SPECS: [(&str, &str, bool, [u32; 8]); 24] = [
+    ("graphite", "Графит", false, [0x10141a, 0x151b23, 0x0c1016, 0x1b242e, 0x2a3643, 0xe6edf3, 0x8d9cab, 0x83c4b3]),
+    ("midnight", "Полночь", false, [0x0f1520, 0x141d2b, 0x0b111b, 0x1b2739, 0x2b3b52, 0xe5edf9, 0x95a5bd, 0x89aef1]),
+    ("obsidian", "Обсидиан", false, [0x0d0f12, 0x12151a, 0x090b0e, 0x191d24, 0x2a303b, 0xedeff2, 0x9098a6, 0xe5b567]),
+    ("tokyo", "Токио", false, [0x1a1b26, 0x16161e, 0x111219, 0x24283b, 0x343b58, 0xc0caf5, 0x7982a9, 0x7aa2f7]),
+    ("catppuccin", "Мокко", false, [0x1e1e2e, 0x181825, 0x11111b, 0x313244, 0x45475a, 0xcdd6f4, 0x9399b2, 0xb4befe]),
+    ("gruvbox", "Грувбокс", false, [0x1d2021, 0x282828, 0x161819, 0x32302f, 0x504945, 0xebdbb2, 0xa89984, 0xfabd2f]),
+    ("kanagawa", "Канагава", false, [0x1f1f28, 0x181820, 0x121218, 0x2a2a37, 0x3a3a4e, 0xdcd7ba, 0x938aa9, 0xdca561]),
+    ("everforest", "Тайга", false, [0x232a2e, 0x1e2428, 0x181d20, 0x2d353b, 0x404c51, 0xd3c6aa, 0x859289, 0xa7c080]),
+    ("cyber", "Неон", false, [0x0b0e17, 0x101422, 0x070910, 0x171d30, 0x273252, 0xe6f1ff, 0x8496b8, 0x38e8ff]),
+    ("aurora", "Аврора", false, [0x0d171c, 0x111f26, 0x091115, 0x182b34, 0x26424f, 0xe4f5f4, 0x88aeb0, 0x5eead4]),
+    ("forest", "Хвоя", false, [0x111916, 0x17211c, 0x0c120f, 0x202e27, 0x2e4136, 0xe4eee8, 0x9aad9f, 0x83c6a9]),
+    ("plum", "Слива", false, [0x1b1721, 0x16121c, 0x120e18, 0x292331, 0x3b3246, 0xeee7f5, 0xab9bb8, 0xc39bff]),
+    ("ember", "Угли", false, [0x1d1816, 0x171311, 0x120f0d, 0x2a2320, 0x3d322d, 0xf3e9e4, 0xb0a097, 0xff8a5b]),
+    ("ocean", "Океан", false, [0x0f1b1e, 0x0c1619, 0x091214, 0x172a2e, 0x24393e, 0xe2f2f2, 0x8fadaf, 0x4fd1c5]),
+    ("nord", "Север", false, [0x2e3440, 0x292e39, 0x242933, 0x3b4252, 0x434c5e, 0xeceff4, 0x9aa5b8, 0x88c0d0]),
+    ("rose", "Роза", false, [0x1e1619, 0x181114, 0x130d10, 0x2c2024, 0x402e34, 0xf6e8ec, 0xb79aa3, 0xf28ba8]),
+    ("dracula", "Дракула", false, [0x282a36, 0x21222c, 0x1b1c24, 0x343746, 0x44475a, 0xf8f8f2, 0xa4a9c6, 0xbd93f9]),
+    ("oled", "OLED", false, [0x000000, 0x050506, 0x000000, 0x121214, 0x232327, 0xf2f2f4, 0x8a8a93, 0xa78bfa]),
+    ("paper", "Бумага", true, [0xfcfcfb, 0xf5f4f2, 0xedece9, 0xffffff, 0xe4e2de, 0x1e1e21, 0x78777e, 0x4a6fe3]),
+    ("sand", "Песок", true, [0xfbf7f0, 0xf4eee3, 0xece4d6, 0xfffdf9, 0xe3d8c6, 0x2b241c, 0x857865, 0xc2703d]),
+    ("mint", "Мята", true, [0xf6fbf8, 0xedf6f1, 0xe2efe8, 0xffffff, 0xd5e7dc, 0x17261e, 0x6c8478, 0x2f9e77]),
+    ("latte", "Латте", true, [0xeff1f5, 0xe6e9ef, 0xdce0e8, 0xffffff, 0xccd0da, 0x2c2f3f, 0x6c6f85, 0x1e66f5]),
+    ("solarized", "Солярис", true, [0xfdf6e3, 0xf4ecd8, 0xeee8d5, 0xfffbf0, 0xded6c1, 0x37474f, 0x657b83, 0x2aa198]),
+    ("frost", "Иней", true, [0xf4f7fb, 0xeaf0f7, 0xdfe8f2, 0xffffff, 0xcfdbe8, 0x172133, 0x62728a, 0x2563eb]),
+];
+
+pub fn theme_spec(name: &str) -> &'static (&'static str, &'static str, bool, [u32; 8]) {
+    THEME_SPECS
+        .iter()
+        .find(|t| t.0 == name)
+        .unwrap_or(&THEME_SPECS[0])
+}
+
+pub fn valid_theme(name: &str) -> bool {
+    THEME_SPECS.iter().any(|t| t.0 == name)
+}
+
 #[derive(Clone, Default, Deserialize, Debug)]
 pub struct Session {
     pub id: String,
@@ -426,6 +470,16 @@ pub struct Session {
     pub backend: String,
     #[serde(default)]
     pub native_id: String,
+    #[serde(default)]
+    pub locked: bool,
+    #[serde(default = "default_true")]
+    pub unlocked: bool,
+}
+
+impl Session {
+    pub fn is_locked_gate(&self) -> bool {
+        self.locked && !self.unlocked
+    }
 }
 /// A model exactly as the server's Claude Code lists it: `fable`, `opus`, a full id…
 #[derive(Clone, Default, Deserialize, Debug, PartialEq)]

@@ -772,6 +772,8 @@ mod tests {
             chats: HashMap::new(),
             selected_chat: HashMap::new(),
             delete_chat: None,
+            lock_dialog: None,
+            agents_open: None,
             deleted_sessions: Default::default(),
             renaming: None,
             folder_renaming: None,
@@ -1297,5 +1299,107 @@ mod tests {
         let _ = take(&mut rx_a, "auth_cancel");
         let auth_agy = take(&mut rx_a, "auth_start");
         assert_eq!(auth_agy["provider"], "agy");
+    }
+
+    #[test]
+    fn private_session_lock_wipes_messages_blocks_delete_and_unlocks_cleanly() {
+        let (mut app, a, _, _, mut rx_a, _) = fixture();
+        let sid = cluster::id();
+        let k = key(&a.id, &sid);
+        app.data(
+            a.id.clone(),
+            json!({
+                "type": "sessions",
+                "sessions": [{
+                    "id": sid,
+                    "title": "Защищённая сессия",
+                    "cwd": a.cwd,
+                    "modified": 10.0,
+                    "locked": true,
+                    "unlocked": false
+                }]
+            }),
+        );
+        let locked_session = app.remote[&a.id].sessions[0].clone();
+        assert!(locked_session.is_locked_gate());
+        assert!(app.deletion_blocked(&a.id, &sid).is_some());
+
+        app.select_chat(locked_session.clone());
+        assert!(rx_a.try_recv().is_err(), "Selecting a locked session must not fetch history before unlock");
+        assert!(app.chats[&k].locked && !app.chats[&k].unlocked);
+
+        app.chats.get_mut(&k).unwrap().unlock_input = "secret-pass".into();
+        app.submit_unlock(&a.id, &sid);
+        assert!(app.chats[&k].unlock_input.is_empty(), "Unlock password must be zeroized immediately");
+        let unlock_req = take(&mut rx_a, "session_unlock");
+        assert_eq!(unlock_req["sid"], sid);
+        assert_eq!(unlock_req["password"], "secret-pass");
+
+        app.data(a.id.clone(), json!({"type": "session_unlock_result", "sid": sid, "ok": false, "message": "Неверный пароль"}));
+        assert!(!app.chats[&k].unlocked);
+        assert_eq!(app.chats[&k].unlock_error, "Неверный пароль");
+
+        app.data(a.id.clone(), json!({"type": "session_unlock_result", "sid": sid, "ok": true}));
+        assert!(app.chats[&k].unlocked);
+        let hist_req = take(&mut rx_a, "history");
+        assert_eq!(hist_req["sid"], sid);
+
+        app.data(a.id.clone(), json!({"type": "history", "sid": sid, "messages": [{"role": "user", "text": "Confidential"}]}));
+        assert_eq!(app.chats[&k].messages.len(), 1);
+
+        // Relocking immediately wipes messages in memory
+        app.relock_session(&a.id, &sid);
+        let relock_req = take(&mut rx_a, "session_relock");
+        assert_eq!(relock_req["sid"], sid);
+        assert!(app.chats[&k].messages.is_empty());
+        assert!(app.chats[&k].locked && !app.chats[&k].unlocked);
+    }
+
+    #[test]
+    fn agent_installer_and_24_themes_work_in_desktop_state() {
+        assert_eq!(crate::model::THEME_SPECS.len(), 24);
+        assert_eq!(design::THEMES.len(), 24);
+        for (id, _) in design::THEMES {
+            assert!(crate::model::valid_theme(id));
+        }
+
+        let (mut app, a, _, _, mut rx_a, _) = fixture();
+        app.data(
+            a.id.clone(),
+            json!({
+                "type": "backends_status",
+                "backends": {
+                    "claude": {"installed": true, "version": "2.1.285"},
+                    "codex": {"installed": false, "version": ""},
+                    "agy": {"installed": false, "version": ""}
+                }
+            }),
+        );
+        assert!(app.backend_installed(&a.id, "claude"));
+        assert!(!app.backend_installed(&a.id, "codex"));
+        assert!(!app.backend_installed(&a.id, "agy"));
+
+        app.install_server_agent(&a.id, "codex", "install");
+        let req = take(&mut rx_a, "agent_install");
+        assert_eq!(req["agent"], "codex");
+        assert_eq!(req["action"], "install");
+        assert!(app.backend_installing(&a.id, "codex").is_some());
+
+        app.data(
+            a.id.clone(),
+            json!({
+                "type": "agent_install",
+                "agent": "codex",
+                "running": false,
+                "ok": true,
+                "installed": true,
+                "version": "codex-cli 0.169.1",
+                "message": "Codex установлен"
+            }),
+        );
+        assert!(app.backend_installing(&a.id, "codex").is_none());
+        assert!(app.backend_installed(&a.id, "codex"));
+        let cat = take(&mut rx_a, "catalog");
+        assert_eq!(cat["backend"], "codex");
     }
 }

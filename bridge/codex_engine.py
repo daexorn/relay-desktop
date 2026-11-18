@@ -29,9 +29,9 @@ def codex_home():
 def codex_binary():
     home = Path.home()
     candidates = [
-        shutil.which("codex"),
         str(home / ".local/bin/codex"),
         str(home / ".npm-global/bin/codex"),
+        shutil.which("codex"),
         "/usr/local/bin/codex",
         "/usr/bin/codex",
         "/usr/sbin/codex",

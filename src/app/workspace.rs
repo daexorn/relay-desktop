@@ -164,86 +164,109 @@ impl RelayApp {
                 egui::ScrollArea::vertical()
                     .max_height((ctx.screen_rect().height() - 200.).max(220.))
                     .show(ui, |ui| {
-                        label(ui, "Оформление", 14., p.text);
-                        ui.add_space(10.);
+                        label(ui, "Оформление · 24 темы", 14., p.text);
+                        ui.add_space(8.);
                         let columns = if ui.available_width() < 480. { 3. } else { 4. };
                         let tile_width =
                             ((ui.available_width() - 8. * (columns - 1.)) / columns).max(70.);
-                        ui.horizontal_wrapped(|ui| {
-                            ui.spacing_mut().item_spacing = Vec2::splat(8.);
-                            for (id, name) in design::THEMES {
-                                let colors = design::theme_palette(id);
-                                let selected = self.settings.theme() == id;
-                                let (r, response) = ui.allocate_exact_size(
-                                    Vec2::new(tile_width, 84.),
-                                    egui::Sense::click(),
-                                );
-                                ui.painter().rect_filled(r, 10., colors.base);
-                                let inner = r.shrink2(Vec2::new(9., 10.));
-                                ui.painter().rect_filled(
-                                    egui::Rect::from_min_size(inner.min, Vec2::new(16., 36.)),
-                                    4.,
-                                    colors.side,
-                                );
-                                ui.painter().rect_filled(
-                                    egui::Rect::from_min_size(
-                                        inner.min + Vec2::new(23., 0.),
-                                        Vec2::new((inner.width() - 23.).max(20.), 16.),
-                                    ),
-                                    4.,
-                                    colors.surface,
-                                );
-                                ui.painter().line_segment(
-                                    [
-                                        inner.min + Vec2::new(24., 26.),
-                                        inner.min + Vec2::new((inner.width() - 12.).max(30.), 26.),
-                                    ],
-                                    Stroke::new(2.0_f32, colors.line),
-                                );
-                                ui.painter().rect_filled(
-                                    egui::Rect::from_min_size(
-                                        inner.min + Vec2::new(23., 34.),
-                                        Vec2::new(22., 5.),
-                                    ),
-                                    2.,
-                                    design::theme_accent(id),
-                                );
-                                ui.painter().text(
-                                    egui::pos2(r.left() + 10., r.bottom() - 15.),
-                                    egui::Align2::LEFT_CENTER,
-                                    name,
-                                    FontId::proportional(11.5),
-                                    colors.text,
-                                );
-                                if selected {
-                                    design::icon(
-                                        ui.painter(),
-                                        egui::Rect::from_center_size(
-                                            r.right_bottom() - Vec2::splat(15.),
-                                            Vec2::splat(13.),
+                        for (group_light, heading) in [(false, "Тёмные палитры"), (true, "Светлые палитры")] {
+                            label(ui, heading, 11.5, p.muted);
+                            ui.add_space(6.);
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing = Vec2::splat(8.);
+                                for (id, name) in design::THEMES {
+                                    if design::is_light(id) != group_light {
+                                        continue;
+                                    }
+                                    let colors = design::theme_palette(id);
+                                    let selected = self.settings.theme() == id;
+                                    let (r, response) = ui.allocate_exact_size(
+                                        Vec2::new(tile_width, 82.),
+                                        egui::Sense::click(),
+                                    );
+                                    let hovered = response.hovered();
+                                    ui.painter().rect_filled(r, 10., colors.base);
+                                    let inner = r.shrink2(Vec2::new(9., 10.));
+                                    ui.painter().rect_filled(
+                                        egui::Rect::from_min_size(inner.min, Vec2::new(6., 34.)),
+                                        3.,
+                                        colors.rail,
+                                    );
+                                    ui.painter().rect_filled(
+                                        egui::Rect::from_min_size(
+                                            inner.min + Vec2::new(8., 0.),
+                                            Vec2::new(13., 34.),
                                         ),
-                                        Icon::Check,
+                                        4.,
+                                        colors.side,
+                                    );
+                                    ui.painter().rect_filled(
+                                        egui::Rect::from_min_size(
+                                            inner.min + Vec2::new(25., 0.),
+                                            Vec2::new((inner.width() - 25.).max(18.), 15.),
+                                        ),
+                                        4.,
+                                        colors.surface,
+                                    );
+                                    ui.painter().line_segment(
+                                        [
+                                            inner.min + Vec2::new(26., 24.),
+                                            inner.min + Vec2::new((inner.width() - 12.).max(30.), 24.),
+                                        ],
+                                        Stroke::new(2.0_f32, colors.line),
+                                    );
+                                    ui.painter().rect_filled(
+                                        egui::Rect::from_min_size(
+                                            inner.min + Vec2::new(25., 31.),
+                                            Vec2::new(22., 5.),
+                                        ),
+                                        2.5,
                                         design::theme_accent(id),
                                     );
+                                    ui.painter().text(
+                                        egui::pos2(r.left() + 10., r.bottom() - 14.),
+                                        egui::Align2::LEFT_CENTER,
+                                        name,
+                                        FontId::proportional(11.5),
+                                        colors.text,
+                                    );
+                                    if selected {
+                                        design::icon(
+                                            ui.painter(),
+                                            egui::Rect::from_center_size(
+                                                r.right_bottom() - Vec2::splat(14.),
+                                                Vec2::splat(13.),
+                                            ),
+                                            Icon::Check,
+                                            design::theme_accent(id),
+                                        );
+                                    }
+                                    ui.painter().rect_stroke(
+                                        r,
+                                        10.,
+                                        Stroke::new(
+                                            if selected { 1.7_f32 } else { 1.0_f32 },
+                                            if selected {
+                                                accent()
+                                            } else if hovered {
+                                                design::mix(p.line, accent(), 0.5)
+                                            } else {
+                                                p.line
+                                            },
+                                        ),
+                                        egui::StrokeKind::Inside,
+                                    );
+                                    if response
+                                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                        .clicked()
+                                    {
+                                        self.settings.appearance.theme = id.into();
+                                        self.settings.light = design::is_light(id);
+                                    }
                                 }
-                                ui.painter().rect_stroke(
-                                    r,
-                                    10.,
-                                    Stroke::new(
-                                        if selected { 1.5_f32 } else { 1.0_f32 },
-                                        if selected { accent() } else { p.line },
-                                    ),
-                                    egui::StrokeKind::Inside,
-                                );
-                                if response
-                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                                    .clicked()
-                                {
-                                    self.settings.appearance.theme = id.into();
-                                    self.settings.light = design::is_light(id);
-                                }
-                            }
-                        });
+                            });
+                            ui.add_space(12.);
+                        }
                         ui.add_space(18.);
                         design::card(p).show(ui, |ui| {
                             ui.set_width(ui.available_width());
