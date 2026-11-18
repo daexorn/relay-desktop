@@ -15,6 +15,7 @@ pub struct Agent {
     pub name: String,
     pub server: String,
     pub cwd: String,
+    pub backend: String,
     pub model: String,
     pub effort: String,
     pub prompt: String,
@@ -27,6 +28,7 @@ impl Default for Agent {
             name: "Исполнитель".into(),
             server: String::new(),
             cwd: String::new(),
+            backend: String::new(),
             model: "default".into(),
             effort: "default".into(),
             prompt: String::new(),
@@ -86,6 +88,9 @@ impl Config {
                 return Err(
                     "У каждого агента должны быть имя, хост и отдельный идентификатор.".into(),
                 );
+            }
+            if !a.backend.is_empty() && !crate::model::valid_backend(&a.backend) {
+                return Err("Неизвестный тип агента в кластере.".into());
             }
             if a.prompt.len() > 65536 {
                 return Err("Промпт агента слишком длинный.".into());

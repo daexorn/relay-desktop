@@ -45,9 +45,14 @@ struct Remote {
     /// Sessions Claude is answering in right now, on any computer.
     running: std::collections::HashSet<String>,
     models: Vec<crate::model::ModelInfo>,
+    codex_models: Vec<crate::model::ModelInfo>,
+    agy_models: Vec<crate::model::ModelInfo>,
     api_models: Vec<crate::model::ModelInfo>,
     api_tokens: (u64, u64),
     commands: Vec<crate::model::CommandInfo>,
+    codex_commands: Vec<crate::model::CommandInfo>,
+    agy_commands: Vec<crate::model::CommandInfo>,
+    backends: Value,
     /// `claude update` is running on the server.
     updating: bool,
 }
@@ -590,9 +595,11 @@ impl RelayApp {
         self.hide_browser();
         if let Some(s) = self.server() {
             let sid = uuid::Uuid::new_v4().to_string();
+            let b = s.effective_backend().to_owned();
+            let initial_model = s.model_for(&b).to_owned();
             let mut chat = Chat::new(sid.clone(), s.cwd, "Новая сессия".into());
             chat.mode = s.mode;
-            chat.model = s.model;
+            chat.model = initial_model;
             chat.effort = s.effort;
             chat.loaded = true;
             self.controller.bus.ctx.animate_bool_with_time(
@@ -645,8 +652,14 @@ impl RelayApp {
         }
     }
     fn chat_entry(&mut self, s: &Server, session: &Session) -> &mut Chat {
+        let ck = key(&s.id, &session.id);
+        let eff_backend = self.settings.session_backend(
+            s,
+            &ck,
+            Some(session.backend.as_str()).filter(|b| !b.is_empty()),
+        );
         self.chats
-            .entry(key(&s.id, &session.id))
+            .entry(ck.clone())
             .or_insert_with(|| {
                 let mut chat = Chat::new(
                     session.id.clone(),
@@ -654,7 +667,7 @@ impl RelayApp {
                     session.title.clone(),
                 );
                 chat.mode = s.mode.clone();
-                chat.model = s.model.clone();
+                chat.model = s.model_for(&eff_backend).to_owned();
                 chat.effort = s.effort.clone();
                 chat
             });
@@ -1030,6 +1043,7 @@ impl RelayApp {
                 r.version = value["version"].as_str().unwrap_or("Claude Code").into();
                 r.protocol = value["protocol"].as_u64().unwrap_or(0);
                 r.auth_available = value["auth_available"] == true && value["remote_browser"] == true;
+                r.backends = value["backends"].clone();
                 r.home = value["home"].as_str().unwrap_or("~").into();
                 r.usage_requested = Some(Instant::now());
                 r.sessions_requested = Some(Instant::now());
@@ -1041,8 +1055,24 @@ impl RelayApp {
                     }
                 }
                 self.controller.send(&server, json!({"op":"sessions"}));
-                let via_api = self.settings.servers.iter().find(|s| s.id == server).is_some_and(|s| self.selected_chat.get(&server).map(|sid| self.api_for_chat(s,&key(&server,sid))).unwrap_or(s.api.enabled));
-                if !via_api { self.controller.send(&server, json!({"op":"usage"})); }
+                let active_backend = self
+                    .settings
+                    .servers
+                    .iter()
+                    .find(|s| s.id == server)
+                    .map(|s| {
+                        self.selected_chat
+                            .get(&server)
+                            .map(|sid| self.backend_for_chat(s, &key(&server, sid)))
+                            .unwrap_or_else(|| s.effective_backend().to_owned())
+                    })
+                    .unwrap_or_else(|| "claude".into());
+                if active_backend == "claude" {
+                    self.controller.send(&server, json!({"op":"usage"}));
+                } else if matches!(active_backend.as_str(), "codex" | "agy") {
+                    self.controller
+                        .send(&server, json!({"op":"catalog","backend":active_backend}));
+                }
                 let workspace = self
                     .settings
                     .servers
@@ -1073,8 +1103,22 @@ impl RelayApp {
             }
             "catalog" => {
                 let r = self.remote.entry(server.clone()).or_default();
-                r.models = serde_json::from_value(value["models"].clone()).unwrap_or_default();
-                r.commands = serde_json::from_value(value["commands"].clone()).unwrap_or_default();
+                let models = serde_json::from_value(value["models"].clone()).unwrap_or_default();
+                let commands = serde_json::from_value(value["commands"].clone()).unwrap_or_default();
+                match value["backend"].as_str().unwrap_or("claude") {
+                    "codex" => {
+                        r.codex_models = models;
+                        r.codex_commands = commands;
+                    }
+                    "agy" => {
+                        r.agy_models = models;
+                        r.agy_commands = commands;
+                    }
+                    _ => {
+                        r.models = models;
+                        r.commands = commands;
+                    }
+                }
             }
             "api_models" => self.api_models_reply(&server, &value),
             "auth"|"auth_frame"|"auth_browser"|"auth_clipboard"|"browser_info"|"browser_setup"|"browser_navigation" => self.login_event(&server, &value),
@@ -1112,8 +1156,8 @@ impl RelayApp {
                 let sid = value["sid"].as_str().unwrap_or("").to_owned();
                 let busy = value["busy"] == true;
                 if busy {
-                    if let Some(backend @ ("api" | "claude")) = value["backend"].as_str() {
-                        self.settings.api_sessions.insert(key(&server, &sid), backend == "api");
+                    if let Some(backend @ ("claude" | "codex" | "agy" | "api")) = value["backend"].as_str() {
+                        self.settings.set_session_backend(key(&server, &sid), backend);
                     }
                 }
                 let r = self.remote.entry(server.clone()).or_default();
@@ -1309,7 +1353,8 @@ impl RelayApp {
         let Some(k) = self.current_key() else {
             return;
         };
-        server.api.enabled = self.api_for_chat(&server, &k);
+        let backend = self.backend_for_chat(&server, &k);
+        server.api.enabled = backend == "api";
         if let Some(run_id) = self.cluster_for_chat(&server.id, &self.chats[&k].sid) {
             if let Some(r) = self.cluster_store.runs.iter().find(|r| r.id == run_id) {
                 if r.leader_sid != self.chats[&k].sid {
@@ -1322,36 +1367,87 @@ impl RelayApp {
             return;
         }
         let live = self.remote.get(&server.id).is_some_and(|r| r.protocol >= 4);
+        let can_steer = live && matches!(backend.as_str(), "claude" | "codex");
         let c = self.chats.get_mut(&k).unwrap();
-        if c.busy && (!live || server.api.enabled) {
+        if c.busy && !can_steer {
             c.enqueue_draft();
             return;
         }
-        // With the server host a message sent mid-answer goes straight to Claude, who takes it
-        // in at the next step of the same answer, as in the terminal.
         self.send_to_chat(server, k);
     }
-    /// Commands that act at once, also in the middle of an answer: `/model`, `/mode`, `/stop`.
-    /// Every other `/command` goes to Claude Code like a message.
+    /// Commands that act at once, also in the middle of an answer: `/model`, `/mode`, `/backend`, `/login`, `/stop`.
     fn local_command(&mut self, server: &Server, k: &str) -> bool {
-        if self.chats.get(k).is_some_and(|c|c.draft.trim()=="/login") {
-            self.start_login(server);
-            if let Some(c)=self.chats.get_mut(k){c.draft.clear();}
+        let backend_owned = self.backend_for_chat(server, k);
+        let backend = backend_owned.as_str();
+        let draft_trimmed = self.chats.get(k).map(|c| c.draft.trim().to_owned()).unwrap_or_default();
+        if draft_trimmed == "/login" || draft_trimmed.starts_with("/login ") {
+            let arg = draft_trimmed.strip_prefix("/login").unwrap_or("").trim();
+            let prov = if arg.is_empty() {
+                match backend {
+                    "codex" | "agy" => backend,
+                    _ => "claude",
+                }
+            } else {
+                match crate::model::normalize_backend(arg) {
+                    Some("codex") => "codex",
+                    Some("agy") => "agy",
+                    _ => "claude",
+                }
+            };
+            self.start_provider_login(server, prov);
+            if let Some(c) = self.chats.get_mut(k) {
+                c.draft.clear();
+            }
             return true;
         }
-        let models = if server.api.enabled { self.api_model_catalog(server) } else { self.remote.get(&server.id).map(|r| r.models.clone()).unwrap_or_default() };
+        if draft_trimmed.starts_with("/backend ") {
+            let arg = draft_trimmed.strip_prefix("/backend").unwrap_or("").trim();
+            if let Some(next_b) = crate::model::normalize_backend(arg) {
+                if self.chats.get(k).is_some_and(|c| c.busy) {
+                    if let Some(c) = self.chats.get_mut(k) {
+                        c.error = "Дождись завершения ответа перед сменой агента.".into();
+                        c.draft.clear();
+                    }
+                    return true;
+                }
+                self.settings.set_session_backend(k.to_owned(), next_b);
+                if let Some(c) = self.chats.get_mut(k) {
+                    if !c.cluster_context.is_object() {
+                        c.model = server.model_for(next_b).to_owned();
+                    }
+                    c.draft.clear();
+                }
+                if matches!(next_b, "codex" | "agy") {
+                    self.controller.send(&server.id, json!({"op":"catalog","backend":next_b}));
+                }
+                self.notice = format!("Агент: {}", crate::model::backend_label(next_b));
+                self.save();
+                return true;
+            }
+        }
+        let models = self.models_for_backend(server, backend);
         let Some(c) = self.chats.get_mut(k) else {
             return false;
         };
         let text = c.draft.trim().to_owned();
         let (name, arg) = text.split_once(' ').map_or((text.as_str(), ""), |(a, b)| (a, b.trim()));
+        let mut saved_profile_change = false;
         let done = match name {
-            "/model" if !arg.is_empty() => match resolve_model(&models, arg) {
+            "/model" if !arg.is_empty() => match resolve_model(&models, arg).or_else(|| {
+                (backend != "claude").then(|| arg.to_owned())
+            }) {
                 Some(value) => {
-                    if server.api.enabled {
-                        if let Some(profile) = self.settings.servers.iter_mut().find(|s| s.id == server.id) { profile.api.model = value.clone(); }
+                    if backend == "api" {
+                        if let Some(profile) = self.settings.servers.iter_mut().find(|s| s.id == server.id) {
+                            profile.api.model = value.clone();
+                        }
+                        saved_profile_change = true;
                     } else {
                         c.model = value.clone();
+                        if let Some(profile) = self.settings.servers.iter_mut().find(|s| s.id == server.id) {
+                            profile.set_model_for(backend, value.clone());
+                        }
+                        saved_profile_change = true;
                         self.controller.send(&server.id, json!({"op":"control","sid":c.sid,"action":"model","value":value}));
                     }
                     self.notice = format!("Модель: {}", model_label(&models, &value));
@@ -1384,19 +1480,10 @@ impl RelayApp {
         if done {
             c.draft.clear();
         }
-        if done && server.api.enabled { self.save(); }
+        if done && saved_profile_change { self.save(); }
         done
     }
     fn send_to_chat(&mut self, mut server: Server, k: String) {
-        server.api.enabled = self.api_for_chat(&server, &k);
-        if server.api.enabled {
-            let mut profile = server.api.clone();
-            if let Err(error) = profile.validate() {
-                if let Some(chat) = self.chats.get_mut(&k) { chat.error = error.to_string();chat.queue_paused = true; }
-                self.open_api_settings(&server);
-                return;
-            }
-        }
         if self
             .delete_chat
             .as_ref()
@@ -1414,6 +1501,16 @@ impl RelayApp {
             }
             return;
         }
+        let backend = self.backend_for_chat(&server, &k);
+        server.api.enabled = backend == "api";
+        if server.api.enabled {
+            let mut profile = server.api.clone();
+            if let Err(error) = profile.validate() {
+                if let Some(chat) = self.chats.get_mut(&k) { chat.error = error.to_string();chat.queue_paused = true; }
+                self.open_api_settings(&server);
+                return;
+            }
+        }
         if !self.connected(&server.id) {
             self.connect(server);
             return;
@@ -1423,11 +1520,12 @@ impl RelayApp {
             .and_then(|id| self.cluster_store.runs.iter().find(|r| r.id == id))
             .is_some_and(|r| r.leader_sid != self.chats[&k].sid);
         let live = self.remote.get(&server.id).is_some_and(|r| r.protocol >= 4);
+        let can_steer = live && matches!(backend.as_str(), "claude" | "codex");
         let mut api_request = json!({"model":if self.chats[&k].cluster_context.is_object() { self.chats[&k].model.as_str() } else { "default" }});
         self.apply_api_request(&server, &mut api_request);
         let c = self.chats.get_mut(&k).unwrap();
-        let steering = c.busy && live;
-        if (c.busy && !live) || c.loading || (c.draft.trim().is_empty() && c.images.is_empty()) {
+        let steering = c.busy && can_steer;
+        if (c.busy && !can_steer) || c.loading || (c.draft.trim().is_empty() && c.images.is_empty()) {
             return;
         }
         let text = c.draft.trim().to_owned();
@@ -1448,7 +1546,7 @@ impl RelayApp {
             json!({"op":"_desktop_workspace","path":if server.local_control {server.local_workspace.clone()}else{None}}),
         );
         self.controller.send(&server.id,json!({"op":"_desktop_policy","sid":c.sid,"auto":server.local_control && c.mode=="auto"}));
-        let mut request = json!({"op":"prompt","sid":c.sid,"cwd":c.cwd,"text":text,"images":images,"files":files,"model":c.model,"mode":c.mode,"effort":c.effort,"agent_role":c.agent_role,"custom_prompt":c.custom_prompt,"cluster_context":c.cluster_context,"actor":self.settings.actor(),"desktop_enabled":!worker && ((server.local_control && server.local_workspace.is_some()) || server.tests!="off"),"desktop_context":{"os":std::env::consts::OS,"workspace":server.local_workspace,"downloads":dirs::download_dir(),"auto":c.mode=="auto","local":server.local_control && server.local_workspace.is_some(),"tests":server.tests}});
+        let mut request = json!({"op":"prompt","backend":backend,"sid":c.sid,"cwd":c.cwd,"text":text,"images":images,"files":files,"model":c.model,"mode":c.mode,"effort":c.effort,"agent_role":c.agent_role,"custom_prompt":c.custom_prompt,"cluster_context":c.cluster_context,"actor":self.settings.actor(),"desktop_enabled":!worker && ((server.local_control && server.local_workspace.is_some()) || server.tests!="off"),"desktop_context":{"os":std::env::consts::OS,"workspace":server.local_workspace,"downloads":dirs::download_dir(),"auto":c.mode=="auto","local":server.local_control && server.local_workspace.is_some(),"tests":server.tests}});
         if server.api.enabled {
             request["backend"] = json!("api");
             request["model"] = api_request["model"].take();
@@ -1803,34 +1901,74 @@ impl RelayApp {
                                 .response
                                 .on_hover_text(format!("{}@{}", server.user, server.host));
                                 if connected {
+                                    let active_backend = self
+                                        .selected_chat
+                                        .get(&server.id)
+                                        .map(|sid| self.backend_for_chat(&server, &key(&server.id, sid)))
+                                        .unwrap_or_else(|| server.effective_backend().to_owned());
                                     if let Some(remote) = self.remote.get(&server.id) {
                                         ui.add_space(6.);
-                                        let via_api = self.selected_chat.get(&server.id).is_some_and(|sid| self.api_for_chat(&server, &key(&server.id,sid))) || (self.selected_chat.get(&server.id).is_none() && server.api.enabled);
-                                        if via_api {
-                                            label(ui, "Пользовательский API", 12., p.muted);
-                                            if remote.api_tokens != (0, 0) { label(ui, format!("Токены: {} вход · {} выход",remote.api_tokens.0,remote.api_tokens.1), 11., p.muted); }
-                                        } else { limits::show(ui, &remote.usage, p, connected); }
-                                        if remote.protocol >= 4 {
-                                            ui.add_space(4.);
-                                            let text = if remote.updating {
-                                                format!("{} · обновляется…", remote.version)
-                                            } else {
-                                                format!("{} · обновить", remote.version)
-                                            };
-                                            let response = ui
-                                                .add(egui::Label::new(RichText::new(text).size(11.).color(p.muted)).truncate().sense(egui::Sense::click()))
-                                                .on_hover_text("Claude Code на сервере обновляется сам раз в 6 часов, когда ничего не делает. Нажми, чтобы обновить сейчас.");
-                                            if response.clicked() && !remote.updating {
-                                                self.controller.send(&server.id, json!({"op":"claude_update"}));
+                                        match active_backend.as_str() {
+                                            "api" => {
+                                                label(ui, "Пользовательский API", 12., p.muted);
+                                                if remote.api_tokens != (0, 0) {
+                                                    label(ui, format!("Токены: {} вход · {} выход", remote.api_tokens.0, remote.api_tokens.1), 11., p.muted);
+                                                }
+                                            }
+                                            "codex" => {
+                                                let ver = remote.backends["codex"]["version"].as_str().unwrap_or("");
+                                                label(ui, if ver.is_empty() { "OpenAI Codex CLI".to_owned() } else { format!("OpenAI Codex · {ver}") }, 11.5, p.muted);
+                                            }
+                                            "agy" => {
+                                                let ver = remote.backends["agy"]["version"].as_str().unwrap_or("");
+                                                label(ui, if ver.is_empty() { "Antigravity CLI (agy)".to_owned() } else { format!("Antigravity · {ver}") }, 11.5, p.muted);
+                                            }
+                                            _ => {
+                                                limits::show(ui, &remote.usage, p, connected);
+                                                if remote.protocol >= 4 {
+                                                    ui.add_space(4.);
+                                                    let text = if remote.updating {
+                                                        format!("{} · обновляется…", remote.version)
+                                                    } else {
+                                                        format!("{} · обновить", remote.version)
+                                                    };
+                                                    let response = ui
+                                                        .add(egui::Label::new(RichText::new(text).size(11.).color(p.muted)).truncate().sense(egui::Sense::click()))
+                                                        .on_hover_text("Claude Code на сервере обновляется сам раз в 6 часов, когда ничего не делает. Нажми, чтобы обновить сейчас.");
+                                                    if response.clicked() && !remote.updating {
+                                                        self.controller.send(&server.id, json!({"op":"claude_update"}));
+                                                    }
+                                                }
                                             }
                                         }
                                     }
-                                }
-                                if connected {
                                     ui.add_space(8.);
                                     let active=self.login.as_ref().is_some_and(|l|l.server==server.id && l.active());
                                     if design::service_action(ui,"Браузер",Icon::Browser,active,p).on_hover_text("Открыть браузер на сервере").clicked(){self.start_browser(&server);}
-                                    if design::service_action(ui,"Войти в Claude",Icon::Key,false,p).on_hover_text("Войти в учётную запись Claude на этом сервере").clicked(){self.start_login(&server);}
+                                    let (primary_prov, primary_label, primary_hint) = match active_backend.as_str() {
+                                        "codex" => ("codex", "Войти в Codex", "Войти в учётную запись OpenAI Codex на этом сервере"),
+                                        "agy" => ("agy", "Войти в AGY", "Войти в учётную запись Google Antigravity на этом сервере"),
+                                        _ => ("claude", "Войти в Claude", "Войти в учётную запись Claude на этом сервере"),
+                                    };
+                                    if design::service_action(ui, primary_label, Icon::Key, false, p).on_hover_text(primary_hint).clicked() {
+                                        self.start_provider_login(&server, primary_prov);
+                                    }
+                                    ui.add_space(2.);
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 6.;
+                                        label(ui, "Вход:", 10.5, p.muted);
+                                        for (prov, short) in [("claude", "Claude"), ("codex", "Codex"), ("agy", "AGY")] {
+                                            if prov == primary_prov {
+                                                continue;
+                                            }
+                                            if ui.add(egui::Label::new(RichText::new(short).size(11.).color(accent())).sense(egui::Sense::click()))
+                                                .on_hover_text(format!("Войти в {short} в браузере сервера"))
+                                                .clicked()
+                                            {
+                                                self.start_provider_login(&server, prov);
+                                            }
+                                        }
+                                    });
                                 }
                                 if !connected && !connecting {
                                     ui.add_space(6.);
@@ -2089,10 +2227,16 @@ impl RelayApp {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().interact_size.y = 14.;
                     let place = folder_name(&session.cwd);
+                    let badge = match session.backend.as_str() {
+                        "codex" => "Codex · ",
+                        "agy" => "AGY · ",
+                        "api" => "API · ",
+                        _ => "",
+                    };
                     let meta = if busy {
-                        format!("работает · {place}")
+                        format!("{badge}работает · {place}")
                     } else {
-                        format!("{place} · {}", relative(session.modified))
+                        format!("{badge}{place} · {}", relative(session.modified))
                     };
                     let width = ui.available_width() - 30. - if busy { 32. } else { 0. };
                     let mut job = egui::text::LayoutJob::simple(meta, FontId::proportional(11.5), p.muted, width);
@@ -2576,16 +2720,24 @@ impl RelayApp {
         });
         ui.add_space(4.);
         let mut tests = server.tests.clone();
-        let mut use_api = self.api_for_chat(&server, k);
-        let previous_api = use_api;
+        let mut backend = self.backend_for_chat(&server, k);
+        let previous_backend = backend.clone();
         let mut api_model = server.api.model.clone();
         let mut configure_api = false;
-        let api_models = self.api_model_catalog(&server);
+        let mut login_provider: Option<String> = None;
+        let models = self.models_for_backend(&server, &backend);
         self.game_test_cards(ui, &server.id, p);
-        let (models, commands, live) = self
+        let (commands, live) = self
             .remote
             .get(&server.id)
-            .map(|r| (r.models.clone(), r.commands.clone(), r.protocol >= 4))
+            .map(|r| {
+                let cmds = match backend.as_str() {
+                    "codex" => r.codex_commands.clone(),
+                    "agy" => r.agy_commands.clone(),
+                    _ => r.commands.clone(),
+                };
+                (cmds, r.protocol >= 4)
+            })
             .unwrap_or_default();
         let chat = self.chats.get_mut(k).unwrap();
         if let Some((sent, total)) = chat.upload_progress {
@@ -2810,12 +2962,12 @@ impl RelayApp {
                                 .id(egui::Id::new("prompt-field"))
                                 .frame(false)
                                 .hint_text(
-                                    RichText::new(if chat.busy && live {
-                                        "Добавь уточнение — Claude учтёт его по ходу работы…"
+                                    RichText::new(if chat.busy && live && matches!(backend.as_str(), "claude" | "codex") {
+                                        format!("Добавь уточнение — {} учтёт его по ходу работы…", crate::model::backend_short_label(&backend))
                                     } else if chat.busy {
-                                        "Добавь уточнение — отправится после текущего ответа…"
+                                        "Добавь уточнение — отправится после текущего ответа…".into()
                                     } else {
-                                        "Напиши задачу…"
+                                        "Напиши задачу…".into()
                                     })
                                     .color(p.muted),
                                 )
@@ -2846,8 +2998,9 @@ impl RelayApp {
                         attach = true;
                     }
                     if !compact {
-                        api_settings::source_picker(ui, &mut use_api, &mut configure_api, chat.busy, p);
-                        composer_selectors(ui, chat, &mut tests, if use_api { &api_models } else { &models }, if use_api { Some(&mut api_model) } else { None }, p);
+                        api_settings::backend_picker(ui, &mut backend, &mut configure_api, &mut login_provider, chat.busy, p);
+                        let is_api = backend == "api";
+                        composer_selectors(ui, chat, &mut tests, &models, if is_api { Some(&mut api_model) } else { None }, p);
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 8.;
@@ -2860,8 +3013,8 @@ impl RelayApp {
                                 p,
                                 true,
                             )
-                            .on_hover_text(if chat.busy && live && !use_api {
-                                "Отправить сейчас · Claude учтёт по ходу работы"
+                            .on_hover_text(if chat.busy && live && matches!(backend.as_str(), "claude" | "codex") {
+                                "Отправить сейчас · агент учтёт по ходу работы"
                             } else if chat.busy {
                                 "В очередь · текущий ответ продолжится"
                             } else if connected {
@@ -2889,15 +3042,16 @@ impl RelayApp {
                 if compact {
                     ui.add_space(4.);
                     ui.horizontal_wrapped(|ui| {
-                        api_settings::source_picker(ui, &mut use_api, &mut configure_api, chat.busy, p);
-                        composer_selectors(ui, chat, &mut tests, if use_api { &api_models } else { &models }, if use_api { Some(&mut api_model) } else { None }, p);
+                        api_settings::backend_picker(ui, &mut backend, &mut configure_api, &mut login_provider, chat.busy, p);
+                        let is_api = backend == "api";
+                        composer_selectors(ui, chat, &mut tests, &models, if is_api { Some(&mut api_model) } else { None }, p);
                     });
                 }
             });
         let current = (chat.model.clone(), chat.mode.clone(), chat.effort.clone());
-        // With the server host, model and mode switch even while Claude is answering.
+        // With the server host, model and mode switch even while the agent is answering.
         if live && chat.busy {
-            if previous.0 != current.0 && !use_api {
+            if previous.0 != current.0 && backend != "api" {
                 self.controller.send(&server.id, json!({"op":"control","sid":chat.sid,"action":"model","value":current.0}));
             }
             if previous.1 != current.1 {
@@ -2924,7 +3078,7 @@ impl RelayApp {
                 }
                 self.cluster_store.dirty = true;
             } else if let Some(s) = self.settings.servers.iter_mut().find(|s| s.id == server.id) {
-                s.model = current.0;
+                s.set_model_for(&backend, current.0);
                 s.mode = current.1;
                 s.effort = current.2;
             }
@@ -2938,13 +3092,28 @@ impl RelayApp {
                 .send(&server.id, json!({"op":"_tests_policy","mode":tests}));
             self.save();
         }
-        if use_api != previous_api || api_model != server.api.model {
-            self.settings.api_sessions.insert(k.to_owned(), use_api);
+        if backend != previous_backend || api_model != server.api.model {
+            self.settings.set_session_backend(k.to_owned(), &backend);
             if let Some(profile) = self.settings.servers.iter_mut().find(|s| s.id == server.id) {
                 profile.api.model = api_model;
             }
-            if use_api && server.api.base_url.is_empty() { configure_api = true; }
+            if backend != previous_backend {
+                if let Some(c) = self.chats.get_mut(k) {
+                    if !c.cluster_context.is_object() {
+                        c.model = server.model_for(&backend).to_owned();
+                    }
+                }
+                if matches!(backend.as_str(), "codex" | "agy") {
+                    self.controller.send(&server.id, json!({"op":"catalog","backend":backend}));
+                }
+            }
+            if backend == "api" && server.api.base_url.is_empty() { configure_api = true; }
             self.save();
+        }
+        if let Some(prov) = login_provider {
+            if let Some(profile) = self.settings.servers.iter().find(|s| s.id == server.id).cloned() {
+                self.start_provider_login(&profile, &prov);
+            }
         }
         if configure_api {
             if let Some(profile) = self.settings.servers.iter().find(|s| s.id == server.id).cloned() { self.open_api_settings(&profile); }
@@ -3595,6 +3764,25 @@ impl RelayApp {
                     ui.add_space(4.);
                     label(ui, "Рабочая папка", 12., p.muted);
                     design::field(ui, &mut editor.server.cwd, "~", false);
+                    ui.add_space(6.);
+                    label(ui, "Агент по умолчанию", 12., p.muted);
+                    let mut chosen_backend = editor.server.effective_backend().to_owned();
+                    egui::ComboBox::from_id_salt("server-default-backend")
+                        .width(ui.available_width())
+                        .selected_text(crate::model::backend_label(&chosen_backend))
+                        .icon(design::combo_icon)
+                        .show_ui(ui, |ui| {
+                            for id in crate::model::BACKENDS {
+                                ui.selectable_value(
+                                    &mut chosen_backend,
+                                    id.to_owned(),
+                                    crate::model::backend_label(id),
+                                );
+                            }
+                        });
+                    if chosen_backend != editor.server.effective_backend() {
+                        editor.server.set_default_backend(&chosen_backend);
+                    }
                     ui.add_space(4.);
                     design::toggle(ui, &mut editor.server.remember, "Запомнить пароль", p)
                         .on_hover_text("Пароль сохраняется в хранилище системы");
@@ -4025,6 +4213,11 @@ impl RelayApp {
                     {"value":"haiku","displayName":"Haiku 5.5","description":"Fastest for quick answers"}
                 ])).unwrap_or_default(),
                 updating: false,
+                codex_models: crate::model::default_backend_models("codex"),
+                agy_models: crate::model::default_backend_models("agy"),
+                codex_commands: vec![],
+                agy_commands: vec![],
+                backends: json!({"claude":{"installed":true},"codex":{"installed":true},"agy":{"installed":true},"api":{"installed":true}}),
                 commands: serde_json::from_value(json!([
                     {"name":"compact","description":"Сжать историю разговора","hint":"[что сохранить]"},
                     {"name":"context","description":"Показать, чем занят контекст","hint":""},
@@ -4097,13 +4290,23 @@ impl RelayApp {
     }
 }
 /// `cd` into the session's folder and resume it: Claude Code finds sessions by working folder.
+#[cfg(test)]
 fn resume_command(cwd: &str, sid: &str) -> String {
+    resume_command_for(cwd, sid, "", "claude")
+}
+
+fn resume_command_for(cwd: &str, sid: &str, native_id: &str, backend: &str) -> String {
     let quoted = if cwd.chars().all(|c| c.is_ascii_alphanumeric() || "/._-~".contains(c)) {
         cwd.to_owned()
     } else {
         format!("'{}'", cwd.replace('\'', "'\\''"))
     };
-    format!("cd {quoted} && claude --resume {sid}")
+    let target = if native_id.is_empty() { sid } else { native_id };
+    match backend {
+        "codex" => format!("cd {quoted} && codex resume {target}"),
+        "agy" => format!("cd {quoted} && agy --conversation {target}"),
+        _ => format!("cd {quoted} && claude --resume {sid}"),
+    }
 }
 
 /// Commands for the `/` popup: the draft is a single word starting with `/`.
@@ -4200,6 +4403,13 @@ fn composer_selectors(ui: &mut egui::Ui, chat: &mut Chat, tests: &mut String, mo
                     let name = if m.value == "default" { format!("Авто · {}", m.description) } else { m.display_name.clone() };
                     ui.selectable_value(selected_model, m.value.clone(), name)
                         .on_hover_text(&m.description);
+                }
+                if !is_api {
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        label(ui, "Своя:", 11.5, p.muted);
+                        ui.add(egui::TextEdit::singleline(selected_model).desired_width(150.).hint_text("id модели"));
+                    });
                 }
             });
         design::wrap_control(ui,match chat.mode.as_str(){"auto"=>"Авто","acceptEdits"=>"Правки файлов","plan"=>"План",_=>"С подтверждением"});
@@ -4470,10 +4680,10 @@ fn session_menu(
             action = Some(RowAction::StartRename);
         }
         if ui.button("Скопировать команду для терминала")
-            .on_hover_text("Чтобы продолжить эту сессию в Claude Code на сервере: вставь команду в SSH-терминал")
+            .on_hover_text("Чтобы продолжить эту сессию в CLI на сервере: вставь команду в SSH-терминал")
             .clicked()
         {
-            ui.ctx().copy_text(resume_command(&session.cwd, &session.id));
+            ui.ctx().copy_text(resume_command_for(&session.cwd, &session.id, &session.native_id, &session.backend));
             ui.close_menu();
         }
         ui.menu_button("Переместить в папку", |ui| {
@@ -4802,9 +5012,19 @@ impl eframe::App for RelayApp {
         self.drain_queues();
         if !self.demo {
             if let Some(server) = self.settings.selected.as_ref() {
-                let via_api = self.settings.servers.iter().find(|s| &s.id == server).is_some_and(|s| self.selected_chat.get(server).map(|sid| self.api_for_chat(s,&key(server,sid))).unwrap_or(s.api.enabled));
+                let is_claude = self
+                    .settings
+                    .servers
+                    .iter()
+                    .find(|s| &s.id == server)
+                    .is_some_and(|s| {
+                        self.selected_chat
+                            .get(server)
+                            .map(|sid| self.backend_for_chat(s, &key(server, sid)) == "claude")
+                            .unwrap_or_else(|| s.effective_backend() == "claude")
+                    });
                 if let Some(remote) = self.remote.get_mut(server).filter(|r| r.connected) {
-                    if !via_api && remote
+                    if is_claude && remote
                         .usage_requested
                         .is_none_or(|at| at.elapsed() >= Duration::from_secs(60))
                     {
@@ -4949,6 +5169,8 @@ mod tests {
     fn resume_command_enters_the_folder() {
         assert_eq!(resume_command("/root/relay-desktop", "0e33b7a5-123f"), "cd /root/relay-desktop && claude --resume 0e33b7a5-123f");
         assert_eq!(resume_command("/root/мой проект", "x"), "cd '/root/мой проект' && claude --resume x");
+        assert_eq!(resume_command_for("/opt/app", "sid-1", "thr-codex", "codex"), "cd /opt/app && codex resume thr-codex");
+        assert_eq!(resume_command_for("/opt/app", "sid-1", "conv-agy", "agy"), "cd /opt/app && agy --conversation conv-agy");
     }
 
     #[test]

@@ -237,6 +237,7 @@ class Transcripts:
         config = Path(os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude"))).expanduser()
         self.root = Path(root) if root else config / "projects"
         self.cache = {}
+        self.linked_ids = {}
 
     def files(self):
         # Only primary conversations. Subagent transcripts stay inside their parent.
@@ -286,8 +287,13 @@ class Transcripts:
         title = " ".join(str(title).split())[:100]
         backend = next((r.get("relayBackend", "claude") for r in reversed(rows)
                         if r.get("type") in ("user", "assistant") and not r.get("isSidechain")), "claude")
-        result = {"id": path.stem, "title": title, "cwd": cwd, "modified": stat.st_mtime, "messages": 0,
-                  "backend": backend if backend in ("api", "claude") else "claude"}
+        backend = backend if backend in ("claude", "codex", "agy", "api") else "claude"
+        codex_tid = next((r.get("codexThreadId") for r in reversed(rows) if isinstance(r.get("codexThreadId"), str) and r.get("codexThreadId")), "")
+        agy_sid = next((r.get("agySessionId") for r in reversed(rows) if isinstance(r.get("agySessionId"), str) and r.get("agySessionId")), "")
+        native_id = codex_tid if backend == "codex" and codex_tid else (agy_sid if backend == "agy" and agy_sid else path.stem)
+        self.linked_ids[path.stem.lower()] = {x.lower() for x in (codex_tid, agy_sid) if x}
+        result = {"id": path.stem, "native_id": native_id, "title": title, "cwd": cwd, "modified": stat.st_mtime, "messages": 0,
+                  "backend": backend}
         self.cache[str(path)] = (key, result)
         return result
 
@@ -911,13 +917,19 @@ class FileTransfers:
 class Bridge:
     def __init__(self, send=emit, transcripts=None, binary=None):
         self.send = send
+        self._custom_transcripts = transcripts is not None
         self.transcripts = transcripts or Transcripts()
         try:self.binary = binary or claude_binary()
         except ValueError:self.binary = None
         api_source=globals().get('API_SOURCE') or Path(__file__).with_name('api_engine.py').read_text(encoding='utf-8')
         self.api={'__name__':'relay_api'};exec(api_source,self.api)
+        codex_source=globals().get('CODEX_SOURCE') or Path(__file__).with_name('codex_engine.py').read_text(encoding='utf-8')
+        self.codex={'__name__':'relay_codex'};exec(codex_source,self.codex)
+        agy_source=globals().get('AGY_SOURCE') or Path(__file__).with_name('agy_engine.py').read_text(encoding='utf-8')
+        self.agy={'__name__':'relay_agy'};exec(agy_source,self.agy)
         self.api_records=records
-        self.last_backend='api' if globals().get('API_DEFAULT') else 'claude'
+        default_b = globals().get('DEFAULT_BACKEND') or ('api' if globals().get('API_DEFAULT') else 'claude')
+        self.last_backend = default_b if default_b in ('claude', 'codex', 'agy', 'api') else 'claude'
         self.runs = {}
         self.run_lock = threading.RLock()
         self.usage = UsageState()
@@ -940,11 +952,70 @@ class Bridge:
         self.meta = SessionMeta()
         self.catalog = None
         self.catalog_probe = False
+        self.backend_catalogs = {"codex": None, "agy": None}
+        self.backend_probes = set()
         auth_source=globals().get('AUTH_SOURCE') or Path(__file__).with_name('auth_flow.py').read_text(encoding='utf-8')
         auth={'__name__':'relay_auth'};exec(auth_source,auth)
         browser_source=globals().get('BROWSER_SOURCE') or Path(__file__).with_name('remote_browser.py').read_text(encoding='utf-8')
         self.browser={'__name__':'relay_browser'};exec(browser_source,self.browser)
-        self.auth=auth['AuthManager'](self.binary,browser_factory=self.browser['RemoteBrowser'])
+        self.auth=auth['AuthManager'](
+            self.binary,
+            browser_factory=self.browser['RemoteBrowser'],
+            binaries={'codex': self.codex['codex_binary'], 'agy': self.agy['agy_binary']},
+            on_success=self._on_auth_success,
+        )
+
+    def _on_auth_success(self, provider):
+        if provider == "claude":
+            self.catalog = None
+            self.probe_catalog()
+        elif provider in ("codex", "agy"):
+            self.backend_catalogs[provider] = None
+            self.probe_backend_catalog(provider)
+
+    def _scan_codex_native(self):
+        return (
+            not self._custom_transcripts
+            or "CODEX_HOME" in os.environ
+            or self.transcripts.root.resolve().is_relative_to(Path.home().resolve())
+        )
+
+    def _scan_agy_native(self):
+        return (
+            not self._custom_transcripts
+            or self.transcripts.root.resolve().is_relative_to(Path.home().resolve())
+        )
+
+    def learn_backend_catalog(self, backend, models=None, version="", commands=None):
+        prev = self.backend_catalogs.get(backend) or {}
+        final_models = models if models is not None else prev.get("models", [])
+        final_commands = commands if commands is not None else prev.get("commands", [])
+        final_ver = version or prev.get("version", "")
+        if not final_models and not final_commands:
+            return
+        cat = {"type": "catalog", "backend": backend, "models": final_models, "commands": final_commands, "version": final_ver}
+        self.backend_catalogs[backend] = cat
+        self.send(cat)
+
+    def probe_backend_catalog(self, backend):
+        if backend not in ("codex", "agy"):
+            return
+        with self.run_lock:
+            if self.backend_catalogs.get(backend) or backend in self.backend_probes:
+                return
+            self.backend_probes.add(backend)
+        def run():
+            try:
+                engine = self.codex if backend == "codex" else self.agy
+                models, ver = engine["probe_catalog"]()
+                if models:
+                    self.learn_backend_catalog(backend, models, ver)
+            except Exception:
+                pass
+            finally:
+                with self.run_lock:
+                    self.backend_probes.discard(backend)
+        threading.Thread(target=run, daemon=True).start()
 
     def learn_catalog(self, info):
         """Models and slash commands exactly as this server's Claude Code reports them."""
@@ -954,7 +1025,7 @@ class Bridge:
                     for c in info.get("commands") or [] if isinstance(c, dict) and isinstance(c.get("name"), str) and not c["name"].startswith("__")]
         if not models and not commands:
             return
-        self.catalog = {"type": "catalog", "models": models, "commands": commands,
+        self.catalog = {"type": "catalog", "backend": "claude", "models": models, "commands": commands,
                         "version": str(info.get("claude_code_version") or "")}
         self.send(self.catalog)
 
@@ -1007,11 +1078,17 @@ class Bridge:
         threading.Thread(target=run, daemon=True).start()
 
     def claude_version(self):
-        if not self.binary:return "API · Claude Code не установлен"
-        try:
-            return subprocess.check_output([self.binary, "--version"], text=True, timeout=15, stdin=subprocess.DEVNULL).strip()
-        except (OSError, subprocess.SubprocessError):
-            return "Claude Code"
+        if self.binary:
+            try:
+                return subprocess.check_output([self.binary, "--version"], text=True, timeout=15, stdin=subprocess.DEVNULL).strip()
+            except (OSError, subprocess.SubprocessError):
+                return "Claude Code"
+        codex_ver = self.codex["codex_version"]()
+        agy_ver = self.agy["agy_version"]()
+        available = [v for v in (codex_ver, agy_ver) if v]
+        if available:
+            return " · ".join(available)
+        return "API · CLI-агенты не установлены"
 
     def update_claude(self, manual=False):
         """`claude update` on this server; the next started session uses the new version."""
@@ -1046,28 +1123,29 @@ class Bridge:
         finally:
             self.updating = False
 
-    def quick_command(self, sid, text):
+    def quick_command(self, sid, text, backend="claude"):
         """`/model x` and `/mode x` switch at once, whichever app sent them, and answer right away."""
         match = re.fullmatch(r"\s*/(model|mode)(?:\s+(\S+))?\s*", text)
         if not match:
             return False
         kind, value = match.groups()
         run = self.runs.get(sid)
-        models = (self.catalog or {}).get("models") or []
+        cat = self.catalog if backend == "claude" else self.backend_catalogs.get(backend)
+        models = (cat or {}).get("models") or []
         if kind == "model":
             if not value:
-                reply = "Модели на этом сервере: " + ", ".join(f"`{m['value']}` ({m.get('displayName') or m['value']})" for m in models) if models else "Напиши `/model <название>`, например `/model opus`."
+                reply = "Модели на этом сервере: " + ", ".join(f"`{m['value']}` ({m.get('displayName') or m['value']})" for m in models) if models else "Напиши `/model <название>`, например `/model default`."
             else:
                 wanted = value.lower()
                 found = next((m for m in models if wanted in (m["value"].lower(), str(m.get("displayName", "")).lower())), None) or \
                     next((m for m in models if m["value"].lower().startswith(wanted) or str(m.get("displayName", "")).lower().startswith(wanted)), None)
-                if models and not found:
+                if models and not found and backend == "claude":
                     reply = f"Нет модели «{value}». Есть: " + ", ".join(m["value"] for m in models)
                 else:
                     chosen = found["value"] if found else value
                     if run and not run.closed:
                         run.control("set_model", model=None if chosen == "default" else chosen); run.model = chosen
-                    self.send({"type": "model_changed", "sid": sid, "model": chosen})
+                    self.send({"type": "model_changed", "sid": sid, "model": chosen, "backend": backend})
                     reply = "Модель: " + ((found or {}).get("displayName") or chosen) + (" — со следующего ответа." if run and run.busy else ".")
         else:
             modes = {"auto": "auto", "авто": "auto", "plan": "plan", "план": "plan", "edits": "acceptEdits", "acceptedits": "acceptEdits", "manual": "manual", "ручной": "manual"}
@@ -1106,7 +1184,24 @@ class Bridge:
                     self.runs.pop(sid, None)
 
     def send_sessions(self):
-        sessions = self.transcripts.sessions()
+        sessions = list(self.transcripts.sessions())
+        excluded = {s["id"].lower() for s in sessions}
+        for linked in self.transcripts.linked_ids.values():
+            excluded.update(linked)
+        if self._scan_codex_native():
+            try:
+                codex_rows = self.codex["native_sessions"](excluded)
+                sessions.extend(codex_rows)
+                excluded.update(r["id"].lower() for r in codex_rows)
+            except Exception:
+                pass
+        if self._scan_agy_native():
+            try:
+                sessions.extend(self.agy["native_sessions"](excluded))
+            except Exception:
+                pass
+        sessions.sort(key=lambda r: r["modified"], reverse=True)
+        sessions = sessions[:2000]
         try:
             sessions, folders = self.meta.apply(sessions)
         except OSError:
@@ -1118,12 +1213,30 @@ class Bridge:
 
     def hello(self):
         version = self.claude_version()
+        codex_bin = self.codex["codex_binary"]()
+        agy_bin = self.agy["agy_binary"]()
+        backends = {
+            "claude": {"installed": bool(self.binary)},
+            "codex": {"installed": bool(codex_bin), "version": self.codex["codex_version"](codex_bin) or "" if codex_bin else ""},
+            "agy": {"installed": bool(agy_bin), "version": self.agy["agy_version"](agy_bin) or "" if agy_bin else ""},
+            "api": {"installed": True},
+        }
         self.send({"type": "hello", "home": str(Path.home()), "hostname": os.uname().nodename,
-                   "version": version, "protocol": 4, "api_available": True, "auth_available": True, "remote_browser": True, "host": bool(globals().get("RELAY_HOSTED"))})
+                   "version": version, "protocol": 4, "api_available": True, "auth_available": True,
+                   "remote_browser": True, "backends": backends, "host": bool(globals().get("RELAY_HOSTED"))})
         if self.catalog:
             self.send(self.catalog)
-        elif not globals().get('API_DEFAULT'):
+        elif self.binary and self.last_backend == "claude" and not globals().get('API_DEFAULT'):
             self.probe_catalog()
+        for b in ("codex", "agy"):
+            if self.backend_catalogs.get(b):
+                self.send(self.backend_catalogs[b])
+            elif b == "codex" and self._scan_codex_native():
+                cached = self.codex["models_from_cache"]()
+                if cached:
+                    self.learn_backend_catalog("codex", cached, backends["codex"]["version"])
+        if self.last_backend in ("codex", "agy") and backends[self.last_backend]["installed"]:
+            self.probe_backend_catalog(self.last_backend)
 
     def dispatch(self, req):
         op = req.get("op")
@@ -1131,7 +1244,11 @@ class Bridge:
         try:
             if op == "auth_start":
                 owner=getattr(CLIENT,'value',None)
-                self.auth.start(req.get('id'),owner.send if owner is not None else self.send,owner)
+                provider = req.get('provider')
+                if provider and provider != 'claude':
+                    self.auth.start(req.get('id'), owner.send if owner is not None else self.send, owner, provider=provider)
+                else:
+                    self.auth.start(req.get('id'), owner.send if owner is not None else self.send, owner)
             elif op == 'browser_open':
                 owner=getattr(CLIENT,'value',None)
                 self.auth.start(req.get('id'),owner.send if owner is not None else self.send,owner,standalone=True,url=req.get('url','https://claude.ai/'))
@@ -1172,7 +1289,20 @@ class Bridge:
                     if run:
                         run.close()
                         self.runs.pop(sid, None)
+                    linked = set(self.transcripts.linked_ids.get(sid, set()))
+                    found = self.transcripts.find(sid)
+                    if found is not None:
+                        try:
+                            self.transcripts.metadata(found)
+                            linked.update(self.transcripts.linked_ids.get(sid, set()))
+                        except Exception:
+                            pass
                     self.transcripts.delete(sid)
+                    for target_id in {sid, *linked}:
+                        if self._scan_codex_native() and self.codex["has_native_session"](target_id):
+                            self.codex["delete_native_session"](target_id)
+                        if self._scan_agy_native() and self.agy["has_native_session"](target_id):
+                            self.agy["delete_native_session"](target_id)
                 try:
                     self.meta.forget(sid)
                 except OSError:
@@ -1202,7 +1332,15 @@ class Bridge:
                     self.send({'type':'api_models','request':req.get('request'),'models':[],'error':self.api['clean_error'](error,(req.get('api') or {}).get('key',''))})
             elif op == "history":
                 sid = valid_id(req.get("sid"))
-                self.send({"type": "history", "sid": sid, "messages": self.transcripts.history(sid)})
+                if self.transcripts.find(sid) is not None:
+                    messages = self.transcripts.history(sid)
+                elif self._scan_codex_native() and self.codex["has_native_session"](sid):
+                    messages = self.codex["native_history"](sid)
+                elif self._scan_agy_native() and self.agy["has_native_session"](sid):
+                    messages = self.agy["native_history"](sid)
+                else:
+                    messages = self.transcripts.history(sid)
+                self.send({"type": "history", "sid": sid, "messages": messages})
             elif op == "folders":
                 path = directory(req.get("path"))
                 children = []
@@ -1217,15 +1355,17 @@ class Bridge:
             elif op == "prompt":
                 sid = valid_id(req.get("sid"))
                 backend=req.get('backend','claude')
-                if backend not in ('claude','api'):raise ValueError('Неизвестный источник модели.')
+                if backend not in ('claude','codex','agy','api'):raise ValueError('Неизвестный источник модели.')
                 api=self.api['configuration'](req.get('api')) if backend=='api' else None
-                if backend=='claude' and not self.binary:raise ValueError('На сервере нет Claude Code. Выбери API или установи Claude Code.')
+                if backend=='claude' and not self.binary:raise ValueError('На сервере нет Claude Code. Выбери другой агент или установи Claude Code.')
+                if backend=='codex' and not self.codex['codex_binary']():raise ValueError('На сервере не установлен Codex CLI (`codex`). Установи его или выбери другой агент.')
+                if backend=='agy' and not self.agy['agy_binary']():raise ValueError('На сервере не установлен Antigravity CLI (`agy`). Установи его или выбери другой агент.')
                 text = req.get("text")
                 images = req.get("images", [])
                 files = req.get("files", [])
                 if not isinstance(text, str) or (not text.strip() and not images and not files) or len(text.encode("utf-8")) > 1024 * 1024:
                     raise ValueError("Сообщение пустое или слишком длинное.")
-                if backend=='claude' and not images and not files and self.quick_command(sid, text):
+                if backend in ('claude','codex','agy') and not images and not files and self.quick_command(sid, text, backend=backend):
                     return
                 validate_images(images)
                 if not isinstance(files, list) or any(not isinstance(f, dict) or f.get('type') not in ('file', 'uploaded_file') for f in files):
@@ -1275,15 +1415,24 @@ class Bridge:
                     self.desktop_context=json.dumps(req.get("desktop_context",{}),ensure_ascii=False)[:5000] if desktop_enabled else ""
                     run = self.runs.get(sid)
                     if run and run.busy and not run.closed and getattr(run,'backend','claude')!=backend:
-                        raise ValueError('Дождись завершения ответа перед переключением между Claude Code и API.')
-                    steer = bool(run and run.busy and run.turns > 0 and not run.closed and run.process.poll() is None)
+                        raise ValueError('Дождись завершения ответа перед переключением между агентами.')
+                    steer = bool(run and run.busy and run.turns > 0 and not run.closed and run.process.poll() is None and backend in ('claude', 'codex'))
                     if run and run.busy and not run.closed and run.process.poll() is None:
-                        # Mid-answer: the message joins Claude's queue; model and mode switch live.
+                        # Mid-answer: the message joins the queue/steers; model and mode switch live.
                         if model != run.model:
                             run.control("set_model", model=None if model == "default" else model); run.model = model
                         if mode != run.mode:
                             run.control("set_permission_mode", mode=mode); run.mode = mode
-                    elif run and (run.closed or run.process.poll() is not None or getattr(run,'backend','claude')!=backend or (backend=='api' and not run.same_api(api)) or (backend=='claude' and (run.auth_failed or run.auth_stamp != credential_stamp())) or (run.cwd, run.model, run.mode, run.effort, getattr(run,"desktop_enabled",False), getattr(run,"desktop_context",""), getattr(run,"agent_role",""), getattr(run,"custom_prompt",""), getattr(run,"cluster_context",{})) != (cwd, model, mode, effort, desktop_enabled, self.desktop_context, agent_role, custom_prompt, cluster_context)):
+                    elif run and (
+                        run.closed
+                        or run.process.poll() is not None
+                        or getattr(run,'backend','claude')!=backend
+                        or (backend=='api' and not run.same_api(api))
+                        or (backend=='claude' and (run.auth_failed or run.auth_stamp != credential_stamp()))
+                        or (backend=='codex' and (run.auth_failed or run.auth_stamp != self.codex['credential_stamp']()))
+                        or (backend=='agy' and (run.auth_failed or run.auth_stamp != self.agy['credential_stamp']()))
+                        or (run.cwd, run.model, run.mode, run.effort, getattr(run,"desktop_enabled",False), getattr(run,"desktop_context",""), getattr(run,"agent_role",""), getattr(run,"custom_prompt",""), getattr(run,"cluster_context",{})) != (cwd, model, mode, effort, desktop_enabled, self.desktop_context, agent_role, custom_prompt, cluster_context)
+                    ):
                         run.close()
                         self.runs.pop(sid, None)
                         run = None
@@ -1297,7 +1446,25 @@ class Bridge:
                         existing = self.transcripts.find(sid)
                         if existing and self.transcripts.metadata(existing)["cwd"] != cwd:
                             raise ValueError("Открой исходную рабочую папку этой сессии.")
-                        run = self.api['ApiRun'](self,sid,cwd,model,mode,bool(existing),effort,api) if backend=='api' else Run(self, sid, cwd, model, mode, bool(existing), effort)
+                        native_codex = not existing and self._scan_codex_native() and self.codex["has_native_session"](sid)
+                        native_agy = not existing and not native_codex and self._scan_agy_native() and self.agy["has_native_session"](sid)
+                        if native_codex:
+                            ncwd = self.codex["native_cwd"](sid)
+                            if ncwd and Path(ncwd).is_dir() and ncwd != cwd:
+                                raise ValueError("Открой исходную рабочую папку этой сессии.")
+                        elif native_agy:
+                            ncwd = self.agy["native_cwd"](sid)
+                            if ncwd and Path(ncwd).is_dir() and ncwd != cwd:
+                                raise ValueError("Открой исходную рабочую папку этой сессии.")
+                        resume_flag = bool(existing or native_codex or native_agy)
+                        if backend == 'api':
+                            run = self.api['ApiRun'](self, sid, cwd, model, mode, resume_flag, effort, api)
+                        elif backend == 'codex':
+                            run = self.codex['CodexRun'](self, sid, cwd, model, mode, resume_flag, effort)
+                        elif backend == 'agy':
+                            run = self.agy['AgyRun'](self, sid, cwd, model, mode, resume_flag, effort)
+                        else:
+                            run = Run(self, sid, cwd, model, mode, bool(existing), effort)
                         self.runs[sid] = run
                     self.last_backend=backend
                     claimed = not steer and not run.busy
@@ -1327,10 +1494,17 @@ class Bridge:
             elif op == "claude_update":
                 self.update_claude(manual=True)
             elif op == "catalog":
-                if self.catalog:
-                    self.send(self.catalog)
-                else:
-                    self.probe_catalog()
+                target_backend = req.get("backend") or "claude"
+                if target_backend == "claude":
+                    if self.catalog:
+                        self.send(self.catalog)
+                    else:
+                        self.probe_catalog()
+                elif target_backend in ("codex", "agy"):
+                    if self.backend_catalogs.get(target_backend):
+                        self.send(self.backend_catalogs[target_backend])
+                    else:
+                        self.probe_backend_catalog(target_backend)
             elif op == "stop":
                 run = self.runs.get(valid_id(req.get("sid")))
                 if run:
@@ -1646,8 +1820,8 @@ class Host:
                     continue
                 peer = self.peer_for(req.get("sid")) if req.get("op") in ("permission", "stop", "control", "prompt") else None
                 if peer is not None:
-                    if req.get('op')=='prompt' and req.get('backend')=='api':
-                        client.send({'type':'error','op':'prompt','sid':req.get('sid'),'message':'Этот разговор ещё работает в другом подключении. Дождись ответа перед переключением на API.'})
+                    if req.get('op')=='prompt' and req.get('backend') in ('api','codex','agy'):
+                        client.send({'type':'error','op':'prompt','sid':req.get('sid'),'message':'Этот разговор ещё работает в предыдущем процессе хоста. Дождись завершения ответа.'})
                         continue
                     # The answer is running in the older host: it gets the reply, the stop or the follow-up.
                     try:
@@ -1708,7 +1882,7 @@ class Host:
                     if self.idle():
                         break
                     # Claude Code updates itself only between answers, never under a running session.
-                    if time.time() >= next_update and not self.bridge.running() and self.bridge.last_backend!='api':
+                    if time.time() >= next_update and not self.bridge.running() and self.bridge.last_backend=='claude' and self.bridge.binary:
                         next_update = time.time() + UPDATE_EVERY
                         threading.Thread(target=self.bridge.update_claude, daemon=True).start()
                     continue

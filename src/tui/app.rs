@@ -35,7 +35,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/model", "Выбрать модель"),
     ("/mode", "auto, manual, acceptEdits, plan"),
     ("/effort", "default, low, medium, high, xhigh, max"),
-    ("/backend", "claude или api в этой сессии"),
+    ("/backend", "claude, codex, agy или api в этой сессии"),
     ("/api", "Настроить API для сервера"),
     ("/attach", "Прикрепить файл с компьютера"),
     ("/clear-files", "Убрать вложения"),
@@ -54,7 +54,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/prompt", "Инструкции для этой сессии"),
     ("/theme", "graphite, midnight, paper"),
     ("/refresh", "Обновить сессии и лимиты"),
-    ("/login", "Как войти в Claude на сервере"),
+    ("/login", "Как войти в Claude, Codex или AGY на сервере"),
     ("/quit", "Выйти из Relay TUI"),
 ];
 
@@ -133,7 +133,12 @@ pub struct Remote {
     pub sessions: Vec<Session>,
     pub loaded: bool,
     pub models: Vec<ModelInfo>,
+    pub codex_models: Vec<ModelInfo>,
+    pub agy_models: Vec<ModelInfo>,
     pub commands: Vec<CommandInfo>,
+    pub codex_commands: Vec<CommandInfo>,
+    pub agy_commands: Vec<CommandInfo>,
+    pub backends: Value,
     pub usage: Value,
     pub home: String,
     pub version: String,
@@ -147,6 +152,7 @@ pub enum Picker {
     Hosts,
     Sessions,
     Models,
+    Backends,
     Themes,
     Modes,
     Efforts,
@@ -385,20 +391,29 @@ impl App {
             Picker::Hosts => self
                 .servers()
                 .into_iter()
-                .map(|s| Item {
-                    id: s.id.clone(),
-                    label: s.name,
-                    detail: format!(
-                        "{}@{}:{}{}",
-                        s.user,
-                        s.host,
-                        s.port,
-                        if self.remote.get(&s.id).is_some_and(|r| r.connected) {
-                            " · на связи"
-                        } else {
-                            ""
-                        }
-                    ),
+                .map(|s| {
+                    let eff = s.effective_backend();
+                    let agent_tag = if eff == "claude" {
+                        String::new()
+                    } else {
+                        format!(" · {}", relay_desktop::model::backend_short_label(eff))
+                    };
+                    Item {
+                        id: s.id.clone(),
+                        label: s.name,
+                        detail: format!(
+                            "{}@{}:{}{}{}",
+                            s.user,
+                            s.host,
+                            s.port,
+                            agent_tag,
+                            if self.remote.get(&s.id).is_some_and(|r| r.connected) {
+                                " · на связи"
+                            } else {
+                                ""
+                            }
+                        ),
+                    }
                 })
                 .collect(),
             Picker::Sessions => {
@@ -429,47 +444,116 @@ impl App {
                         detail: format!(
                             "{} · {}",
                             s.cwd,
-                            if s.backend == "api" {
-                                "API"
-                            } else {
-                                "Claude Code"
-                            }
+                            relay_desktop::model::backend_short_label(&s.backend)
                         ),
                     })
                     .collect()
             }
+            Picker::Backends => {
+                let r = self.active.as_ref().and_then(|h| self.remote.get(h));
+                relay_desktop::model::BACKENDS
+                    .into_iter()
+                    .map(|id| {
+                        let status = if id == "api" {
+                            "Свой OpenAI-совместимый URL и ключ (/api)".to_owned()
+                        } else if let Some(rem) = r {
+                            if rem.backends.is_object() {
+                                if rem.backends[id]["installed"] == true {
+                                    let ver = rem.backends[id]["version"].as_str().unwrap_or("");
+                                    if ver.is_empty() {
+                                        "Установлен на сервере".into()
+                                    } else {
+                                        format!("Установлен · {ver}")
+                                    }
+                                } else {
+                                    "Не найден на сервере".into()
+                                }
+                            } else {
+                                "CLI на сервере".into()
+                            }
+                        } else {
+                            "CLI на сервере".into()
+                        };
+                        Item {
+                            id: id.into(),
+                            label: relay_desktop::model::backend_label(id).into(),
+                            detail: status,
+                        }
+                    })
+                    .collect()
+            }
             Picker::Models => {
+                let active_backend = self.chat().map(|c| c.backend.as_str()).unwrap_or("claude");
                 let mut items = vec![Item {
                     id: "default".into(),
                     label: "По умолчанию".into(),
-                    detail: "Выбор сервера / текущего API-профиля".into(),
+                    detail: "Выбор сервера / текущего профиля".into(),
                 }];
-                if self.chat().is_some_and(|c| c.backend == "api") {
-                    if let Some(server) = self.server() {
-                        for model in std::iter::once(&server.api.model)
-                            .chain(server.api.models.iter())
-                            .filter(|m| !m.is_empty())
-                        {
-                            if !items.iter().any(|i| i.id == *model) {
+                match active_backend {
+                    "api" => {
+                        if let Some(server) = self.server() {
+                            for model in std::iter::once(&server.api.model)
+                                .chain(server.api.models.iter())
+                                .filter(|m| !m.is_empty())
+                            {
+                                if !items.iter().any(|i| i.id == *model) {
+                                    items.push(Item {
+                                        id: model.clone(),
+                                        label: model.clone(),
+                                        detail: "API".into(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    "codex" | "agy" => {
+                        let remote_models = self
+                            .active
+                            .as_ref()
+                            .and_then(|h| self.remote.get(h))
+                            .map(|r| {
+                                if active_backend == "codex" {
+                                    r.codex_models.clone()
+                                } else {
+                                    r.agy_models.clone()
+                                }
+                            })
+                            .unwrap_or_default();
+                        let list = if remote_models.is_empty() {
+                            relay_desktop::model::default_backend_models(active_backend)
+                        } else {
+                            remote_models
+                        };
+                        for model in list {
+                            if !items.iter().any(|i| i.id == model.value) {
                                 items.push(Item {
-                                    id: model.clone(),
-                                    label: model.clone(),
-                                    detail: "API".into(),
+                                    id: model.value.clone(),
+                                    label: if model.display_name.is_empty() {
+                                        model.value
+                                    } else {
+                                        model.display_name
+                                    },
+                                    detail: model.description,
                                 });
                             }
                         }
                     }
-                } else if let Some(r) = self.active.as_ref().and_then(|h| self.remote.get(h)) {
-                    for model in &r.models {
-                        items.push(Item {
-                            id: model.value.clone(),
-                            label: if model.display_name.is_empty() {
-                                model.value.clone()
-                            } else {
-                                model.display_name.clone()
-                            },
-                            detail: model.description.clone(),
-                        });
+                    _ => {
+                        if let Some(r) = self.active.as_ref().and_then(|h| self.remote.get(h)) {
+                            for model in &r.models {
+                                if !items.iter().any(|i| i.id == model.value) {
+                                    items.push(Item {
+                                        id: model.value.clone(),
+                                        label: if model.display_name.is_empty() {
+                                            model.value.clone()
+                                        } else {
+                                            model.display_name.clone()
+                                        },
+                                        detail: model.description.clone(),
+                                    });
+                                }
+                            }
+                        }
                     }
                 }
                 items
@@ -518,7 +602,12 @@ impl App {
                     })
                     .collect();
                 if let Some(r) = self.active.as_ref().and_then(|h| self.remote.get(h)) {
-                    for c in &r.commands {
+                    let remote_cmds = match self.chat().map(|c| c.backend.as_str()).unwrap_or("claude") {
+                        "codex" => &r.codex_commands,
+                        "agy" => &r.agy_commands,
+                        _ => &r.commands,
+                    };
+                    for c in remote_cmds {
                         let id = format!("/{}", c.name.trim_start_matches('/'));
                         if !items.iter().any(|i| i.id == id) {
                             items.push(Item {
@@ -607,29 +696,21 @@ impl App {
         let Some(server) = self.servers().into_iter().find(|s| s.id == host) else {
             return;
         };
-        let api = self
-            .settings
-            .api_sessions
-            .get(&key)
-            .copied()
-            .unwrap_or_else(|| {
-                session
-                    .and_then(|s| match s.backend.as_str() {
-                        "api" => Some(true),
-                        "claude" => Some(false),
-                        _ => None,
-                    })
-                    .unwrap_or(server.api.enabled)
-            });
+        let backend = self.settings.session_backend(
+            &server,
+            &key,
+            session.map(|s| s.backend.as_str()).filter(|b| !b.is_empty()),
+        );
+        let default_model = if backend == "api" {
+            "default".into()
+        } else {
+            server.model_for(&backend).to_owned()
+        };
         let saved = self.store.chats.remove(&key).unwrap_or_else(|| SavedChat {
-            model: if api {
-                "default".into()
-            } else {
-                server.model.clone()
-            },
+            model: default_model,
             mode: server.mode.clone(),
             effort: server.effort.clone(),
-            backend: if api { "api" } else { "claude" }.into(),
+            backend,
             ..Default::default()
         });
         let cwd = session
@@ -848,6 +929,7 @@ impl App {
                 r.error.clear();
                 r.home = value["home"].as_str().unwrap_or("~").into();
                 r.version = value["version"].as_str().unwrap_or("").into();
+                r.backends = value["backends"].clone();
                 r.loaded = false;
                 r.requested = Some(Instant::now());
                 r.retries = 0;
@@ -858,6 +940,15 @@ impl App {
                     .send(host, json!({"op":"_tests_policy","mode":"off"}));
                 self.controller.send(host, json!({"op":"sessions"}));
                 self.controller.send(host, json!({"op":"usage"}));
+                if let Some(b) = self
+                    .selected
+                    .get(host)
+                    .and_then(|sid| self.chats.get(&chat_key(host, sid)))
+                    .map(|c| c.backend.clone())
+                    .filter(|b| matches!(b.as_str(), "codex" | "agy"))
+                {
+                    self.controller.send(host, json!({"op":"catalog","backend":b}));
+                }
                 // A disconnected draft is kept, but an existing conversation always reloads its server history.
                 if let Some(sid) = self.selected.get(host).cloned() {
                     if let Some(c) = self.chats.get_mut(&chat_key(host, &sid)) {
@@ -905,8 +996,34 @@ impl App {
             }
             "catalog" => {
                 let r = self.remote.entry(host.into()).or_default();
-                r.models = serde_json::from_value(value["models"].clone()).unwrap_or_default();
-                r.commands = serde_json::from_value(value["commands"].clone()).unwrap_or_default();
+                let models = serde_json::from_value(value["models"].clone()).unwrap_or_default();
+                let commands = serde_json::from_value(value["commands"].clone()).unwrap_or_default();
+                match value["backend"].as_str().unwrap_or("claude") {
+                    "codex" => {
+                        r.codex_models = models;
+                        r.codex_commands = commands;
+                    }
+                    "agy" => {
+                        r.agy_models = models;
+                        r.agy_commands = commands;
+                    }
+                    _ => {
+                        r.models = models;
+                        r.commands = commands;
+                    }
+                }
+            }
+            "model_changed" => {
+                if let Some(c) = self.chats.get_mut(&key) {
+                    c.model = value["model"].as_str().unwrap_or("default").into();
+                    self.dirty = true;
+                }
+            }
+            "mode_changed" => {
+                if let Some(c) = self.chats.get_mut(&key) {
+                    c.mode = value["mode"].as_str().unwrap_or("manual").into();
+                    self.dirty = true;
+                }
             }
             "usage" => self.remote.entry(host.into()).or_default().usage = value.clone(),
             "history" => {
@@ -943,6 +1060,12 @@ impl App {
                 if let Some(c) = self.chats.get_mut(&key) {
                     c.busy = value["busy"] == true;
                     if c.busy {
+                        if let Some(b) = value["backend"]
+                            .as_str()
+                            .filter(|b| relay_desktop::model::valid_backend(b))
+                        {
+                            c.backend = b.into();
+                        }
                         c.status = "Работает на сервере".into();
                     } else {
                         c.status.clear();
@@ -1291,7 +1414,43 @@ impl App {
             "/model"=>if arg.is_empty(){self.picker(Picker::Models);}else if arg.len()<=160&&!arg.chars().any(char::is_control){if let Some(c)=self.chat_mut(){c.model=arg.into();}self.control("model",arg);},
             "/mode"=>if arg.is_empty(){self.picker(Picker::Modes);}else if ["auto","manual","acceptEdits","plan"].contains(&arg){if let Some(c)=self.chat_mut(){c.mode=arg.into();}self.control("mode",arg);}else{self.notice="Режим: auto, manual, acceptEdits или plan".into();},
             "/effort"=>if arg.is_empty(){self.picker(Picker::Efforts);}else if ["default","low","medium","high","xhigh","max"].contains(&arg){if let Some(c)=self.chat_mut(){c.effort=arg.into();}self.notice="Глубина применится к следующему ответу".into();}else{self.notice="Глубина: default, low, medium, high, xhigh, max".into();},
-            "/backend"=>if ["claude","api"].contains(&arg){if self.chat().is_some_and(|c|c.busy){self.notice="Дождись завершения ответа перед сменой источника".into();}else if let Some(c)=self.chat_mut(){c.backend=arg.into();c.model="default".into();}}else{self.notice="/backend claude или /backend api".into();},
+            "/backend" => {
+                if arg.is_empty() {
+                    self.picker(Picker::Backends);
+                } else if let Some(b) = relay_desktop::model::normalize_backend(arg) {
+                    if self.chat().is_some_and(|c| c.busy) {
+                        self.notice = "Дождись завершения ответа перед сменой агента".into();
+                    } else {
+                        let next_model = self
+                            .server()
+                            .map(|s| {
+                                if b == "api" {
+                                    "default".into()
+                                } else {
+                                    s.model_for(b).to_owned()
+                                }
+                            })
+                            .unwrap_or_else(|| "default".into());
+                        if let Some(c) = self.chat_mut() {
+                            c.backend = b.into();
+                            c.model = next_model;
+                        }
+                        if matches!(b, "codex" | "agy") {
+                            if let Some(h) = &self.active {
+                                self.controller.send(h, json!({"op":"catalog","backend":b}));
+                            }
+                        }
+                        self.notice = format!(
+                            "Агент сессии: {}",
+                            relay_desktop::model::backend_label(b)
+                        );
+                    }
+                } else {
+                    self.notice =
+                        "Укажи агент: /backend claude, /backend codex, /backend agy или /backend api"
+                            .into();
+                }
+            }
             "/api"=>if let Some(s)=self.server(){self.ask_field(Field::Api{profile:s.api.clone(),stage:0},s.api.base_url);},
             "/attach"=>if arg.is_empty(){self.ask_field(Field::Attach,String::new());}else{if let Err(e)=self.attach(arg){self.notice=e.to_string();}},
             "/clear-files"=>if let Some(c)=self.chat_mut(){c.files.clear();},
@@ -1307,7 +1466,18 @@ impl App {
             "/prompt"=>if arg.is_empty(){self.ask_field(Field::Prompt,self.chat().map(|c|c.custom_prompt.clone()).unwrap_or_default());}else if let Some(c)=self.chat_mut(){c.custom_prompt=arg.into();},
             "/theme"=>if arg.is_empty(){self.picker(Picker::Themes);}else if ["graphite","midnight","paper"].contains(&arg){self.store.theme=arg.into();}else{self.notice="Темы: graphite, midnight, paper".into();},
             "/refresh"=>self.refresh(),
-            "/login"=>self.notice="Вход общий с Relay: открой «Войти в Claude» в графическом приложении или выполни claude auth login в SSH-терминале сервера. Затем /connect.".into(),
+            "/login" => {
+                let target = if arg.is_empty() {
+                    self.chat().map(|c| c.backend.as_str()).unwrap_or("claude")
+                } else {
+                    relay_desktop::model::normalize_backend(arg).unwrap_or("claude")
+                };
+                self.notice = match target {
+                    "codex" => "Вход в Codex: нажми «Войти в Codex» в графическом Relay или выполни `codex login --device-auth` (или `codex login --with-api-key`) по SSH на сервере.".into(),
+                    "agy" => "Вход в AGY: нажми «Войти в AGY» в графическом Relay или выполни `agy acp --login` по SSH на сервере.".into(),
+                    _ => "Вход общий с Relay: открой «Войти в Claude / Codex / AGY» в графическом Relay или выполни `claude auth login` (либо `codex login`, `agy acp --login`) по SSH на сервере.".into(),
+                };
+            }
             "/quit"|"/exit"=>self.request_quit(),
             _=>{
                 if let Some(key)=self.key(){let prompt=Prompt{text:line.into(),files:vec![]};if self.chats[&key].busy{self.chats.get_mut(&key).unwrap().queue.push_back(prompt);}else{self.dispatch(&key,prompt);}}
@@ -1618,6 +1788,7 @@ impl App {
                 }
             }
             Picker::Models => self.command(&format!("/model {id}")),
+            Picker::Backends => self.command(&format!("/backend {id}")),
             Picker::Themes => self.command(&format!("/theme {id}")),
             Picker::Modes => self.command(&format!("/mode {id}")),
             Picker::Efforts => self.command(&format!("/effort {id}")),
@@ -2260,5 +2431,54 @@ mod tests {
         assert!(!serde_json::to_string(&app.store)
             .unwrap()
             .contains("api_key"));
+    }
+
+    #[test]
+    fn tui_switches_between_codex_agy_claude_and_api_with_catalogs() {
+        let (mut app, mut outgoing) = connected();
+        app.command("/backend");
+        assert!(matches!(
+            app.popup,
+            Some(Popup::Picker {
+                kind: Picker::Backends,
+                ..
+            })
+        ));
+        app.popup = None;
+
+        app.command("/backend codex");
+        assert_eq!(app.chat().unwrap().backend, "codex");
+        let cat_req = outgoing.try_recv().unwrap();
+        assert_eq!(cat_req["op"], "catalog");
+        assert_eq!(cat_req["backend"], "codex");
+
+        app.data(
+            "demo",
+            json!({"type":"catalog","backend":"codex","models":[{"value":"gpt-5.4","displayName":"GPT-5.4","description":"Codex"}]}),
+        );
+        let items = app.items(Picker::Models, "");
+        assert!(items.iter().any(|i| i.id == "gpt-5.4"));
+
+        app.command("/model gpt-5.4");
+        app.chat_mut().unwrap().editor = Editor::new("Run Codex check".into());
+        app.submit();
+        let prompt = outgoing.try_recv().unwrap();
+        assert_eq!(prompt["op"], "prompt");
+        assert_eq!(prompt["backend"], "codex");
+        assert_eq!(prompt["model"], "gpt-5.4");
+
+        let sid = app.chat().unwrap().sid.clone();
+        app.data(
+            "demo",
+            json!({"type":"claude","sid":sid,"data":{"type":"result","result":"ok"}}),
+        );
+        let _ = outgoing.try_recv();
+
+        app.command("/backend agy");
+        assert_eq!(app.chat().unwrap().backend, "agy");
+        let cat_agy = outgoing.try_recv().unwrap();
+        assert_eq!(cat_agy["backend"], "agy");
+        app.command("/login agy");
+        assert!(app.notice.contains("agy acp --login"));
     }
 }

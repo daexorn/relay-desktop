@@ -14,12 +14,56 @@ impl Drop for Editor {
 }
 
 impl RelayApp {
+    pub(super) fn backend_for_chat(&self, server: &Server, chat: &str) -> String {
+        let remote_backend = self
+            .remote
+            .get(&server.id)
+            .and_then(|r| r.sessions.iter().find(|s| key(&server.id, &s.id) == chat))
+            .map(|s| s.backend.as_str())
+            .filter(|b| !b.is_empty());
+        self.settings.session_backend(server, chat, remote_backend)
+    }
+    #[cfg(test)]
     pub(super) fn api_for_chat(&self, server: &Server, chat: &str) -> bool {
-        self.settings.api_sessions.get(chat).copied().unwrap_or_else(|| {
-            self.remote.get(&server.id).and_then(|r| r.sessions.iter().find(|s| key(&server.id, &s.id) == chat))
-                .and_then(|s| match s.backend.as_str() { "api" => Some(true), "claude" => Some(false), _ => None })
-                .unwrap_or(server.api.enabled)
-        })
+        self.backend_for_chat(server, chat) == "api"
+    }
+    pub(super) fn models_for_backend(
+        &self,
+        server: &Server,
+        backend: &str,
+    ) -> Vec<crate::model::ModelInfo> {
+        match backend {
+            "api" => self.api_model_catalog(server),
+            "codex" => {
+                let remote = self
+                    .remote
+                    .get(&server.id)
+                    .map(|r| r.codex_models.clone())
+                    .unwrap_or_default();
+                if remote.is_empty() {
+                    crate::model::default_backend_models("codex")
+                } else {
+                    remote
+                }
+            }
+            "agy" => {
+                let remote = self
+                    .remote
+                    .get(&server.id)
+                    .map(|r| r.agy_models.clone())
+                    .unwrap_or_default();
+                if remote.is_empty() {
+                    crate::model::default_backend_models("agy")
+                } else {
+                    remote
+                }
+            }
+            _ => self
+                .remote
+                .get(&server.id)
+                .map(|r| r.models.clone())
+                .unwrap_or_default(),
+        }
     }
     pub(super) fn open_api_settings(&mut self, server: &Server) {
         self.api_editor = Some(Editor {
@@ -136,7 +180,14 @@ impl RelayApp {
             match editor.profile.validate().and_then(|_| storage::remember_api_key(&editor.server, &editor.key)) {
                 Err(e) => editor.error = e.to_string(),
                 Ok(()) => {
-                    if let Some(server) = self.settings.servers.iter_mut().find(|s| s.id == editor.server) { server.api = editor.profile.clone(); }
+                    if let Some(server) = self.settings.servers.iter_mut().find(|s| s.id == editor.server) {
+                        server.api = editor.profile.clone();
+                        if server.api.enabled {
+                            server.default_backend = "api".into();
+                        } else if server.default_backend == "api" {
+                            server.default_backend = "claude".into();
+                        }
+                    }
                     self.save();self.notice = "Настройки API сохранены".into();return;
                 }
             }
@@ -145,19 +196,58 @@ impl RelayApp {
     }
 }
 
+#[cfg(test)]
 pub(super) fn source_picker(ui: &mut egui::Ui, api: &mut bool, configure: &mut bool, busy: bool, p: Palette) {
-    let previous_style=ui.style().clone();
-    ui.spacing_mut().button_padding=Vec2::new(8.,5.);ui.spacing_mut().interact_size.y=28.;
-    design::wrap_control(ui,if *api{"API"}else{"Claude Code"});
-    egui::ComboBox::from_id_salt("source-selector").width(0.).wrap_mode(egui::TextWrapMode::Truncate)
-        .selected_text(RichText::new(if *api { "API" } else { "Claude Code" }).size(12.5).color(if *api { accent() } else { p.muted }))
-        .icon(design::combo_icon).show_ui(ui, |ui| {
+    let mut backend = if *api { "api".to_owned() } else { "claude".to_owned() };
+    let mut login = None;
+    backend_picker(ui, &mut backend, configure, &mut login, busy, p);
+    *api = backend == "api";
+}
+
+pub(super) fn backend_picker(
+    ui: &mut egui::Ui,
+    backend: &mut String,
+    configure: &mut bool,
+    login_provider: &mut Option<String>,
+    busy: bool,
+    p: Palette,
+) {
+    let previous_style = ui.style().clone();
+    ui.spacing_mut().button_padding = Vec2::new(8., 5.);
+    ui.spacing_mut().interact_size.y = 28.;
+    let short = crate::model::backend_short_label(backend);
+    design::wrap_control(ui, short);
+    egui::ComboBox::from_id_salt("source-selector")
+        .width(0.)
+        .wrap_mode(egui::TextWrapMode::Truncate)
+        .selected_text(
+            RichText::new(short)
+                .size(12.5)
+                .color(if backend == "claude" { p.muted } else { accent() }),
+        )
+        .icon(design::combo_icon)
+        .show_ui(ui, |ui| {
             ui.add_enabled_ui(!busy, |ui| {
-                ui.selectable_value(api, false, "Claude Code");
-                ui.selectable_value(api, true, "Пользовательский API");
+                ui.selectable_value(backend, "claude".into(), "Claude Code");
+                ui.selectable_value(backend, "codex".into(), "Codex");
+                ui.selectable_value(backend, "agy".into(), "Antigravity (agy)");
+                ui.selectable_value(backend, "api".into(), "Пользовательский API");
             });
             ui.separator();
-            if ui.button("Настроить API…").clicked() { *configure = true;ui.close_menu(); }
+            if ui.button("Настроить API…").clicked() {
+                *configure = true;
+                ui.close_menu();
+            }
+            for (prov, title) in [
+                ("claude", "Войти в Claude…"),
+                ("codex", "Войти в Codex…"),
+                ("agy", "Войти в AGY…"),
+            ] {
+                if ui.button(title).clicked() {
+                    *login_provider = Some(prov.into());
+                    ui.close_menu();
+                }
+            }
         });
     ui.set_style(previous_style);
 }

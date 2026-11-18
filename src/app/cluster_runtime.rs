@@ -43,12 +43,16 @@ impl RelayApp {
             })
             .collect();
         for (agent, sid, title, mode) in sessions {
-            if let Some(server) = self.settings.servers.iter().find(|s| s.id == agent.server) {
-                let mut c = Chat::new(sid.clone(), agent_cwd(&agent, server), title);
+            if let Some(server) = self.settings.servers.iter().find(|s| s.id == agent.server).cloned() {
+                let k = key(&server.id, &sid);
+                if crate::model::valid_backend(&agent.backend) {
+                    self.settings.set_session_backend(k.clone(), &agent.backend);
+                }
+                let mut c = Chat::new(sid.clone(), agent_cwd(&agent, &server), title);
                 c.mode = mode;
-                c.model = agent_model(&agent, server);
-                c.effort = agent_effort(&agent, server);
-                self.chats.insert(key(&server.id, &sid), c);
+                c.model = agent_model(&agent, &server);
+                c.effort = agent_effort(&agent, &server);
+                self.chats.insert(k, c);
             }
         }
     }
@@ -136,6 +140,7 @@ impl RelayApp {
         } else {
             templates::expand(&chat.draft, &vars)?
         };
+        let agent_backend = agent.backend.clone();
         let c = self.chats.get_mut(k).unwrap();
         c.custom_prompt = custom;
         c.model = agent_model(agent, server);
@@ -146,6 +151,9 @@ impl RelayApp {
         c.draft = draft;
         c.cwd = cwd;
         c.agent_role = String::new();
+        if crate::model::valid_backend(&agent_backend) {
+            self.settings.set_session_backend(k.to_owned(), &agent_backend);
+        }
         Ok(())
     }
     pub(super) fn start_cluster(&mut self, config: Config, text: String) -> Result<(), String> {
@@ -187,6 +195,10 @@ impl RelayApp {
         c.loaded = true;
         c.draft = text;
         let k = key(&server.id, &sid);
+        if crate::model::valid_backend(&run.config.leader.backend) {
+            self.settings
+                .set_session_backend(k.clone(), &run.config.leader.backend);
+        }
         self.chats.insert(k.clone(), c);
         self.cluster_store.selected = Some(run.id.clone());
         self.cluster_store.runs.push(run);
@@ -313,7 +325,8 @@ impl RelayApp {
             let r = &self.cluster_store.runs[index];
             let workers:Vec<_>=r.config.workers.iter().filter(|a|a.enabled).map(|a|{
                 let server=self.settings.servers.iter().find(|s|s.id==a.server);
-                json!({"worker":a.id,"name":a.name,"host":server.map(|s|s.host.as_str()),"cwd":server.map(|s|agent_cwd(a,s)),
+                let backend=if crate::model::valid_backend(&a.backend){a.backend.as_str()}else{server.map(|s|s.effective_backend()).unwrap_or("claude")};
+                json!({"worker":a.id,"name":a.name,"backend":backend,"host":server.map(|s|s.host.as_str()),"cwd":server.map(|s|agent_cwd(a,s)),
                     "connected":self.connected(&a.server),"busy":r.tasks.iter().any(|t|t.agent.id==a.id&&t.state.active()),"instructions":a.prompt})
             }).collect();
             return Ok(
@@ -563,6 +576,10 @@ impl RelayApp {
             c.effort = agent_effort(&t.agent, &server);
             c.loaded = true;
             c.draft = t.instructions.clone();
+            if crate::model::valid_backend(&t.agent.backend) {
+                self.settings
+                    .set_session_backend(k.clone(), &t.agent.backend);
+            }
             self.chats.insert(k.clone(), c);
             self.send_to_chat(server, k.clone());
             let c = &self.chats[&k];
@@ -662,7 +679,12 @@ pub(super) fn agent_cwd(a: &Agent, s: &Server) -> String {
 }
 fn agent_model(a: &Agent, s: &Server) -> String {
     if a.model == "inherit" {
-        s.model.clone()
+        let b = if crate::model::valid_backend(&a.backend) {
+            a.backend.as_str()
+        } else {
+            s.effective_backend()
+        };
+        s.model_for(b).to_owned()
     } else {
         a.model.clone()
     }
@@ -1207,5 +1229,73 @@ mod tests {
             }).expect("The session action must be present");
             assert!(screen.expand(0.5).contains_rect(text),"Session button outside the {width}px window: {text:?}");
         }
+    }
+
+    #[test]
+    fn mixed_cluster_dispatches_codex_and_agy_workers_and_provider_logins() {
+        let (mut app, a, b, mut config, mut rx_a, mut rx_b) = fixture();
+        config.leader.backend = "codex".into();
+        config.leader.model = "gpt-5.4".into();
+        config.workers = vec![
+            Agent {
+                id: "w-codex".into(),
+                name: "Codex Worker".into(),
+                server: b.id.clone(),
+                backend: "codex".into(),
+                model: "gpt-5.3-codex".into(),
+                enabled: true,
+                ..Default::default()
+            },
+            Agent {
+                id: "w-agy".into(),
+                name: "AGY Worker".into(),
+                server: b.id.clone(),
+                backend: "agy".into(),
+                model: "gemini-3.1-pro-preview".into(),
+                enabled: true,
+                ..Default::default()
+            },
+        ];
+        app.start_cluster(config, "Coordinate multi-agent release".into())
+            .unwrap();
+        let lead = take(&mut rx_a, "prompt");
+        assert_eq!(lead["backend"], "codex");
+        assert_eq!(lead["model"], "gpt-5.4");
+
+        let run = app.cluster_store.runs[0].id.clone();
+        let sid = app.cluster_store.runs[0].leader_sid.clone();
+        app.data(
+            a.id.clone(),
+            json!({"type":"cluster_request","id":cluster::id(),"sid":sid,"run":run,"tool":"list_workers","input":{}}),
+        );
+        let list = take(&mut rx_a, "cluster_reply");
+        assert_eq!(list["result"]["workers"][0]["backend"], "codex");
+        assert_eq!(list["result"]["workers"][1]["backend"], "agy");
+
+        app.data(
+            a.id.clone(),
+            json!({"type":"cluster_request","id":cluster::id(),"sid":sid,"run":run,"tool":"dispatch_task","input":{"worker":"w-codex","task":"Implement Codex piece"}}),
+        );
+        take(&mut rx_a, "cluster_reply");
+        app.data(
+            a.id.clone(),
+            json!({"type":"cluster_request","id":cluster::id(),"sid":sid,"run":run,"tool":"dispatch_task","input":{"worker":"w-agy","task":"Implement AGY piece"}}),
+        );
+        take(&mut rx_a, "cluster_reply");
+        app.cluster_tick();
+
+        let p1 = take(&mut rx_b, "prompt");
+        let p2 = take(&mut rx_b, "prompt");
+        let backends = [p1["backend"].as_str().unwrap(), p2["backend"].as_str().unwrap()];
+        assert!(backends.contains(&"codex") && backends.contains(&"agy"));
+
+        app.remote.get_mut(&a.id).unwrap().auth_available = true;
+        app.start_provider_login(&a, "codex");
+        let auth_codex = take(&mut rx_a, "auth_start");
+        assert_eq!(auth_codex["provider"], "codex");
+        app.start_provider_login(&a, "agy");
+        let _ = take(&mut rx_a, "auth_cancel");
+        let auth_agy = take(&mut rx_a, "auth_start");
+        assert_eq!(auth_agy["provider"], "agy");
     }
 }

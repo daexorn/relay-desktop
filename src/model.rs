@@ -1,6 +1,90 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub const BACKENDS: [&str; 4] = ["claude", "codex", "agy", "api"];
+
+pub fn valid_backend(b: &str) -> bool {
+    matches!(b, "claude" | "codex" | "agy" | "api")
+}
+
+pub fn normalize_backend(b: &str) -> Option<&'static str> {
+    match b.trim().to_ascii_lowercase().as_str() {
+        "claude" | "claude-code" | "claudecode" => Some("claude"),
+        "codex" | "openai" => Some("codex"),
+        "agy" | "antigravity" | "antigravity-cli" => Some("agy"),
+        "api" | "custom" => Some("api"),
+        _ => None,
+    }
+}
+
+pub fn backend_label(b: &str) -> &'static str {
+    match b {
+        "codex" => "Codex",
+        "agy" => "Antigravity (agy)",
+        "api" => "Пользовательский API",
+        _ => "Claude Code",
+    }
+}
+
+pub fn backend_short_label(b: &str) -> &'static str {
+    match b {
+        "codex" => "Codex",
+        "agy" => "AGY",
+        "api" => "API",
+        _ => "Claude Code",
+    }
+}
+
+pub fn default_backend_models(b: &str) -> Vec<ModelInfo> {
+    match b {
+        "codex" => vec![
+            ModelInfo {
+                value: "default".into(),
+                display_name: "По умолчанию (Codex)".into(),
+                description: "Модель профиля Codex CLI на сервере".into(),
+            },
+            ModelInfo {
+                value: "gpt-5.4".into(),
+                display_name: "GPT-5.4".into(),
+                description: "Основная агентная модель OpenAI Codex".into(),
+            },
+            ModelInfo {
+                value: "gpt-5.3-codex".into(),
+                display_name: "GPT-5.3 Codex".into(),
+                description: "Специализированная модель для кода".into(),
+            },
+            ModelInfo {
+                value: "gpt-5.4-mini".into(),
+                display_name: "GPT-5.4 Mini".into(),
+                description: "Быстрая модель для простых задач".into(),
+            },
+        ],
+        "agy" => vec![
+            ModelInfo {
+                value: "default".into(),
+                display_name: "По умолчанию (AGY)".into(),
+                description: "Модель профиля Antigravity CLI на сервере".into(),
+            },
+            ModelInfo {
+                value: "gemini-3.1-pro-preview".into(),
+                display_name: "Gemini 3.1 Pro".into(),
+                description: "Глубокое планирование и сложный код".into(),
+            },
+            ModelInfo {
+                value: "gemini-3-flash-preview".into(),
+                display_name: "Gemini 3 Flash".into(),
+                description: "Быстрая агентная разработка".into(),
+            },
+            ModelInfo {
+                value: "claude-sonnet-4-6".into(),
+                display_name: "Claude Sonnet 4.6 (AGY)".into(),
+                description: "Через Google Antigravity".into(),
+            },
+        ],
+        _ => vec![],
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Server {
     pub id: String,
@@ -32,6 +116,12 @@ pub struct Server {
     pub tests: String,
     #[serde(default)]
     pub api: ApiProfile,
+    #[serde(default)]
+    pub default_backend: String,
+    #[serde(default = "default_model")]
+    pub codex_model: String,
+    #[serde(default = "default_model")]
+    pub agy_model: String,
 }
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 #[serde(default)]
@@ -91,10 +181,67 @@ impl Default for Server {
             local_control: false,
             tests: default_tests(),
             api: ApiProfile::default(),
+            default_backend: String::new(),
+            codex_model: default_model(),
+            agy_model: default_model(),
         }
     }
 }
 impl Server {
+    pub fn effective_backend(&self) -> &str {
+        if self.api.enabled && (self.default_backend.is_empty() || self.default_backend == "api") {
+            "api"
+        } else if valid_backend(&self.default_backend) && self.default_backend != "api" {
+            &self.default_backend
+        } else if self.api.enabled {
+            "api"
+        } else {
+            "claude"
+        }
+    }
+
+    pub fn set_default_backend(&mut self, backend: &str) {
+        let normalized = normalize_backend(backend).unwrap_or("claude");
+        self.default_backend = normalized.to_owned();
+        self.api.enabled = normalized == "api";
+    }
+
+    pub fn model_for(&self, backend: &str) -> &str {
+        match backend {
+            "codex" => {
+                if self.codex_model.is_empty() {
+                    "default"
+                } else {
+                    &self.codex_model
+                }
+            }
+            "agy" => {
+                if self.agy_model.is_empty() {
+                    "default"
+                } else {
+                    &self.agy_model
+                }
+            }
+            "api" => &self.api.model,
+            _ => {
+                if self.model.is_empty() {
+                    "default"
+                } else {
+                    &self.model
+                }
+            }
+        }
+    }
+
+    pub fn set_model_for(&mut self, backend: &str, model: String) {
+        match backend {
+            "codex" => self.codex_model = model,
+            "agy" => self.agy_model = model,
+            "api" => self.api.model = model,
+            _ => self.model = model,
+        }
+    }
+
     pub fn validate(&mut self) -> anyhow::Result<()> {
         self.host = self.host.trim().to_owned();
         self.user = self.user.trim().to_owned();
@@ -150,6 +297,9 @@ pub struct Settings {
     /// Per-conversation override; server API settings supply the default.
     #[serde(default)]
     pub api_sessions: std::collections::BTreeMap<String, bool>,
+    /// Per-conversation backend override ("claude", "codex", "agy", "api").
+    #[serde(default)]
+    pub session_backends: std::collections::BTreeMap<String, String>,
 }
 /// Drafts and unsent queued messages, kept on disk so closing Relay loses nothing.
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -216,6 +366,37 @@ impl Settings {
             .or_else(|_| std::env::var("USER"))
             .unwrap_or_else(|_| "Relay".into())
     }
+
+    pub fn session_backend(
+        &self,
+        server: &Server,
+        chat_key: &str,
+        remote_backend: Option<&str>,
+    ) -> String {
+        if self.api_sessions.get(chat_key) == Some(&true) {
+            return "api".into();
+        }
+        if let Some(b) = self
+            .session_backends
+            .get(chat_key)
+            .filter(|b| valid_backend(b) && *b != "api")
+        {
+            return b.clone();
+        }
+        if self.api_sessions.get(chat_key) == Some(&false) {
+            return "claude".into();
+        }
+        if let Some(rb) = remote_backend.filter(|b| valid_backend(b)) {
+            return rb.to_owned();
+        }
+        server.effective_backend().to_owned()
+    }
+
+    pub fn set_session_backend(&mut self, chat_key: String, backend: &str) {
+        let b = normalize_backend(backend).unwrap_or("claude");
+        self.api_sessions.insert(chat_key.clone(), b == "api");
+        self.session_backends.insert(chat_key, b.to_owned());
+    }
 }
 pub fn hostname() -> String {
     std::env::var("COMPUTERNAME")
@@ -243,6 +424,8 @@ pub struct Session {
     pub running: bool,
     #[serde(default)]
     pub backend: String,
+    #[serde(default)]
+    pub native_id: String,
 }
 /// A model exactly as the server's Claude Code lists it: `fable`, `opus`, a full id…
 #[derive(Clone, Default, Deserialize, Debug, PartialEq)]
@@ -387,5 +570,27 @@ mod tests {
         assert!(s.validate().is_ok());
         s.host = "host\ncommand".into();
         assert!(s.validate().is_err());
+    }
+    #[test]
+    fn codex_and_agy_server_and_session_backends_round_trip() {
+        let mut s = Server::default();
+        assert_eq!(s.effective_backend(), "claude");
+        s.set_default_backend("codex");
+        s.set_model_for("codex", "gpt-5.4".into());
+        assert_eq!(s.effective_backend(), "codex");
+        assert!(!s.api.enabled);
+        assert_eq!(s.model_for("codex"), "gpt-5.4");
+        assert_eq!(s.model_for("claude"), "default");
+
+        let mut settings = Settings::default();
+        let chat = "srv/chat-1".to_owned();
+        assert_eq!(settings.session_backend(&s, &chat, None), "codex");
+        assert_eq!(settings.session_backend(&s, &chat, Some("agy")), "agy");
+        settings.set_session_backend(chat.clone(), "agy");
+        assert_eq!(settings.session_backend(&s, &chat, Some("claude")), "agy");
+        assert!(!settings.api_sessions[&chat]);
+        settings.set_session_backend(chat.clone(), "api");
+        assert_eq!(settings.session_backend(&s, &chat, None), "api");
+        assert!(settings.api_sessions[&chat]);
     }
 }

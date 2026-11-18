@@ -172,3 +172,61 @@ class AuthFlowTests(unittest.TestCase):
             self.flow=self.manager.current;self.wait('browser')
             self.assertTrue(self.flow['standalone']);self.assertTrue(self.flow['browser'].navigation)
             service.dispatch({'op':'auth_cancel','id':self.ident});self.wait('cancelled')
+
+    def test_codex_and_agy_oauth_urls_and_login_flows(self):
+        codex_url = 'https://auth.openai.com/oauth/authorize?client_id=app_test&redirect_uri=http%3A%2F%2F127.0.0.1%3A1455%2Fauth%2Fcallback'
+        agy_url = 'https://accounts.google.com/o/oauth2/auth?client_id=123&redirect_uri=https%3A%2F%2Fantigravity.google%2Foauth-callback'
+        self.assertEqual(auth.login_url(codex_url, provider='codex'), codex_url)
+        self.assertIsNone(auth.login_url(codex_url, provider='claude'))
+        self.assertEqual(auth.login_url(agy_url, provider='agy'), agy_url)
+        self.assertIsNone(auth.login_url('https://evil.test/o/oauth2/auth', provider='agy'))
+
+        fake_codex = Path(self.temp.name) / 'codex'
+        fake_codex.write_text(
+            '#!/usr/bin/env python3\nimport os,sys,time\n'
+            'if sys.argv[1:]==["login","status"]:\n sys.exit(0 if (os.path.exists(os.environ["CODEX_HOME"]+"/ok")) else 1)\n'
+            'if sys.argv[1:]==["login","--with-api-key"]:\n key=sys.stdin.readline().strip()\n'
+            ' if key.startswith("sk-test-"):\n  open(os.environ["CODEX_HOME"]+"/ok","w").write("1");sys.exit(0)\n sys.exit(2)\n'
+            'assert sys.argv[1:]==["login"]\n'
+            'print(' + repr(codex_url) + ', flush=True)\ntime.sleep(5)\n'
+        )
+        fake_codex.chmod(0o700)
+
+        fake_agy = Path(self.temp.name) / 'agy'
+        fake_agy.write_text(
+            '#!/usr/bin/env python3\nimport sys\n'
+            'assert sys.argv[1:]==["acp","--login"]\n'
+            'print(' + repr(agy_url) + ', flush=True)\n'
+            'code=sys.stdin.readline().strip()\n'
+            'sys.exit(0 if code=="4/agy-auth-code" else 2)\n'
+        )
+        fake_agy.chmod(0o700)
+
+        mgr = auth.AuthManager(
+            str(self.binary),
+            timeout=5,
+            browser_factory=FakeBrowser,
+            binaries={'codex': str(fake_codex), 'agy': str(fake_agy)},
+        )
+        codex_home = Path(self.temp.name) / 'codex-home'
+        with mock.patch.dict(os.environ, {'CODEX_HOME': str(codex_home)}):
+            cid = str(uuid.uuid4())
+            mgr.start(cid, self.events.put, self.owner, provider='codex')
+            self.flow = mgr.current
+            ev = self.wait('browser')
+            self.assertEqual(ev['provider'], 'codex')
+            self.assertEqual(self.flow['browser'].url, codex_url)
+            mgr.input(cid, 'sk-test-secret1234567890123456', self.owner)
+            done = self.wait('success')
+            self.assertNotIn('sk-test-secret', json.dumps(done))
+            self.flow['thread'].join(3)
+
+        aid = str(uuid.uuid4())
+        mgr.start(aid, self.events.put, self.owner, provider='agy')
+        self.flow = mgr.current
+        ev2 = self.wait('browser')
+        self.assertEqual(ev2['provider'], 'agy')
+        self.assertEqual(self.flow['browser'].url, agy_url)
+        mgr.input(aid, '4/agy-auth-code', self.owner)
+        self.wait('success')
+        self.flow['thread'].join(3)

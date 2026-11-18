@@ -281,7 +281,7 @@ impl Chat {
         }
     }
     pub fn request(&self, prompt: &Prompt, actor: &str) -> Value {
-        json!({"op":"prompt","sid":self.sid,"cwd":self.cwd,"text":prompt.text,
+        json!({"op":"prompt","backend":self.backend,"sid":self.sid,"cwd":self.cwd,"text":prompt.text,
             "model":self.model,"mode":self.mode,"effort":self.effort,"actor":actor,
             "custom_prompt":self.custom_prompt,"desktop_enabled":false,"images":[],"files":[]})
     }

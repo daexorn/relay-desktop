@@ -4,6 +4,7 @@ use crate::auth_browser;
 pub(super) struct Login {
     pub(super) server: String,
     pub(super) id: String,
+    pub(super) provider: String,
     state: String,
     message: String,
     code: String,
@@ -37,8 +38,17 @@ impl Drop for Login {
 }
 
 impl RelayApp {
+    #[cfg(test)]
     pub(super) fn start_login(&mut self, server: &Server) {
-        self.open_server_browser(server, false);
+        self.open_server_browser(server, false, "claude");
+    }
+
+    pub(super) fn start_provider_login(&mut self, server: &Server, provider: &str) {
+        let p = match provider {
+            "codex" | "agy" => provider,
+            _ => "claude",
+        };
+        self.open_server_browser(server, false, p);
     }
 
     pub(super) fn start_browser(&mut self, server: &Server) {
@@ -58,16 +68,21 @@ impl RelayApp {
             }
             return;
         }
-        self.open_server_browser(server, true);
+        self.open_server_browser(server, true, "claude");
     }
 
-    fn open_server_browser(&mut self, server: &Server, standalone: bool) {
+    fn open_server_browser(&mut self, server: &Server, standalone: bool, provider: &str) {
         self.cluster_open = false;
         self.board_open = false;
         if let Some(login) = self
             .login
             .as_mut()
-            .filter(|l| l.server == server.id && l.standalone == standalone && l.active())
+            .filter(|l| {
+                l.server == server.id
+                    && l.standalone == standalone
+                    && (standalone || l.provider == provider)
+                    && l.active()
+            })
         {
             login.visible = true;
             if login.frame > 0 {
@@ -89,9 +104,15 @@ impl RelayApp {
             .get(&server.id)
             .is_some_and(|r| r.connected && r.auth_available);
         let id = uuid::Uuid::new_v4().to_string();
+        let default_addr = match provider {
+            "codex" => "https://chatgpt.com/",
+            "agy" => "https://accounts.google.com/",
+            _ => "https://claude.ai/",
+        };
         self.login = Some(Login {
             server: server.id.clone(),
             id: id.clone(),
+            provider: provider.into(),
             state: if available { "starting" } else { "failed" }.into(),
             message: if available {
                 "Открываем браузер на сервере…"
@@ -110,7 +131,7 @@ impl RelayApp {
             button: None,
             pointer: [0., 0.],
             standalone,
-            address: "https://claude.ai/".into(),
+            address: default_addr.into(),
             address_focused: false,
             tabs: Vec::new(),
             native: false,
@@ -121,10 +142,14 @@ impl RelayApp {
         if available {
             self.controller
                 .send(&server.id, json!({"op":"browser_info","id":id}));
-            self.controller.send(
-                &server.id,
-                json!({"op":if standalone {"browser_open"} else {"auth_start"},"id":id}),
-            );
+            let start_req = if standalone {
+                json!({"op":"browser_open","id":id})
+            } else if provider == "claude" {
+                json!({"op":"auth_start","id":id})
+            } else {
+                json!({"op":"auth_start","id":id,"provider":provider})
+            };
+            self.controller.send(&server.id, start_req);
         }
     }
 
@@ -246,7 +271,7 @@ impl RelayApp {
                     login.code.zeroize();
                     login.texture = None;
                 }
-                if state == "success" {
+                if state == "success" && login.provider == "claude" {
                     self.controller.send(server, json!({"op":"usage"}));
                 }
             }
@@ -307,7 +332,16 @@ impl RelayApp {
                     design::icon(ui.painter(),r.shrink(7.),Icon::Browser,accent());
                     ui.allocate_ui_with_layout(Vec2::new(title_width,40.),Layout::top_down(Align::Min),|ui|{
                         ui.set_width(title_width);
-                        label(ui,if login.standalone{"Браузер"}else{"Вход в Claude"},17.,p.text);
+                        let header_title = if login.standalone {
+                            "Браузер"
+                        } else {
+                            match login.provider.as_str() {
+                                "codex" => "Вход в Codex",
+                                "agy" => "Вход в AGY",
+                                _ => "Вход в Claude",
+                            }
+                        };
+                        label(ui,header_title,17.,p.text);
                         label(ui,model::shorten(name,if narrow{12}else{26}),11.5,p.muted);
                     });
                     ui.with_layout(Layout::right_to_left(Align::Center),|ui|{
@@ -333,10 +367,22 @@ impl RelayApp {
                     if design::button(ui,"Подготовить браузер",Some(Icon::Browser),Kind::Primary,p,Vec2::ZERO).clicked(){login.preparing=true;self.controller.send(&login.server,json!({"op":"browser_setup","id":login.id}));}
                 }
                 if login.active() && !login.standalone {
-                    egui::CollapsingHeader::new("Ввести код подтверждения").show(ui,|ui|{
+                    let toggle_label = match login.provider.as_str() {
+                        "codex" => "Ввести API-ключ или код входа",
+                        "agy" => "Ввести код или URL подтверждения Google",
+                        _ => "Ввести код подтверждения",
+                    };
+                    let field_hint = match login.provider.as_str() {
+                        "codex" => "Ключ sk-… или код",
+                        "agy" => "Код авторизации или URL страницы возврата",
+                        _ => "Код из браузера",
+                    };
+                    let header = egui::CollapsingHeader::new(toggle_label)
+                        .default_open(login.provider == "agy");
+                    header.show(ui,|ui|{
                         ui.horizontal(|ui|{
                             let width=(ui.available_width()-132.).max(80.);
-                            let response=ui.allocate_ui_with_layout(Vec2::new(width,36.),Layout::top_down(Align::Min),|ui|design::field(ui,&mut login.code,"Код из браузера",true)).inner;
+                            let response=ui.allocate_ui_with_layout(Vec2::new(width,36.),Layout::top_down(Align::Min),|ui|design::field(ui,&mut login.code,field_hint,true)).inner;
                             let submit=design::button(ui,"Подтвердить",Some(Icon::Check),Kind::Primary,p,Vec2::new(120.,36.)).clicked() || response.lost_focus() && ui.input(|i|i.key_pressed(egui::Key::Enter));
                             if submit && !login.code.trim().is_empty(){
                                 self.controller.send(&login.server,json!({"op":"auth_input","id":login.id,"code":login.code.trim()}));login.code.zeroize();login.code.clear();
@@ -372,7 +418,7 @@ impl RelayApp {
             }
             if retry {
                 if let Some(server) = server {
-                    self.open_server_browser(&server, login.standalone);
+                    self.open_server_browser(&server, login.standalone, &login.provider);
                 }
             }
         } else {

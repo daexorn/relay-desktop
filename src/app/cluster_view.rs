@@ -369,7 +369,7 @@ impl RelayApp {
                             for (i,a) in e.config.workers.iter_mut().enumerate(){ui.add_space(10.);ui.push_id(i,|ui|{agent_editor(ui,a,&self.settings.servers,false,p);if design::button(ui,"Убрать исполнителя",Some(Icon::Close),Kind::Ghost,p,Vec2::ZERO).clicked(){remove=Some(i);}});}
                             if let Some(i)=remove{e.config.workers.remove(i);}
                             ui.add_space(10.);
-                            if e.config.workers.len()<12&&design::button(ui,"Добавить исполнителя",Some(Icon::Plus),Kind::Secondary,p,Vec2::ZERO).clicked(){e.config.workers.push(Agent{name:format!("Исполнитель {}",e.config.workers.len()+1),server:e.config.leader.server.clone(),model:"sonnet".into(),..Default::default()});}
+                            if e.config.workers.len()<12&&design::button(ui,"Добавить исполнителя",Some(Icon::Plus),Kind::Secondary,p,Vec2::ZERO).clicked(){e.config.workers.push(Agent{name:format!("Исполнитель {}",e.config.workers.len()+1),server:e.config.leader.server.clone(),model:"default".into(),..Default::default()});}
                         }
                         1=>{
                             let names:Vec<_>=std::iter::once("Общие инструкции команды".into()).chain(std::iter::once(format!("Руководитель · {}",e.config.leader.name))).chain(e.config.workers.iter().map(|a|format!("Исполнитель · {}",a.name))).collect();
@@ -595,19 +595,83 @@ fn agent_editor(ui: &mut egui::Ui, a: &mut Agent, servers: &[Server], leader: bo
                     .hint_text("Рабочая папка · пусто — папка профиля"),
             );
             ui.horizontal_wrapped(|ui| {
+                let backend_text = match a.backend.as_str() {
+                    "claude" => "Агент: Claude Code",
+                    "codex" => "Агент: Codex",
+                    "agy" => "Агент: AGY",
+                    "api" => "Агент: API",
+                    _ => "Агент: по профилю хоста",
+                };
+                let prev_backend = a.backend.clone();
+                egui::ComboBox::from_id_salt(("agent-backend", &a.id))
+                    .icon(design::combo_icon)
+                    .selected_text(backend_text)
+                    .show_ui(ui, |ui| {
+                        for (id, name) in [
+                            ("", "По профилю хоста"),
+                            ("claude", "Claude Code"),
+                            ("codex", "Codex"),
+                            ("agy", "Antigravity (agy)"),
+                            ("api", "Пользовательский API"),
+                        ] {
+                            ui.selectable_value(&mut a.backend, id.into(), name);
+                        }
+                    });
+                if a.backend != prev_backend {
+                    a.model = "default".into();
+                }
+                let effective_backend = if a.backend.is_empty() {
+                    servers
+                        .iter()
+                        .find(|s| s.id == a.server)
+                        .map(|s| s.effective_backend())
+                        .unwrap_or("claude")
+                } else {
+                    a.backend.as_str()
+                };
                 egui::ComboBox::from_id_salt(("agent-model", &a.id))
                     .icon(design::combo_icon)
                     .selected_text(format!("Модель: {}", a.model))
                     .show_ui(ui, |ui| {
-                        for (id, name) in [
-                            ("default", "Модель Claude по умолчанию"),
-                            ("inherit", "Модель профиля"),
-                            ("opus", "Opus"),
-                            ("sonnet", "Sonnet"),
-                            ("haiku", "Haiku"),
-                        ] {
-                            ui.selectable_value(&mut a.model, id.into(), name);
+                        match effective_backend {
+                            "codex" => {
+                                ui.selectable_value(&mut a.model, "inherit".into(), "Модель профиля");
+                                for m in crate::model::default_backend_models("codex") {
+                                    ui.selectable_value(&mut a.model, m.value, m.display_name);
+                                }
+                            }
+                            "agy" => {
+                                ui.selectable_value(&mut a.model, "inherit".into(), "Модель профиля");
+                                for m in crate::model::default_backend_models("agy") {
+                                    ui.selectable_value(&mut a.model, m.value, m.display_name);
+                                }
+                            }
+                            "api" => {
+                                ui.selectable_value(&mut a.model, "default".into(), "Модель API профиля");
+                                if let Some(srv) = servers.iter().find(|s| s.id == a.server) {
+                                    for id in &srv.api.models {
+                                        ui.selectable_value(&mut a.model, id.clone(), id);
+                                    }
+                                }
+                            }
+                            _ => {
+                                for (id, name) in [
+                                    ("default", "Модель Claude по умолчанию"),
+                                    ("inherit", "Модель профиля"),
+                                    ("opus", "Opus"),
+                                    ("sonnet", "Sonnet"),
+                                    ("haiku", "Haiku"),
+                                ] {
+                                    ui.selectable_value(&mut a.model, id.into(), name);
+                                }
+                            }
                         }
+                        ui.separator();
+                        ui.add(
+                            egui::TextEdit::singleline(&mut a.model)
+                                .desired_width(180.)
+                                .hint_text("Своя модель…"),
+                        );
                     });
                 egui::ComboBox::from_id_salt(("agent-effort", &a.id))
                     .icon(design::combo_icon)

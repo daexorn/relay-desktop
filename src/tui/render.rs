@@ -62,7 +62,7 @@ impl Palette {
 }
 #[derive(Default)]
 pub struct View {
-    cache: Option<(String, u64, usize, u16, bool, String)>,
+    cache: Option<(String, u64, usize, u16, bool, String, String)>,
     lines: Vec<Line<'static>>,
 }
 
@@ -409,6 +409,12 @@ fn sidebar(frame: &mut Frame, app: &mut App, area: Rect, p: Palette) {
             ),
             p,
         );
+        let sub = match s.backend.as_str() {
+            "codex" => format!("Codex · {}", clean(&s.cwd)),
+            "agy" => format!("AGY · {}", clean(&s.cwd)),
+            "api" => format!("API · {}", clean(&s.cwd)),
+            _ => clean(&s.cwd),
+        };
         put(
             frame,
             Rect {
@@ -418,7 +424,7 @@ fn sidebar(frame: &mut Frame, app: &mut App, area: Rect, p: Palette) {
                 height: 1,
             },
             Line::styled(
-                fit(&clean(&s.cwd), inner.width as usize - 2),
+                fit(&sub, inner.width as usize - 2),
                 Style::default().fg(p.muted),
             ),
             p,
@@ -449,6 +455,35 @@ fn sidebar(frame: &mut Frame, app: &mut App, area: Rect, p: Palette) {
     }
 }
 fn usage(frame: &mut Frame, app: &App, area: Rect, p: Palette) {
+    let active_backend = app
+        .chat()
+        .map(|c| c.backend.as_str())
+        .or_else(|| app.server().map(|_| "claude"))
+        .unwrap_or("claude");
+    if active_backend != "claude" {
+        let remote = app.active.as_ref().and_then(|h| app.remote.get(h));
+        let ver = remote
+            .and_then(|r| r.backends[active_backend]["version"].as_str())
+            .unwrap_or("");
+        let name = relay_desktop::model::backend_label(active_backend);
+        let mut rows = vec![
+            Line::styled("АГЕНТ", Style::default().fg(p.muted)),
+            Line::styled(fit(name, area.width as usize), Style::default().fg(p.accent)),
+        ];
+        if !ver.is_empty() {
+            rows.push(Line::styled(
+                fit(&clean(ver), area.width as usize),
+                Style::default().fg(p.muted),
+            ));
+        } else {
+            rows.push(Line::styled(
+                "/backend — сменить",
+                Style::default().fg(p.muted),
+            ));
+        }
+        put(frame, area, Text::from(rows), p);
+        return;
+    }
     let usage = app
         .active
         .as_ref()
@@ -512,7 +547,7 @@ fn welcome(frame: &mut Frame, app: &App, area: Rect, p: Palette) {
     } else if !connected {
         "F2 — выбрать хост · /connect — подключиться. История остаётся на сервере."
     } else {
-        "Продолжи сессию через F3 или напиши новую задачу.\nClaude Code и собственный API работают с общей историей."
+        "Продолжи сессию через F3 или напиши новую задачу.\nClaude Code, Codex, AGY и собственный API работают с общей историей."
     };
     let rows = vec![
         Line::default(),
@@ -530,7 +565,7 @@ fn welcome(frame: &mut Frame, app: &App, area: Rect, p: Palette) {
     if connected {
         rows.push(Line::default());
         rows.push(Line::styled(
-            "/attach  файлы     /model  модель     /help  команды",
+            "/backend  агент    /attach  файлы    /model  модель    /help  команды",
             Style::default().fg(p.accent),
         ));
     }
@@ -559,6 +594,7 @@ fn transcript(frame: &mut Frame, app: &mut App, view: &mut View, area: Rect, p: 
         area.width,
         c.expanded,
         app.theme().to_owned(),
+        c.backend.clone(),
     );
     if view.cache.as_ref() != Some(&signature) {
         let mut rows = vec![];
@@ -590,10 +626,11 @@ fn transcript(frame: &mut Frame, app: &mut App, view: &mut View, area: Rect, p: 
                         continue;
                     }
                     rows.push(Line::styled(
-                        if c.backend == "api" {
-                            "● API"
-                        } else {
-                            "● Claude"
+                        match c.backend.as_str() {
+                            "codex" => "● Codex",
+                            "agy" => "● AGY",
+                            "api" => "● API",
+                            _ => "● Claude",
                         },
                         Style::default().fg(p.muted),
                     ));
@@ -751,11 +788,7 @@ fn composer(frame: &mut Frame, app: &App, area: Rect, p: Palette) {
         .map(|c| {
             format!(
                 " {} · {} · {} · {} ",
-                if c.backend == "api" {
-                    "API"
-                } else {
-                    "Claude Code"
-                },
+                relay_desktop::model::backend_short_label(&c.backend),
                 if c.model == "default" {
                     "модель: авто"
                 } else {
@@ -901,6 +934,7 @@ fn popup_view(frame: &mut Frame, app: &App, popup: &Popup, p: Palette) {
             Picker::Hosts => "Серверы",
             Picker::Sessions => "Сессии",
             Picker::Models => "Модель",
+            Picker::Backends => "Агент сессии",
             Picker::Themes => "Оформление",
             Picker::Modes => "Разрешения",
             Picker::Efforts => "Глубина",

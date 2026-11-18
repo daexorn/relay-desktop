@@ -263,15 +263,18 @@ async fn run(
     drop(password);
     let mut channel = session.channel_open_session().await?;
     let helper = format!(
-        "DESKTOP_SOURCE = {}\nBOARD_SOURCE = {}\nCLUSTER_SOURCE = {}\nATTACHMENTS_SOURCE = {}\nAPI_SOURCE = {}\nAUTH_SOURCE = {}\nBROWSER_SOURCE = {}\nAPI_DEFAULT = {}\n{}",
+        "DESKTOP_SOURCE = {}\nBOARD_SOURCE = {}\nCLUSTER_SOURCE = {}\nATTACHMENTS_SOURCE = {}\nAPI_SOURCE = {}\nCODEX_SOURCE = {}\nAGY_SOURCE = {}\nAUTH_SOURCE = {}\nBROWSER_SOURCE = {}\nAPI_DEFAULT = {}\nDEFAULT_BACKEND = {}\n{}",
         serde_json::to_string(include_str!("../bridge/desktop_mcp.py"))?,
         serde_json::to_string(include_str!("../bridge/board.py"))?,
         serde_json::to_string(include_str!("../bridge/cluster_mcp.py"))?,
         serde_json::to_string(include_str!("../bridge/attachments.py"))?,
         serde_json::to_string(include_str!("../bridge/api_engine.py"))?,
+        serde_json::to_string(include_str!("../bridge/codex_engine.py"))?,
+        serde_json::to_string(include_str!("../bridge/agy_engine.py"))?,
         serde_json::to_string(include_str!("../bridge/auth_flow.py"))?,
         serde_json::to_string(include_str!("../bridge/remote_browser.py"))?,
-        if server.api.enabled { "True" } else { "False" },
+        if server.effective_backend() == "api" { "True" } else { "False" },
+        serde_json::to_string(server.effective_backend())?,
         include_str!("../bridge/relay_bridge.py")
     );
     channel
@@ -323,7 +326,7 @@ async fn run(
                 if desktop.local(&value){continue;}
                 let mut encoded=serde_json::to_vec(&value)?;encoded.push(b'\n');channel.data(&encoded[..]).await?;
             },
-            _=&mut deadline, if !greeted => anyhow::bail!("Не удалось запустить помощник. На сервере нужен Python 3; для режима Claude Code также нужен сам Claude Code."),
+            _=&mut deadline, if !greeted => anyhow::bail!("Не удалось запустить помощник. На сервере нужен Python 3 и выбранный агент (Claude Code, Codex, AGY или API)."),
             request=requests.recv()=>match request {
                 Some(value)=>{
                     if value["op"]=="_disconnect"{let _=channel.eof().await;break;}
