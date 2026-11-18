@@ -2046,12 +2046,12 @@ impl RelayApp {
                         design::icon(ui.painter(), brand_orb, Icon::Orbit, accent());
                         ui.label(RichText::new("Relay").size(18.5).color(p.text).strong());
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            ui.spacing_mut().item_spacing.x = 3.;
+                            ui.spacing_mut().item_spacing.x = 5.;
                             if design::button(
                                 ui,
                                 "",
                                 Some(Icon::Settings),
-                                Kind::Ghost,
+                                Kind::Secondary,
                                 p,
                                 Vec2::splat(28.),
                             )
@@ -2072,7 +2072,11 @@ impl RelayApp {
                                     ui,
                                     "",
                                     Some(Icon::Bolt),
-                                    Kind::Ghost,
+                                    if server.api.enabled {
+                                        Kind::Primary
+                                    } else {
+                                        Kind::Secondary
+                                    },
                                     p,
                                     Vec2::splat(28.),
                                 )
@@ -2085,7 +2089,11 @@ impl RelayApp {
                                     ui,
                                     "",
                                     Some(Icon::Download),
-                                    Kind::Ghost,
+                                    if self.agents_open.as_deref() == Some(server.id.as_str()) {
+                                        Kind::Primary
+                                    } else {
+                                        Kind::Secondary
+                                    },
                                     p,
                                     Vec2::splat(28.),
                                 )
@@ -2804,13 +2812,11 @@ impl RelayApp {
             if dots.hovered() || open {
                 ui.painter().rect_filled(dots_rect, 7., p.line);
             }
-            ui.painter().text(
-                dots_rect.center() - Vec2::new(0., 1.),
-                egui::Align2::CENTER_CENTER,
-                "•••",
-                FontId::proportional(9.),
-                if dots.hovered() || open { p.text } else { p.muted },
-            );
+            let dot_col = if dots.hovered() || open { p.text } else { p.muted };
+            for dx in [-4.5_f32, 0.0, 4.5] {
+                ui.painter()
+                    .circle_filled(dots_rect.center() + Vec2::new(dx, 0.), 1.35, dot_col);
+            }
         }
         if dots.clicked() {
             ui.memory_mut(|m| m.toggle_popup(menu_id));
@@ -3020,7 +3026,7 @@ impl RelayApp {
                                         } else {
                                             "Защитить эту сессию паролем"
                                         };
-                                        let lock_btn = design::button(ui,"",Some(lock_icon),Kind::Secondary,p,Vec2::new(34.,32.)).on_hover_text(lock_tip);
+                                        let lock_btn = design::button(ui,"",Some(lock_icon),Kind::Secondary,p,Vec2::splat(32.)).on_hover_text(lock_tip);
                                         if lock_btn.clicked() && (!chat_locked || chat_unlocked) {
                                             self.open_lock_dialog(&server.id, &sid);
                                         }
@@ -3028,7 +3034,7 @@ impl RelayApp {
                                             self.relock_session(&server.id, &sid);
                                         }
                                     }
-                                    if design::button(ui,"",Some(Icon::Radar),Kind::Secondary,p,Vec2::new(34.,32.))
+                                    if design::button(ui,"",Some(Icon::Radar),Kind::Secondary,p,Vec2::splat(32.))
                                         .on_hover_text("Радар агентов · живая топология сессий на сервере (/radar)")
                                         .clicked()
                                     {
@@ -4106,8 +4112,8 @@ impl RelayApp {
                     ui.available_width() < if chat.mode == "manual" { 820. } else { 740. };
                 ui.add_space(4.);
                 ui.horizontal(|ui| {
-                    ui.add_space(-6.);
-                    if design::button(ui, "", Some(Icon::Attach), Kind::Ghost, p, Vec2::splat(28.))
+                    ui.add_space(-2.);
+                    if design::button(ui, "", Some(Icon::Attach), Kind::Ghost, p, Vec2::splat(30.))
                         .on_hover_text("Выбор файлов, перетаскивание или Ctrl+V")
                         .clicked()
                     {
@@ -6565,5 +6571,59 @@ mod tests {
         reduce(&mut c, &json!({"type":"result","result":"Готово"}));
         assert_eq!(c.messages.len(), 2);
         assert_eq!(c.messages[1].text, "Готово");
+    }
+
+    #[test]
+    fn icon_only_buttons_center_their_glyphs_across_all_sizes() {
+        for side in [22.0_f32, 24.0, 28.0, 32.0, 36.0] {
+            for icon in [Icon::Download, Icon::Bolt, Icon::Settings, Icon::Refresh, Icon::Radar] {
+                let ctx = egui::Context::default();
+                let mut btn_rect = egui::Rect::NOTHING;
+                let output = ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            Vec2::new(300., 120.),
+                        )),
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| {
+                            btn_rect = design::button(
+                                ui,
+                                "",
+                                Some(icon),
+                                Kind::Secondary,
+                                design::palette(false),
+                                Vec2::splat(side),
+                            )
+                            .rect;
+                        });
+                    },
+                );
+                assert!((btn_rect.width() - side).abs() < 0.01);
+                assert!((btn_rect.height() - side).abs() < 0.01);
+                let mut glyph_bounds = egui::Rect::NOTHING;
+                for clipped in output.shapes {
+                    let b = clipped.shape.visual_bounding_rect();
+                    if b.is_finite() && b.width() < side - 2.0 && b.height() < side - 2.0 {
+                        glyph_bounds = glyph_bounds.union(b);
+                    }
+                }
+                assert!(glyph_bounds.is_finite());
+                assert!(
+                    (glyph_bounds.center().x - btn_rect.center().x).abs() < 1.2,
+                    "icon {icon:?} at {side}px off-center X: glyph={} btn={}",
+                    glyph_bounds.center().x,
+                    btn_rect.center().x
+                );
+                assert!(
+                    (glyph_bounds.center().y - btn_rect.center().y).abs() < 1.2,
+                    "icon {icon:?} at {side}px off-center Y: glyph={} btn={}",
+                    glyph_bounds.center().y,
+                    btn_rect.center().y
+                );
+            }
+        }
     }
 }

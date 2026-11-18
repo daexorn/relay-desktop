@@ -145,7 +145,7 @@ pub fn combo_icon(
 fn rect_id(rect: Rect) -> egui::Id {
     egui::Id::new(("dropdown-chevron", rect.min.x as i32, rect.min.y as i32))
 }
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum Icon {
     Browser,
     Key,
@@ -380,9 +380,10 @@ pub fn icon(p: &egui::Painter, r: Rect, which: Icon, color: Color32) {
             }
         }
         Icon::Settings => {
-            for (y, x) in [(-5., 2.), (0., -3.), (5., 3.)] {
-                line((-8., y), (8., y));
-                p.circle_filled(v(x, y), 2.6 * z, color);
+            for (y, knob_x) in [(-3.8_f32, 2.2_f32), (3.8_f32, -2.2_f32)] {
+                line((-6.8, y), (knob_x - 2.3, y));
+                line((knob_x + 2.3, y), (6.8, y));
+                p.circle_stroke(v(knob_x, y), 2.1 * z, s);
             }
         }
         Icon::Sun => {
@@ -394,49 +395,74 @@ pub fn icon(p: &egui::Painter, r: Rect, which: Icon, color: Color32) {
             }
         }
         Icon::Moon => {
-            let pts: Vec<_> = (0..=20)
+            let outer: Vec<_> = (0..=18)
                 .map(|i| {
-                    let t = 0.4 + i as f32 / 20. * 5.5;
-                    v(t.cos() * 7., t.sin() * 7.)
+                    let t = 0.55 + i as f32 / 18. * 4.95;
+                    v(t.cos() * 6.8, t.sin() * 6.8)
                 })
                 .collect();
-            p.add(egui::Shape::line(pts, s));
-            path(&[(6., -3.), (1., -1.), (-1., 3.), (2., 7.)]);
+            let inner: Vec<_> = (0..=14)
+                .map(|i| {
+                    let t = -0.85 - i as f32 / 14. * 2.95;
+                    v(2.7 + t.cos() * 5.4, -1.6 + t.sin() * 5.4)
+                })
+                .collect();
+            p.add(egui::Shape::line(outer, s));
+            p.add(egui::Shape::line(inner, s));
         }
         Icon::Refresh => {
+            let start = -0.65_f32;
+            let end = 4.55_f32;
+            let r_arc = 5.8_f32;
             let pts: Vec<_> = (0..=20)
                 .map(|i| {
-                    let t = 0.3 + i as f32 / 20. * 5.;
-                    v(t.cos() * 6., t.sin() * 6.)
+                    let t = start + i as f32 / 20. * (end - start);
+                    v(t.cos() * r_arc, t.sin() * r_arc)
                 })
                 .collect();
             p.add(egui::Shape::line(pts, s));
-            path(&[(1., -7.), (5., -6.), (5., -2.)]);
+            let tip = (start.cos() * r_arc, start.sin() * r_arc);
+            path(&[(tip.0 - 3.6, tip.1 - 0.6), tip, (tip.0 + 0.4, tip.1 - 3.6)]);
         }
         Icon::Lock => {
             p.rect_stroke(
-                Rect::from_min_max(v(-6.5, -1.), v(6.5, 8.5)),
+                Rect::from_min_max(v(-6.2, -0.8), v(6.2, 7.6)),
                 2.2 * z,
                 s,
                 egui::StrokeKind::Inside,
             );
-            path(&[(-4., -1.), (-4., -4.5), (-2.5, -7.), (0., -7.8), (2.5, -7.), (4., -4.5), (4., -1.)]);
-            p.circle_filled(v(0., 3.5), 1.4 * z, color);
+            let arch: Vec<_> = (0..=12)
+                .map(|i| {
+                    let a = std::f32::consts::PI + i as f32 / 12. * std::f32::consts::PI;
+                    v(a.cos() * 3.8, -3.4 + a.sin() * 3.8)
+                })
+                .collect();
+            p.add(egui::Shape::line(arch, s));
+            line((-3.8, -3.4), (-3.8, -0.8));
+            line((3.8, -3.4), (3.8, -0.8));
+            p.circle_filled(v(0., 3.3), 1.35 * z, color);
         }
         Icon::Unlock => {
             p.rect_stroke(
-                Rect::from_min_max(v(-6.5, -1.), v(6.5, 8.5)),
+                Rect::from_min_max(v(-6.2, -0.8), v(6.2, 7.6)),
                 2.2 * z,
                 s,
                 egui::StrokeKind::Inside,
             );
-            path(&[(-4., -1.), (-4., -5.), (-2., -7.8), (1.5, -7.8), (4., -5.5)]);
-            p.circle_filled(v(0., 3.5), 1.4 * z, color);
+            let arch: Vec<_> = (0..=10)
+                .map(|i| {
+                    let a = std::f32::consts::PI + i as f32 / 10. * (std::f32::consts::PI * 0.78);
+                    v(a.cos() * 3.8, -3.6 + a.sin() * 3.8)
+                })
+                .collect();
+            p.add(egui::Shape::line(arch, s));
+            line((-3.8, -3.6), (-3.8, -0.8));
+            p.circle_filled(v(0., 3.3), 1.35 * z, color);
         }
         Icon::Download => {
-            line((0., -8.), (0., 3.5));
-            path(&[(-4., -0.5), (0., 3.8), (4., -0.5)]);
-            path(&[(-7., 5.5), (-7., 8.), (7., 8.), (7., 5.5)]);
+            line((0., -6.5), (0., 2.2));
+            path(&[(-3.8, -1.3), (0., 2.5), (3.8, -1.3)]);
+            path(&[(-6.5, 3.8), (-6.5, 6.4), (6.5, 6.4), (6.5, 3.8)]);
         }
         Icon::Orbit => {
             p.circle_filled(c, 2.3 * z, color);
@@ -486,15 +512,16 @@ pub fn icon(p: &egui::Painter, r: Rect, which: Icon, color: Color32) {
             ]);
         }
         Icon::Bolt => {
-            path(&[
-                (1.5, -8.5),
-                (-5.5, 0.8),
-                (-0.2, 0.8),
-                (-1.8, 8.5),
-                (5.5, -0.8),
-                (0.2, -0.8),
-                (1.5, -8.5),
-            ]);
+            p.add(egui::Shape::convex_polygon(
+                vec![v(1.4, -7.2), v(-5.2, 0.7), v(0.6, 0.7)],
+                color,
+                Stroke::NONE,
+            ));
+            p.add(egui::Shape::convex_polygon(
+                vec![v(-1.4, 7.2), v(5.2, -0.7), v(-0.6, -0.7)],
+                color,
+                Stroke::NONE,
+            ));
         }
         Icon::Radar => {
             p.circle_stroke(c, 8.2 * z, s);
@@ -847,15 +874,26 @@ pub fn button(
 ) -> Response {
     let font = FontId::proportional(13.0);
     let galley = ui.painter().layout_no_wrap(text.into(), font, p.text);
-    let icon_size = if text.is_empty() { 17. } else { 15. };
+    let height = if size.y > 0. { size.y } else { 32. };
+    let icon_size = if text.is_empty() {
+        (height * 0.52).clamp(13.0, 16.0)
+    } else {
+        14.5
+    };
     let gap = if which.is_some() && !text.is_empty() {
-        7.
+        6.5
     } else {
         0.
     };
     let inner = galley.size().x + gap + if which.is_some() { icon_size } else { 0. };
-    let width = if size.x > 0. { size.x } else { inner + 26. };
-    let (r, response) = ui.allocate_exact_size(Vec2::new(width, size.y.max(28.)), Sense::click());
+    let width = if size.x > 0. {
+        size.x
+    } else if text.is_empty() {
+        height
+    } else {
+        inner + 24.
+    };
+    let (r, response) = ui.allocate_exact_size(Vec2::new(width, height), Sense::click());
     let hovered = ui.ctx().animate_bool_with_time_and_easing(
         response.id.with("hover"),
         response.hovered(),
@@ -878,7 +916,7 @@ pub fn button(
         ),
     };
     let painted = r.shrink(pressed * 1.);
-    let radius = (r.height() / 2.).min(8.);
+    let radius = (painted.height() * 0.28).clamp(6., 9.);
     ui.painter()
         .rect_filled(painted, radius, mix(base, over, hovered));
     if kind == Kind::Secondary {
@@ -906,24 +944,35 @@ pub fn button(
     } else {
         p.text
     };
-    let mut x = r.center().x - inner.min(r.width() - 16.) / 2.;
-    if let Some(which) = which {
-        icon(
-            ui.painter(),
-            Rect::from_center_size(
-                Pos2::new(x + icon_size / 2., r.center().y),
-                Vec2::splat(icon_size),
-            ),
-            which,
-            color,
-        );
-        x += icon_size + gap;
-    }
-    if !text.is_empty() {
+    if text.is_empty() {
+        if let Some(which) = which {
+            icon(
+                ui.painter(),
+                Rect::from_center_size(painted.center(), Vec2::splat(icon_size)),
+                which,
+                color,
+            );
+        }
+    } else {
+        let max_inner = (painted.width() - 12.).max(0.);
+        let actual_inner = inner.min(max_inner);
+        let mut x = painted.center().x - actual_inner * 0.5;
+        if let Some(which) = which {
+            icon(
+                ui.painter(),
+                Rect::from_center_size(
+                    Pos2::new(x + icon_size * 0.5, painted.center().y),
+                    Vec2::splat(icon_size),
+                ),
+                which,
+                color,
+            );
+            x += icon_size + gap;
+        }
         ui.painter()
-            .with_clip_rect(painted.shrink2(Vec2::new(8., 0.)))
+            .with_clip_rect(painted.shrink2(Vec2::new(6., 0.)))
             .galley_with_override_text_color(
-                Pos2::new(x, r.center().y - galley.size().y / 2.),
+                Pos2::new(x, painted.center().y - galley.size().y * 0.5),
                 galley,
                 color,
             );
