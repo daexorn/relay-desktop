@@ -190,7 +190,7 @@ pub fn icon(p: &egui::Painter, r: Rect, which: Icon, color: Color32) {
     let c = r.center();
     let z = r.width().min(r.height()) / 24.0;
     let v = |x: f32, y: f32| c + Vec2::new(x * z, y * z);
-    let s = Stroke::new(1.65 * z, color);
+    let s = Stroke::new(1.95 * z, color);
     let line = |a: (f32, f32), b: (f32, f32)| {
         p.line_segment([v(a.0, a.1), v(b.0, b.1)], s);
     };
@@ -573,20 +573,20 @@ pub fn ambient_horizon(_painter: &egui::Painter, _rect: Rect, _color: Color32, _
 fn paint_engine_icon(painter: &egui::Painter, rect: Rect, backend: &str) {
     use relay_desktop::agent_icons::{pixels, SIZE};
     let scale = painter.ctx().pixels_per_point();
-    let available = rect.width().min(rect.height()) * scale / SIZE as f32;
-    let cell = if available >= 1.0 { available.floor() } else { available } / scale;
-    let extent = SIZE as f32 * cell;
-    let origin = (rect.center() - Vec2::splat(extent * 0.5)).to_vec2();
-    let origin = ((origin * scale).round() / scale).to_pos2();
-    // Egui fades the edges of small filled shapes. Pixel squares need sharp edges
-    // so a one-pixel cell remains visible at the default scale.
+    let extent = rect.width().min(rect.height());
+    let cell = extent / SIZE as f32;
+    let origin = rect.center() - Vec2::splat(extent * 0.5);
+    let edge = |position: f32, index: usize| {
+        let position = position + index as f32 * cell;
+        if cell * scale >= 1.0 { (position * scale).round() / scale } else { position }
+    };
     let mut mesh = egui::epaint::Mesh::default();
     for (y, row) in pixels(backend).iter().enumerate() {
         for (x, pixel) in row.iter().enumerate() {
             if let Some([r, g, b]) = pixel {
-                let square = Rect::from_min_size(
-                    origin + Vec2::new(x as f32 * cell, y as f32 * cell),
-                    Vec2::splat(cell),
+                let square = Rect::from_min_max(
+                    Pos2::new(edge(origin.x, x), edge(origin.y, y)),
+                    Pos2::new(edge(origin.x, x + 1), edge(origin.y, y + 1)),
                 );
                 mesh.add_colored_rect(square, Color32::from_rgb(*r, *g, *b));
             }
@@ -881,9 +881,9 @@ pub fn button(
     let galley = ui.painter().layout_no_wrap(text.into(), font, p.text);
     let height = if size.y > 0. { size.y } else { 32. };
     let icon_size = if text.is_empty() {
-        (height * 0.52).clamp(13.0, 16.0)
+        (height * 0.62).clamp(15.0, 22.0)
     } else {
-        14.5
+        17.
     };
     let gap = if which.is_some() && !text.is_empty() {
         6.5

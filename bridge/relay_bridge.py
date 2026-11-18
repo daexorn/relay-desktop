@@ -47,6 +47,14 @@ AGENT_ROLES = {
 USAGE_LABELS = {"five_hour": "5 часов", "seven_day": "Неделя", "seven_day_opus": "Неделя · Opus", "seven_day_sonnet": "Неделя · Sonnet", "overage": "Дополнительно"}
 
 
+BACKEND_LABELS = {"claude": "Claude Code", "codex": "Codex", "agy": "Antigravity", "api": "Пользовательский API"}
+TOKEN_FIELDS = {
+    "in": "input_tokens", "out": "output_tokens",
+    "cache_read": "cache_read_input_tokens", "cache_write": "cache_creation_input_tokens",
+}
+CODEX_TOKEN_FIELDS = {**TOKEN_FIELDS, "cache_read": "cached_input_tokens", "cache_write": "cache_write_input_tokens"}
+
+
 def usage_number(value, maximum):
     return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and 0 <= value <= maximum else None
 
@@ -1440,6 +1448,7 @@ class Bridge:
         self.runs = {}
         self.run_lock = threading.RLock()
         self.usage = UsageState()
+        self.slash_efforts = {}
         self.files = FileTransfers(self.send)
         source = globals().get('ATTACHMENTS_SOURCE')
         if not source:
@@ -1525,14 +1534,15 @@ class Bridge:
             data = event.get("data")
             run = self.runs.get(sid) if isinstance(sid, str) else None
             if isinstance(data, dict) and run is not None:
-                data.setdefault("relay_backend", getattr(run, "backend", "claude"))
-                data.setdefault("relay_model", getattr(run, "model", ""))
-                data.setdefault("relay_mode", getattr(run, "mode", ""))
-                data.setdefault("relay_effort", getattr(run, "effort", ""))
-                data.setdefault("relay_actor", getattr(run, "actor", "") or self.actor)
-                cc = getattr(run, "cluster_context", None) or {}
-                if cc.get("name"):
-                    data.setdefault("relay_agent_name", cc["name"])
+                run_backend = getattr(run, "backend", "claude")
+                if data.setdefault("relay_backend", run_backend) == run_backend:
+                    data.setdefault("relay_model", getattr(run, "model", ""))
+                    data.setdefault("relay_mode", getattr(run, "mode", ""))
+                    data.setdefault("relay_effort", getattr(run, "effort", ""))
+                    data.setdefault("relay_actor", getattr(run, "actor", "") or self.actor)
+                    cc = getattr(run, "cluster_context", None) or {}
+                    if cc.get("name"):
+                        data.setdefault("relay_agent_name", cc["name"])
                 if data.get("type") == "result" and isinstance(sid, str):
                     self._sync_materialized_vault(sid, keep_file=bool(getattr(run, "busy", False)))
         self._raw_send(event)
@@ -1956,62 +1966,144 @@ class Bridge:
         finally:
             self.updating = False
 
-    def _session_token_stats(self, sid):
-        in_tok = out_tok = cache_r = cache_w = turns = tools = 0
-        rows_src = []
+    def _session_token_stats(self, sid, backend):
+        stats = {"turns": 0, "tools": 0, **dict.fromkeys(TOKEN_FIELDS)}
         found = self.transcripts.find(sid)
+        rows = []
         if found is not None and found.is_file():
-            rows_src = list(records(found))
+            rows = list(records(found))
         elif self.meta.is_locked(sid) and self.meta.has_vault(sid):
             keys = self._find_unlocked_keys(sid)
             if keys is not None:
                 try:
-                    p = self.meta.open_vault(sid, keys[0], keys[1]) or {}
-                    for ln in str(p.get("jsonl") or "").splitlines():
-                        if ln.strip():
-                            rows_src.append(json.loads(ln))
-                except Exception:
+                    vault = self.meta.open_vault(sid, keys[0], keys[1]) or {}
+                    rows = [json.loads(line) for line in str(vault.get("jsonl") or "").splitlines() if line.strip()]
+                except (OSError, ValueError, TypeError):
                     pass
-        for r in rows_src:
-            if r.get("isSidechain"):
-                continue
-            msg = r.get("message") if isinstance(r.get("message"), dict) else {}
-            if msg.get("role", r.get("type")) == "user" and not r.get("isMeta"):
-                turns += 1
-            if msg.get("role", r.get("type")) == "assistant":
-                u = msg.get("usage") if isinstance(msg.get("usage"), dict) else {}
-                in_tok += int(u.get("input_tokens") or 0)
-                out_tok += int(u.get("output_tokens") or 0)
-                cache_r += int(u.get("cache_read_input_tokens") or 0)
-                cache_w += int(u.get("cache_creation_input_tokens") or 0)
-                cnt = msg.get("content")
-                if isinstance(cnt, list):
-                    tools += sum(1 for b in cnt if isinstance(b, dict) and b.get("type") == "tool_use")
-        return {"turns": turns, "tools": tools, "in": in_tok, "out": out_tok, "cache_read": cache_r, "cache_write": cache_w}
 
-    def quick_command(self, sid, text, backend="claude"):
+        def add_tokens(usage, fields):
+            if isinstance(usage, dict):
+                for key, field in fields.items():
+                    value = usage.get(field)
+                    if type(value) is int and value >= 0:
+                        stats[key] = (stats[key] or 0) + value
+
+        codex_ids = set()
+        seen_claude_messages = set()
+        for row in primary_chain(rows):
+            if row.get("isSidechain") or row_backend(row) != backend:
+                continue
+            thread = row.get("codexThreadId")
+            if backend == "codex" and isinstance(thread, str):
+                codex_ids.add(thread.lower())
+            msg = row.get("message") if isinstance(row.get("message"), dict) else {}
+            role = msg.get("role", row.get("type"))
+            blocks = msg.get("content")
+            if role == "user" and not row.get("isMeta"):
+                if isinstance(blocks, str) or isinstance(blocks, list) and any(
+                    isinstance(block, dict) and block.get("type") in ("text", "image", "document") for block in blocks
+                ):
+                    stats["turns"] += 1
+            elif role == "assistant":
+                usage = msg.get("usage")
+                if backend == "claude":
+                    ident = msg.get("id")
+                    if not isinstance(ident, str) or ident not in seen_claude_messages:
+                        add_tokens(usage, TOKEN_FIELDS)
+                    if isinstance(ident, str) and isinstance(usage, dict) and usage:
+                        seen_claude_messages.add(ident)
+                elif backend in ("agy", "api") and isinstance(usage, dict):
+                    legacy_placeholder = usage == {"input_tokens": 0, "output_tokens": 0} and not row.get("relayReportedUsage")
+                    if not legacy_placeholder:
+                        add_tokens(usage, TOKEN_FIELDS)
+                if isinstance(blocks, list):
+                    stats["tools"] += sum(isinstance(block, dict) and block.get("type") == "tool_use" for block in blocks)
+
+        if backend == "codex":
+            for thread in codex_ids or {sid}:
+                add_tokens(self.codex["native_token_totals"](thread), CODEX_TOKEN_FIELDS)
+        if not rows and backend in ("codex", "agy"):
+            engine = self.codex if backend == "codex" else self.agy
+            try:
+                history = engine["native_history"](sid)
+            except (ValueError, OSError):
+                history = []
+            stats["turns"] = sum(item.get("role") == "user" for item in history)
+            stats["tools"] = sum(item.get("role") == "tool" for item in history)
+        return stats
+
+    @staticmethod
+    def _codex_limit_windows(result):
+        snapshots = result.get("rateLimitsByLimitId")
+        if not snapshots or not isinstance(snapshots, dict):
+            snapshots = {"codex": result.get("rateLimits")}
+        windows = []
+        for ident, snapshot in snapshots.items():
+            if not isinstance(snapshot, dict):
+                continue
+            name = " ".join(str(snapshot.get("limitName") or ident).split())[:70].replace("|", "/")
+            for key, label in (("primary", "основное окно"), ("secondary", "второе окно")):
+                window = snapshot.get(key)
+                if not isinstance(window, dict):
+                    continue
+                reset = usage_time(window.get("resetsAt"))
+                percent = usage_number(window.get("usedPercent"), 100)
+                minutes = window.get("windowDurationMins")
+                if minutes == 300:
+                    label = "5 часов"
+                elif minutes == 10080:
+                    label = "Неделя"
+                if (reset is None or reset > time.time()) and (percent is not None or reset is not None):
+                    windows.append({"label": f"{name} · {label}", "utilization": percent, "resets_at": reset})
+        return windows
+
+    def _agent_limits(self, backend):
+        if backend == "claude":
+            if time.time() - (self.usage.updated_at or 0) > 25:
+                self.usage.fetch_oauth()
+            snapshot = self.usage.snapshot()
+            self.send(snapshot)
+            return snapshot["windows"], snapshot["message"]
+        if backend == "codex":
+            result = self.codex["probe_rate_limits"]()
+            return self._codex_limit_windows(result), "Codex не передал данные о лимитах аккаунта."
+        if backend == "agy":
+            return [], "Antigravity CLI не передаёт лимиты аккаунта через ACP."
+        return [], "Лимиты зависят от настроенного API-провайдера."
+
+    def quick_command(self, sid, text, backend="claude", settings=None):
         """Slash commands (`/usage`, `/cost`, `/status`, `/help`, `/model`, `/mode`, `/effort`) answer right away."""
-        match = re.fullmatch(r"\s*/(model|mode|effort|usage|limits|quota|cost|tokens|status|info|help|commands)(?:\s+(\S.*))?\s*", text)
+        match = re.fullmatch(r"\s*/(model|mode|effort|usage|limits|quota|cost|tokens|status|info|help|commands)(?:\s+(\S.*?))?\s*", text, re.IGNORECASE)
         if not match:
             return False
         kind = match.group(1).lower()
         value = (match.group(2) or "").strip()
-        run = self.runs.get(sid)
+        settings = settings or {}
+        active_run = self.runs.get(sid)
+        run = active_run if getattr(active_run, "backend", "claude") == backend else None
+        agent = BACKEND_LABELS[backend]
         cat = self.catalog if backend == "claude" else self.backend_catalogs.get(backend)
         models = (cat or {}).get("models") or []
         if kind == "model":
             if not value:
-                reply = "Модели на этом сервере: " + ", ".join(f"`{m['value']}` ({m.get('displayName') or m['value']})" for m in models) if models else "Напиши `/model <название>`, например `/model default`."
+                current = settings.get("model") or getattr(run, "model", None) or "default"
+                reply = f"**{agent}** · текущая модель `{current}`."
+                if models:
+                    reply += "\n\n" + ", ".join(f"`{m['value']}`" for m in models)
+                else:
+                    reply += " Чтобы выбрать модель, введи `/model <название>`."
             else:
                 wanted = value.lower()
                 found = next((m for m in models if wanted in (m["value"].lower(), str(m.get("displayName", "")).lower())), None) or \
                     next((m for m in models if m["value"].lower().startswith(wanted) or str(m.get("displayName", "")).lower().startswith(wanted)), None)
-                if models and not found and backend == "claude":
+                if models and not found and wanted != "default" and backend != "api":
                     reply = f"Нет модели «{value}». Есть: " + ", ".join(m["value"] for m in models)
                 else:
-                    chosen = found["value"] if found else value
-                    if run and not run.closed:
-                        run.control("set_model", model=None if chosen == "default" else chosen); run.model = chosen
+                    chosen = "default" if wanted == "default" else found["value"] if found else value
+                    if run and not run.closed and (chosen != "default" or not run.busy):
+                        run.control("set_model", model=None if chosen == "default" else chosen)
+                        if backend == "claude":
+                            run.model = chosen
                     self.send({"type": "model_changed", "sid": sid, "model": chosen, "backend": backend})
                     reply = "Модель: " + ((found or {}).get("displayName") or chosen) + (" — со следующего ответа." if run and run.busy else ".")
         elif kind == "mode":
@@ -2021,76 +2113,76 @@ class Bridge:
                 reply = "Режимы: `/mode auto`, `/mode manual`, `/mode edits`, `/mode plan`."
             else:
                 if run and not run.closed:
-                    run.control("set_permission_mode", mode=mode); run.mode = mode
-                self.send({"type": "mode_changed", "sid": sid, "mode": mode})
+                    run.control("set_permission_mode", mode=mode)
+                    if backend == "claude":
+                        run.mode = mode
+                self.send({"type": "mode_changed", "sid": sid, "mode": mode, "backend": backend})
                 reply = "Режим: " + {"auto": "авто", "plan": "план", "acceptEdits": "правки файлов", "manual": "с подтверждением"}[mode] + "."
         elif kind == "effort":
             eff_map = {"auto": "default", "default": "default", "авто": "default", "low": "low", "быстро": "low", "medium": "medium", "средне": "medium", "high": "high", "глубоко": "high", "max": "max", "макс": "max"}
+            if backend == "codex":
+                eff_map["xhigh"] = "xhigh"
             eff = eff_map.get(value.lower())
             if not eff:
-                reply = "Глубина рассуждений: `/effort auto`, `/effort low`, `/effort medium`, `/effort high`, `/effort max`."
+                extra = ", `/effort xhigh`" if backend == "codex" else ""
+                reply = f"**{agent}** · `/effort auto`, `/effort low`, `/effort medium`, `/effort high`, `/effort max`{extra}."
             else:
-                if run and not run.closed:
-                    run.effort = eff
-                reply = "Глубина рассуждений: `" + eff + "` (применится со следующего хода)."
-        elif kind in ("usage", "limits", "quota"):
-            if time.time() - (self.usage.updated_at or 0) > 25:
-                self.usage.fetch_oauth()
-            snap = self.usage.snapshot()
-            self.send(snap)
-            stats = self._session_token_stats(sid)
-            b_status = self.installer.status()
-            lines = ["### Лимиты и расход (`" + os.uname().nodename + "`)"]
-            if snap.get("windows"):
+                previous = validate_effort(settings.get("effort", "default"))
+                self.slash_efforts[sid, backend] = (previous, eff)
+                self.send({"type": "effort_changed", "sid": sid, "effort": eff, "backend": backend})
+                reply = f"**{agent}** · глубина рассуждений `{eff}` со следующего хода."
+        elif kind in ("usage", "limits", "quota", "cost", "tokens"):
+            stats = self._session_token_stats(sid, backend)
+            usage_command = kind in ("usage", "limits", "quota")
+            title = "Лимиты и расход" if usage_command else "Статистика сессии"
+            lines = [f"### {title} · {agent}", ""]
+            if usage_command:
+                windows, message = self._agent_limits(backend)
+                if windows:
+                    lines.extend(["| Окно лимита | Использовано | Сброс |", "| :--- | :--- | :--- |"])
+                    now = time.time()
+                    for window in windows:
+                        pct = window.get("utilization")
+                        percentage = f"**{pct:.0f}%**" if isinstance(pct, (int, float)) else "—"
+                        reset = window.get("resets_at")
+                        remaining = max(0, int(reset - now)) if isinstance(reset, (int, float)) else 0
+                        reset_label = "—"
+                        if remaining >= 3600:
+                            reset_label = f"через {remaining // 3600} ч {(remaining % 3600) // 60} мин"
+                        elif remaining:
+                            reset_label = f"через {max(1, remaining // 60)} мин"
+                        lines.append(f"| {window['label']} | {percentage} | {reset_label} |")
+                else:
+                    lines.append(message)
                 lines.append("")
-                lines.append("| Окно лимита | Использовано | Сброс |")
-                lines.append("| :--- | :--- | :--- |")
-                now_ts = time.time()
-                for w in snap["windows"]:
-                    pct = w.get("utilization")
-                    pct_s = f"**{pct:.0f}%**" if isinstance(pct, (int, float)) else "—"
-                    rst = w.get("resets_at")
-                    if isinstance(rst, (int, float)) and rst > now_ts:
-                        rem = int(rst - now_ts)
-                        rst_s = f"через {rem // 3600} ч {(rem % 3600) // 60} мин" if rem >= 3600 else f"через {max(1, rem // 60)} мин"
-                    else:
-                        rst_s = "—"
-                    lines.append(f"| {w.get('label') or w.get('id')} | {pct_s} | {rst_s} |")
+            if any(stats[key] is not None for key in TOKEN_FIELDS):
+                tokens = {key: f"`{stats[key]:,}`" if stats[key] is not None else "—" for key in TOKEN_FIELDS}
+                lines.extend([
+                    f"- **Токены сессии** · вход {tokens['in']} · выход {tokens['out']}",
+                    f"- **Кэш** · чтение {tokens['cache_read']} · запись {tokens['cache_write']}",
+                ])
             else:
-                lines.append(f"- **Подписка Claude**: {snap.get('message') or 'данные обновятся после следующего ответа.'}")
-            lines.append("")
-            lines.append(
-                f"- **Токены текущей сессии**: вход `{stats['in']:,}` · выход `{stats['out']:,}` · кэш чтения `{stats['cache_read']:,}` · шагов инструментов `{stats['tools']}`"
-            )
-            cli_parts = [f"**{k}**: `{v['version']}`" if v.get("installed") else f"**{k}**: не установлен" for k, v in b_status.items()]
-            lines.append("- **CLI на сервере**: " + " · ".join(cli_parts))
+                lines.append("- **Токены сессии** · данных пока нет.")
+            lines.append(f"- **Запросы** · {stats['turns']} · **Вызовы инструментов** · {stats['tools']}")
             reply = "\n".join(lines)
-        elif kind in ("cost", "tokens"):
-            stats = self._session_token_stats(sid)
-            reply = (
-                f"### Статистика сессии\n"
-                f"- **Запросов**: `{stats['turns']}` · **Вызовов инструментов**: `{stats['tools']}`\n"
-                f"- **Входные токены**: `{stats['in']:,}` · **Выходные токены**: `{stats['out']:,}`\n"
-                f"- **Чтение кэша**: `{stats['cache_read']:,}` · **Запись кэша**: `{stats['cache_write']:,}`"
-            )
         elif kind in ("status", "info"):
             b_status = self.installer.status()
             locked_flag = "защищена паролем 🔒" if self.meta.is_locked(sid) else "открыта"
             active_cnt = len(self.running())
-            cur_model = getattr(run, "model", None) or "default"
-            cur_mode = getattr(run, "mode", None) or "auto"
-            cli_parts = [f"`{k}` ({v['version']})" for k, v in b_status.items() if v.get("installed")]
+            cur_model = settings.get("model") or getattr(run, "model", None) or "default"
+            cur_mode = settings.get("mode") or getattr(run, "mode", None) or "manual"
+            cli_parts = [f"`{k}` ({v['version']})" for k, v in b_status.items() if v.get("installed") and v.get("version")]
             reply = (
                 f"### Статус Relay · `{os.uname().nodename}`\n"
-                f"- **Активный агент**: `{backend}` · **Модель**: `{cur_model}` · **Режим**: `{cur_mode}`\n"
+                f"- **Выбранный агент**: {agent} · **Модель**: `{cur_model}` · **Режим**: `{cur_mode}`\n"
                 f"- **Сессия**: `{sid[:8]}…` ({locked_flag}) · **Активных потоков на сервере**: `{active_cnt}`\n"
                 f"- **Установленные CLI**: {', '.join(cli_parts) if cli_parts else 'нет'}"
             )
         else:
             reply = (
                 "### Быстрые команды Relay\n"
-                "- `/usage` (`/limits`) — лимиты подписки Claude, сброс таймеров и расход токенов\n"
-                "- `/cost` (`/tokens`) — статистика токенов и инструментов текущей сессии\n"
+                f"- `/usage` (`/limits`) — лимиты и расход для {agent}\n"
+                "- `/cost` (`/tokens`) — токены и инструменты выбранного агента в этой сессии\n"
                 "- `/status` — состояние сервера, установленных CLI и текущей сессии\n"
                 "- `/clear` (`/new`) — начать новую чистую сессию в этой папке\n"
                 "- `/compact` — сжать длинный контекст разговора (Claude Code)\n"
@@ -2098,7 +2190,7 @@ class Bridge:
                 "- `/model <имя>` · `/mode auto|manual|edits|plan` · `/effort auto|low|medium|high|max`\n"
                 "- `/lock` — управление паролем сессии · `/folder` — папки · `/radar` — радар агентов · `/theme` — 40 тем"
             )
-        if not (run and run.busy):
+        if not (active_run and active_run.busy):
             self.send({"type": "claude", "sid": sid, "data": {"type": "assistant", "relay_backend": backend, "message": {"content": [{"type": "text", "text": reply}]}}})
             self.send({"type": "claude", "sid": sid, "data": {"type": "result", "relay_backend": backend, "is_error": False, "result": reply}})
         else:
@@ -2359,6 +2451,8 @@ class Bridge:
                     self.meta.forget(sid)
                 except OSError:
                     pass
+                for backend in BACKEND_LABELS:
+                    self.slash_efforts.pop((sid, backend), None)
                 self.send({'type': 'session_deleted', 'sid': sid})
             elif op == "file_info":
                 self.files.info(req.get("id"),req.get("path"),req.get("cwd"))
@@ -2471,7 +2565,7 @@ class Bridge:
                 files = req.get("files", [])
                 if not isinstance(text, str) or (not text.strip() and not images and not files) or len(text.encode("utf-8")) > 1024 * 1024:
                     raise ValueError("Сообщение пустое или слишком длинное.")
-                if not images and not files and self.quick_command(sid, text, backend=backend):
+                if not images and not files and self.quick_command(sid, text, backend=backend, settings=req):
                     return
                 api=self.api['configuration'](req.get('api')) if backend=='api' else None
                 if backend=='claude' and not self.binary:raise ValueError('На сервере нет Claude Code. Выбери другой агент или установи Claude Code.')
@@ -2490,6 +2584,10 @@ class Bridge:
                 cwd = str(directory(req.get("cwd")))
                 mode, model = req.get("mode", "manual"), req.get("model", "default")
                 effort = validate_effort(req.get("effort", "default"))
+                original_effort = effort
+                pending_effort = self.slash_efforts.get((sid, backend))
+                if pending_effort and original_effort == pending_effort[0]:
+                    effort = pending_effort[1]
                 agent_role = req.get("agent_role", "")
                 if agent_role not in ("", *AGENT_ROLES):
                     raise ValueError("Неизвестная роль агента.")
@@ -2528,6 +2626,8 @@ class Bridge:
                         raise ValueError('Дождись завершения ответа перед переключением между агентами.')
                     steer = bool(run and run.busy and run.turns > 0 and not run.closed and run.process.poll() is None and backend in ('claude', 'codex'))
                     if run and run.busy and not run.closed and run.process.poll() is None:
+                        if pending_effort and effort != run.effort:
+                            raise ValueError("Дождись завершения ответа, чтобы применить новую глубину рассуждений.")
                         # Mid-answer: the message joins the queue/steers; model and mode switch live.
                         if model != run.model:
                             run.control("set_model", model=None if model == "default" else model); run.model = model
@@ -2605,6 +2705,9 @@ class Bridge:
                     saved.extend(uploaded)
                     text += "\n\n<relay-files>\n" + json.dumps(saved, ensure_ascii=False) + "\n</relay-files>"
                 run.prompt(text, images, steer=steer)
+                if pending_effort and original_effort != pending_effort[0]:
+                    if self.slash_efforts.get((sid, backend)) == pending_effort:
+                        self.slash_efforts.pop((sid, backend), None)
             elif op == "cluster_reply":
                 if self.cluster:self.cluster.result(valid_id(req.get("id")),valid_id(req.get("sid")),valid_id(req.get("run")),req.get("result"))
             elif op == "permission":
@@ -2617,6 +2720,9 @@ class Bridge:
                 sid = valid_id(req.get("sid"))
                 self._require_unlocked(sid)
                 run = self.runs.get(sid)
+                target = req.get("backend")
+                if target is not None and getattr(run, "backend", "claude") != target:
+                    return
                 kind, value = req.get("action"), req.get("value")
                 if kind == "model" and isinstance(value, str) and len(value) <= 160:
                     if run and not run.closed:

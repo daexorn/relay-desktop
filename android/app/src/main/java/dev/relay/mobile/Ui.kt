@@ -14,6 +14,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
@@ -90,10 +91,11 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.SolidColor
@@ -106,11 +108,13 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -175,11 +179,11 @@ enum class Glyph {
 }
 
 @Composable
-fun VectorGlyph(glyph: Glyph, tint: Color = LocalPalette.current.muted, size: Dp = 16.dp, modifier: Modifier = Modifier) {
+fun VectorGlyph(glyph: Glyph, tint: Color = LocalPalette.current.muted, size: Dp = 19.dp, modifier: Modifier = Modifier) {
     Canvas(modifier.size(size)) {
         val w = this.size.width
         val h = this.size.height
-        val sw = (w * 0.095f).coerceAtLeast(1.4f)
+        val sw = (w * 0.107f).coerceAtLeast(1.6.dp.toPx())
         val stroke = Stroke(width = sw, cap = StrokeCap.Round, join = StrokeJoin.Round)
         when (glyph) {
             Glyph.RelayMark -> {
@@ -498,7 +502,7 @@ private data class AgentIcon(val colors: List<Color>, val rows: List<String>)
 
 /** Shared pixel artwork used by the agent picker and the chat. */
 @Composable
-fun PixelMascot(backend: String, size: Dp = 18.dp, modifier: Modifier = Modifier) {
+fun PixelMascot(backend: String, size: Dp = 22.dp, modifier: Modifier = Modifier) {
     val assets = androidx.compose.ui.platform.LocalContext.current.assets
     val icons = remember(assets) {
         assets.open("bridge/agent-icons.txt").bufferedReader().useLines { lines ->
@@ -513,14 +517,18 @@ fun PixelMascot(backend: String, size: Dp = 18.dp, modifier: Modifier = Modifier
     }
     val icon = icons[backend] ?: icons.getValue("claude")
     Canvas(modifier.size(size)) {
-        val scale = minOf(this.size.width, this.size.height) / icon.rows.size
-        val cell = if (scale >= 1f) kotlin.math.floor(scale) else scale
-        val x = kotlin.math.round((this.size.width - cell * icon.rows.size) / 2)
-        val y = kotlin.math.round((this.size.height - cell * icon.rows.size) / 2)
+        val extent = minOf(this.size.width, this.size.height)
+        val cell = extent / icon.rows.size
+        val x = (this.size.width - extent) / 2
+        val y = (this.size.height - extent) / 2
+        fun edge(origin: Float, index: Int) =
+            (origin + index * cell).let { if (cell >= 1f) kotlin.math.round(it) else it }
         icon.rows.forEachIndexed { row, pixels ->
             pixels.forEachIndexed { col, pixel ->
                 pixel.digitToIntOrNull()?.let { index ->
-                    drawRect(icon.colors[index], Offset(x + col * cell, y + row * cell), Size(cell, cell))
+                    val left = edge(x, col)
+                    val top = edge(y, row)
+                    drawRect(icon.colors[index], Offset(left, top), Size(edge(x, col + 1) - left, edge(y, row + 1) - top))
                 }
             }
         }
@@ -532,7 +540,7 @@ fun Modifier.specularBorder(
     topColor: Color,
     bottomColor: Color,
     width: Dp = 1.dp,
-): Modifier = this.border(width, Brush.verticalGradient(listOf(topColor, bottomColor)), shape)
+): Modifier = this.border(width, androidx.compose.ui.graphics.lerp(bottomColor, topColor, 0.35f), shape)
 
 /** Multi-layered concentric orbital core emblem — zero infinite transitions so Robolectric stays instant. */
 @Composable
@@ -543,15 +551,7 @@ fun OrbitalEmblem(color: Color, active: Boolean = true, size: Dp = 30.dp, modifi
         val w = this.size.width
         val r = this.size.minDimension * 0.44f
         val c = Offset(w * 0.5f, this.size.height * 0.5f)
-        drawCircle(
-            brush = Brush.radialGradient(
-                colors = listOf(tone.copy(alpha = 0.28f * boost), Color.Transparent),
-                center = c,
-                radius = r * 1.15f,
-            ),
-            radius = r * 1.15f,
-            center = c,
-        )
+        drawCircle(tone.copy(alpha = 0.10f * boost), radius = r, center = c)
         val outerStroke = Stroke(width = (w * 0.068f).coerceAtLeast(1.4f), cap = StrokeCap.Round)
         val innerStroke = Stroke(width = (w * 0.055f).coerceAtLeast(1.2f), cap = StrokeCap.Round)
         drawCircle(tone.copy(alpha = 0.16f), r, c, style = outerStroke)
@@ -623,7 +623,7 @@ fun BackendBadge(backend: String, compact: Boolean = false, showDot: Boolean = f
         horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         if (showDot) {
-            PixelMascot(backend, size = if (compact) 12.dp else 14.dp)
+            PixelMascot(backend, size = if (compact) 16.dp else 19.dp)
         }
         Label(label, if (compact) 10.5.sp else 11.5.sp, tone, FontWeight.SemiBold, maxLines = 1)
     }
@@ -652,10 +652,10 @@ fun Label(
 @Composable
 fun IconButton(icon: ImageVector, hint: String, tint: Color = LocalPalette.current.muted, onClick: () -> Unit) {
     Box(
-        Modifier.size(36.dp).clip(RoundedCornerShape(11.dp)).clickable(onClick = onClick),
+        Modifier.size(44.dp).clip(RoundedCornerShape(12.dp)).clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        Icon(icon, contentDescription = hint, tint = tint, modifier = Modifier.size(19.dp))
+        Icon(icon, contentDescription = hint, tint = tint, modifier = Modifier.size(23.dp))
     }
 }
 
@@ -664,15 +664,15 @@ fun GlyphButton(glyph: Glyph, hint: String, tint: Color = LocalPalette.current.m
     val p = LocalPalette.current
     Box(
         Modifier
-            .size(36.dp)
-            .clip(RoundedCornerShape(11.dp))
+            .size(44.dp)
+            .clip(RoundedCornerShape(12.dp))
             .background(if (highlighted) tint.copy(alpha = 0.14f) else Color.Transparent)
             .then(if (highlighted) Modifier.border(1.dp, tint.copy(alpha = 0.38f), RoundedCornerShape(11.dp)) else Modifier)
             .semantics { contentDescription = hint }
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        VectorGlyph(glyph, tint = if (highlighted) tint else p.muted, size = 18.dp)
+        VectorGlyph(glyph, tint = tint, size = 22.dp)
     }
 }
 
@@ -837,9 +837,18 @@ fun Dots(color: Color) {
 fun Sheet(onDismiss: () -> Unit, content: @Composable () -> Unit) {
     val p = LocalPalette.current
     val sheetShape = RoundedCornerShape(24.dp)
+    val visibility = remember { MutableTransitionState(false).apply { targetState = true } }
+    var closing by remember { mutableStateOf(false) }
+    val dismiss = {
+        closing = true
+        visibility.targetState = false
+    }
+    androidx.compose.runtime.LaunchedEffect(closing, visibility.isIdle, visibility.currentState) {
+        if (closing && visibility.isIdle && !visibility.currentState) onDismiss()
+    }
     Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false),
+        onDismissRequest = dismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
     ) {
         Box(
             Modifier
@@ -847,35 +856,44 @@ fun Sheet(onDismiss: () -> Unit, content: @Composable () -> Unit) {
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null,
-                    onClick = onDismiss,
+                    onClick = dismiss,
                 )
-                .padding(horizontal = 10.dp, vertical = 10.dp),
+                .statusBarsPadding()
+                .navigationBarsPadding()
+                .imePadding()
+                .padding(horizontal = 10.dp, vertical = 12.dp),
             contentAlignment = Alignment.BottomCenter,
         ) {
-            Column(
-                Modifier
-                    .fillMaxWidth()
-                    .widthIn(max = 520.dp)
-                    .clip(sheetShape)
-                    .background(p.elevated)
-                    .specularBorder(sheetShape, p.specularTop, p.line)
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null,
-                        onClick = {},
-                    )
-                    .padding(horizontal = 20.dp, vertical = 16.dp),
+            AnimatedVisibility(
+                visibleState = visibility,
+                enter = slideInVertically(tween(220)) { it / 3 } + fadeIn(tween(160)),
+                exit = slideOutVertically(tween(170)) { it / 3 } + fadeOut(tween(140)),
             ) {
-                Box(
+                Column(
                     Modifier
-                        .align(Alignment.CenterHorizontally)
-                        .padding(bottom = 14.dp)
-                        .width(36.dp)
-                        .height(4.dp)
-                        .clip(CircleShape)
-                        .background(p.muted.copy(alpha = 0.35f)),
-                )
-                content()
+                        .widthIn(max = 520.dp)
+                        .fillMaxWidth()
+                        .clip(sheetShape)
+                        .background(p.elevated)
+                        .border(1.dp, p.line, sheetShape)
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClick = {},
+                        )
+                        .padding(horizontal = 20.dp, vertical = 16.dp),
+                ) {
+                    Box(
+                        Modifier
+                            .align(Alignment.CenterHorizontally)
+                            .padding(bottom = 14.dp)
+                            .width(36.dp)
+                            .height(4.dp)
+                            .clip(CircleShape)
+                            .background(p.muted.copy(alpha = 0.35f)),
+                    )
+                    content()
+                }
             }
         }
     }
@@ -914,11 +932,7 @@ fun ServersScreen(vm: RelayViewModel) {
                                 .fillMaxWidth()
                                 .padding(top = 14.dp)
                                 .clip(heroShape)
-                                .background(
-                                    Brush.verticalGradient(
-                                        listOf(p.mix(p.surface, p.accent, 0.08f), p.surface)
-                                    )
-                                )
+                                .background(p.surface)
                                 .specularBorder(heroShape, p.accent.copy(alpha = 0.42f), p.borderSubtle)
                                 .padding(24.dp),
                             horizontalAlignment = Alignment.CenterHorizontally,
@@ -1480,14 +1494,7 @@ fun ActiveAgentsBanner(activeSessions: List<Session>, onClick: () -> Unit) {
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 6.dp)
             .clip(shape)
-            .background(
-                Brush.horizontalGradient(
-                    listOf(
-                        p.mix(p.elevated, leadTone, if (p.light) 0.10f else 0.15f),
-                        p.elevated,
-                    )
-                )
-            )
+            .background(p.mix(p.elevated, leadTone, if (p.light) 0.05f else 0.08f))
             .specularBorder(shape, leadTone.copy(alpha = 0.55f), p.borderSubtle)
             .clickable(onClick = onClick)
             .padding(horizontal = 12.dp, vertical = 10.dp),
@@ -2066,11 +2073,7 @@ fun ChatEmptyState(vm: RelayViewModel, chat: Chat) {
             Modifier
                 .size(68.dp)
                 .clip(crestShape)
-                .background(
-                    Brush.radialGradient(
-                        listOf(activeTone.copy(alpha = if (p.light) 0.18f else 0.24f), p.surface)
-                    )
-                )
+                .background(p.surface)
                 .specularBorder(crestShape, activeTone.copy(alpha = 0.55f), activeTone.copy(alpha = 0.20f)),
             contentAlignment = Alignment.Center,
         ) {
@@ -2234,7 +2237,7 @@ fun UserBubble(m: Message, attr: MessageAttribution? = null) {
                 Label(attr.who, 10.8.sp, p.muted, maxLines = 1)
                 if (attr.toWhom.isNotEmpty()) {
                     Label("→", 10.5.sp, p.muted, maxLines = 1)
-                    PixelMascot(attr.backend, size = 12.dp)
+                    PixelMascot(attr.backend, size = 16.dp)
                     Label(attr.toWhom, 10.8.sp, bTone, FontWeight.SemiBold, maxLines = 1)
                 }
                 if (attr.how.isNotEmpty()) {
@@ -2295,7 +2298,7 @@ fun AssistantText(
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                PixelMascot(effectiveBackend, size = 14.dp)
+                PixelMascot(effectiveBackend, size = 18.dp)
                 Label(whoTitle, 11.5.sp, engineTone, FontWeight.SemiBold, maxLines = 1)
             }
             if (attr != null && attr.toWhom.isNotEmpty()) {
@@ -2370,11 +2373,7 @@ fun ActionsGroup(item: Item.Actions, running: Boolean, backend: String = "claude
             .fillMaxWidth()
             .padding(vertical = 6.dp)
             .clip(shape)
-            .background(
-                Brush.verticalGradient(
-                    listOf(p.mix(p.surface, badgeTone, if (p.light) 0.05f else 0.07f), p.surface)
-                )
-            )
+            .background(p.mix(p.surface, badgeTone, if (p.light) 0.03f else 0.05f))
             .specularBorder(
                 shape = shape,
                 topColor = when {
@@ -2573,11 +2572,7 @@ fun ToolCall(call: Message, result: Message?, running: Boolean = false) {
                 Modifier
                     .fillMaxWidth()
                     .clip(shape)
-                    .background(
-                        Brush.horizontalGradient(
-                            listOf(violet.copy(alpha = if (p.light) 0.10f else 0.16f), p.base)
-                        )
-                    )
+                    .background(p.mix(p.base, violet, if (p.light) 0.05f else 0.09f))
                     .specularBorder(
                         shape = shape,
                         topColor = if (result?.failed == true) p.red.copy(alpha = 0.55f) else violet.copy(alpha = 0.58f),
@@ -2794,14 +2789,7 @@ fun AgentTelemetryPod(
             .padding(horizontal = 10.dp)
             .padding(top = 6.dp)
             .clip(podShape)
-            .background(
-                Brush.horizontalGradient(
-                    listOf(
-                        p.mix(p.elevated, engineTone, if (p.light) 0.09f else 0.14f),
-                        p.elevated,
-                    )
-                )
-            )
+            .background(p.elevated)
             .specularBorder(podShape, engineTone.copy(alpha = 0.55f), p.line)
             .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(7.dp),
@@ -2966,6 +2954,7 @@ fun TransferCard(vm: RelayViewModel, t: Transfer) {
 
 fun megabytes(bytes: Long) = if (bytes < 1024 * 1024) "${(bytes + 1023) / 1024} КБ" else "%.1f МБ".format(bytes / 1048576.0)
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun Composer(vm: RelayViewModel, chat: Chat, onOpenAgents: () -> Unit = {}) {
     val p = LocalPalette.current
@@ -2976,6 +2965,17 @@ fun Composer(vm: RelayViewModel, chat: Chat, onOpenAgents: () -> Unit = {}) {
     val online = vm.link == Link.Online
     var apiSettings by remember { mutableStateOf(false) }
     if (apiSettings) vm.current?.let { server -> ApiDialog(vm, server) { apiSettings = false } }
+
+    val focus = remember(chat.sid) { FocusRequester() }
+    var editor by remember(chat.sid) { mutableStateOf(TextFieldValue(chat.draft, TextRange(chat.draft.length))) }
+    LaunchedEffect(chat.draft) {
+        if (editor.text != chat.draft) editor = TextFieldValue(chat.draft, TextRange(chat.draft.length))
+    }
+    fun insertCommand(command: String) {
+        editor = TextFieldValue(command, TextRange(command.length))
+        chat.draft = command
+        focus.requestFocus()
+    }
 
     val suggestions = slashMatches(chat.draft, vm.commandsFor(activeBackend))
     if (chat.queued.isNotEmpty()) {
@@ -3011,7 +3011,7 @@ fun Composer(vm: RelayViewModel, chat: Chat, onOpenAgents: () -> Unit = {}) {
                     Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(9.dp))
-                        .clickable { chat.draft = "/${c.name} " }
+                        .clickable { insertCommand("/${c.name} ") }
                         .padding(horizontal = 10.dp, vertical = 7.dp),
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -3077,11 +3077,14 @@ fun Composer(vm: RelayViewModel, chat: Chat, onOpenAgents: () -> Unit = {}) {
         }
 
         BasicTextField(
-            value = chat.draft,
-            onValueChange = { chat.draft = it },
+            value = editor,
+            onValueChange = { value ->
+                editor = value
+                chat.draft = value.text
+            },
             textStyle = TextStyle(color = p.text, fontSize = 15.sp),
             cursorBrush = SolidColor(engineTone),
-            modifier = Modifier.fillMaxWidth().heightIn(min = 26.dp, max = 160.dp),
+            modifier = Modifier.fillMaxWidth().heightIn(min = 26.dp, max = 160.dp).focusRequester(focus),
             decorationBox = { inner ->
                 Box {
                     if (chat.draft.isEmpty()) {
@@ -3101,97 +3104,99 @@ fun Composer(vm: RelayViewModel, chat: Chat, onOpenAgents: () -> Unit = {}) {
             },
         )
 
+        FlowRow(
+            Modifier.fillMaxWidth().padding(top = 7.dp),
+            horizontalArrangement = Arrangement.spacedBy(5.dp),
+            verticalArrangement = Arrangement.spacedBy(5.dp),
+        ) {
+            Selector(
+                label = backendShortLabel(activeBackend),
+                options = listOf(
+                    "claude" to "Claude Code",
+                    "codex" to "Codex",
+                    "agy" to "Antigravity",
+                    "api" to "API",
+                    "agents" to "Установить агентов…",
+                    "settings" to "Настроить API…",
+                ),
+                accent = true,
+                accentColor = engineTone,
+            ) { source ->
+                when (source) {
+                    "agents" -> onOpenAgents()
+                    "settings" -> apiSettings = true
+                    else -> {
+                        vm.setBackend(chat, source)
+                        if (source == "api" && vm.current?.api?.baseUrl.isNullOrBlank()) apiSettings = true
+                    }
+                }
+            }
+
+            val catalog = vm.catalogFor(activeBackend)
+            val currentModel = chat.selectedModel(vm.current)
+            Selector(
+                label = modelLabel(catalog, currentModel),
+                options = catalog.map {
+                    it.value to if (it.value == "default") "Авто · ${it.description}".trimEnd(' ', '·') else modelLabel(catalog, it.value)
+                },
+            ) {
+                chat.updateSelectedModel(it)
+                vm.liveChange(chat)
+            }
+
+            Selector(
+                label = when (chat.mode) { "auto" -> "Авто"; "acceptEdits" -> "Правки"; "plan" -> "План"; else -> "Подтверждение" },
+                options = listOf("auto" to "Авто", "manual" to "С подтверждением", "acceptEdits" to "Правки файлов", "plan" to "Планирование"),
+                accent = chat.mode == "auto",
+            ) {
+                chat.mode = it
+                vm.liveChange(chat)
+            }
+
+            Selector(
+                label = "Глубина: " + if (chat.effort == "default") "авто" else chat.effort,
+                options = listOf("default" to "Автоматически", "low" to "Низкая", "medium" to "Средняя", "high" to "Высокая", "xhigh" to "Очень высокая", "max" to "Максимальная"),
+            ) {
+                chat.effort = it
+            }
+        }
+
         Row(
-            Modifier.fillMaxWidth().padding(top = 8.dp),
+            Modifier.fillMaxWidth().padding(top = 7.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Box(
                 Modifier
-                    .size(36.dp)
+                    .size(42.dp)
                     .clip(CircleShape)
                     .background(p.elevated)
                     .border(1.dp, p.borderSubtle, CircleShape)
                     .clickable { picker.launch("*/*") },
                 contentAlignment = Alignment.Center,
             ) {
-                Icon(Icons.Default.Add, "Прикрепить файлы или фото", tint = p.text, modifier = Modifier.size(18.dp))
+                Icon(Icons.Default.Add, "Прикрепить файлы или фото", tint = p.text, modifier = Modifier.size(22.dp))
             }
 
-            Row(
-                Modifier.weight(1f).horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(5.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Selector(
-                    label = backendShortLabel(activeBackend),
-                    options = listOf(
-                        "claude" to "Claude Code",
-                        "codex" to "Codex",
-                        "agy" to "Antigravity",
-                        "api" to "API",
-                        "agents" to "Установить агентов…",
-                        "settings" to "Настроить API…",
-                    ),
-                    accent = true,
-                    accentColor = engineTone,
-                ) { source ->
-                    when (source) {
-                        "agents" -> onOpenAgents()
-                        "settings" -> apiSettings = true
-                        else -> {
-                            vm.setBackend(chat, source)
-                            if (source == "api" && vm.current?.api?.baseUrl.isNullOrBlank()) apiSettings = true
-                        }
-                    }
-                }
-
-                val catalog = vm.catalogFor(activeBackend)
-                val currentModel = chat.selectedModel(vm.current)
-                Selector(
-                    label = modelLabel(catalog, currentModel),
-                    options = catalog.map {
-                        it.value to if (it.value == "default") "Авто · ${it.description}".trimEnd(' ', '·') else modelLabel(catalog, it.value)
-                    },
-                ) {
-                    chat.updateSelectedModel(it)
-                    vm.liveChange(chat)
-                }
-
-                Selector(
-                    label = when (chat.mode) { "auto" -> "Авто"; "acceptEdits" -> "Правки"; "plan" -> "План"; else -> "Подтверждение" },
-                    options = listOf("auto" to "Авто", "manual" to "С подтверждением", "acceptEdits" to "Правки файлов", "plan" to "Планирование"),
-                    accent = chat.mode == "auto",
-                ) {
-                    chat.mode = it
-                    vm.liveChange(chat)
-                }
-
-                Selector(
-                    label = "Глубина: " + if (chat.effort == "default") "авто" else chat.effort,
-                    options = listOf("default" to "Автоматически", "low" to "Низкая", "medium" to "Средняя", "high" to "Высокая", "xhigh" to "Очень высокая", "max" to "Максимальная"),
-                ) {
-                    chat.effort = it
-                }
-            }
-
+            Spacer(Modifier.weight(1f))
             // Tap the active engine icon to open slash commands.
             Box(
                 Modifier
-                    .size(30.dp)
-                    .clip(RoundedCornerShape(8.dp))
+                    .size(42.dp)
+                    .clip(CircleShape)
+                    .semantics { contentDescription = "Команды" }
                     .clickable {
-                        if (chat.draft.isBlank()) chat.draft = "/"
+                        if (chat.draft.isBlank()) insertCommand("/") else focus.requestFocus()
                     },
                 contentAlignment = Alignment.Center,
             ) {
-                PixelMascot(activeBackend, size = 21.dp)
+                PixelMascot(activeBackend, size = 27.dp)
             }
 
             val ready = (chat.draft.isNotBlank() || chat.picked.isNotEmpty()) && (vm.canSend(chat) || chat.draft.trim().startsWith("/"))
             if (busy) {
                 Box(
-                    Modifier.size(38.dp).clip(CircleShape).background(p.elevated).border(1.dp, p.line, CircleShape).clickable { vm.stop() },
+                    Modifier.size(42.dp).clip(CircleShape).background(p.elevated).border(1.dp, p.line, CircleShape).clickable { vm.stop() },
                     contentAlignment = Alignment.Center,
                 ) {
                     Box(Modifier.size(12.dp).clip(RoundedCornerShape(3.dp)).background(p.red))
@@ -3200,7 +3205,7 @@ fun Composer(vm: RelayViewModel, chat: Chat, onOpenAgents: () -> Unit = {}) {
             if (!busy || ready) {
                 Box(
                     Modifier
-                        .size(38.dp)
+                        .size(42.dp)
                         .clip(CircleShape)
                         .background(if (ready) p.accent else p.elevated)
                         .border(1.dp, if (ready) p.accent else p.borderSubtle, CircleShape)
@@ -3211,7 +3216,7 @@ fun Composer(vm: RelayViewModel, chat: Chat, onOpenAgents: () -> Unit = {}) {
                         Icons.AutoMirrored.Filled.Send,
                         "Отправить",
                         tint = if (ready) (if (p.light) Color.White else Color(0xFF0E1318)) else p.muted,
-                        modifier = Modifier.size(17.dp),
+                        modifier = Modifier.size(22.dp),
                     )
                 }
             }
@@ -3241,7 +3246,7 @@ fun Selector(
                 .padding(horizontal = 10.dp, vertical = 5.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Label(label, 12.sp, if (accent) tone else p.muted, FontWeight.Medium, maxLines = 1)
+            Label(label, 12.sp, if (accent) tone else p.muted, FontWeight.Medium, maxLines = 1, modifier = Modifier.widthIn(max = 145.dp))
             Icon(Icons.Default.KeyboardArrowDown, null, tint = if (accent) tone else p.muted, modifier = Modifier.size(15.dp))
         }
         DropdownMenu(open, { open = false }, Modifier.background(p.elevated)) {
@@ -3629,11 +3634,7 @@ fun AgentRadarSheet(vm: RelayViewModel, close: () -> Unit) {
                     .fillMaxWidth()
                     .height(126.dp)
                     .clip(graphShape)
-                    .background(
-                        Brush.horizontalGradient(
-                            listOf(p.base, p.mix(p.base, p.side, 0.6f))
-                        )
-                    )
+                    .background(p.base)
                     .specularBorder(graphShape, p.specularTop, p.line)
                     .padding(horizontal = 14.dp, vertical = 10.dp),
             ) {

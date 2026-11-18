@@ -132,11 +132,12 @@ class ApiRun:
         self.parent = rows[-1].get('uuid') if rows else None
         return [r for r in rows if isinstance(r.get('message'), dict)]
 
-    def append(self,role,content,partial=False):
+    def append(self,role,content,partial=False,usage=None):
         ident=str(uuid.uuid4())
         message={'role':role,'content':content}
-        if role=='assistant':message.update(id='msg_api_'+uuid.uuid4().hex,type='message',model=self.model,stop_reason='end_turn',stop_sequence=None,usage={'input_tokens':0,'output_tokens':0})
+        if role=='assistant':message.update(id='msg_api_'+uuid.uuid4().hex,type='message',model=self.model,stop_reason='end_turn',stop_sequence=None,usage=usage or {})
         row={'type':role,'uuid':ident,'parentUuid':self.parent,'sessionId':self.sid,'cwd':self.cwd,'timestamp':datetime.now(timezone.utc).isoformat().replace('+00:00','Z'),'isSidechain':False,'userType':'external','relayBackend':'api','relayModel':self.model,'relayMode':self.mode,'relayEffort':self.effort,'relayActor':getattr(self.owner,'actor',''),'relayAgentName':(getattr(self,'cluster_context',None) or {}).get('name',''),'message':message}
+        if usage:row['relayReportedUsage']=True
         if partial:row['relayPartial']=True
         with self.path.open('a',encoding='utf-8') as f:
             import fcntl as lock_module
@@ -254,7 +255,18 @@ class ApiRun:
             body={'model':self.model,'messages':[{'role':'system','content':system}]+self.context(),'tools':tools,'stream':True,'stream_options':{'include_usage':True},'max_tokens':self.config['max_tokens']}
             if self.effort!='default':body['reasoning_effort']=self.effort
             content,calls,usage=self.complete(body,step)
-            total['input_tokens']+=int(usage.get('prompt_tokens') or 0);total['output_tokens']+=int(usage.get('completion_tokens') or 0)
+            details = usage.get('prompt_tokens_details') or {}
+            step_usage = {
+                key: value
+                for key, value in (
+                    ('input_tokens', usage.get('prompt_tokens')),
+                    ('output_tokens', usage.get('completion_tokens')),
+                    ('cache_read_input_tokens', details.get('cached_tokens') if isinstance(details, dict) else None),
+                )
+                if type(value) is int and value >= 0
+            }
+            for key, value in step_usage.items():
+                total[key] = total.get(key, 0) + value
             blocks=([{'type':'text','text':content}] if content else [])
             parsed=[]
             for call in calls:
@@ -263,8 +275,11 @@ class ApiRun:
                 if not isinstance(args,dict):raise ValueError('API вернул некорректные аргументы инструмента.')
                 ident=call.get('id') or 'tool_api_'+uuid.uuid4().hex
                 parsed.append((ident,call['function']['name'],args));blocks.append({'type':'tool_use','id':ident,'name':call['function']['name'],'input':args})
+            if blocks or step_usage:
+                self.append('assistant', blocks, usage=step_usage)
             if blocks:
-                self.append('assistant',blocks);self.partial='';self.emit({'type':'assistant','message':{'role':'assistant','content':blocks}})
+                self.partial=''
+                self.emit({'type':'assistant','message':{'role':'assistant','content':blocks}})
             if not parsed:return total
             for position,(ident,name,args) in enumerate(parsed):
                 failed=False

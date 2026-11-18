@@ -775,8 +775,15 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                     screen = Screen.Sessions
                 }
             }
-            "model_changed" -> chats[sid]?.updateSelectedModel(value.optString("model", "default"))
-            "mode_changed" -> chats[sid]?.let { it.mode = value.optString("mode", "manual") }
+            "model_changed", "mode_changed", "effort_changed" -> chats[sid]?.let { c ->
+                if (value.optString("backend", c.activeBackend()) == c.activeBackend()) {
+                    when (value.optString("type")) {
+                        "model_changed" -> c.updateSelectedModel(value.optString("model", "default"))
+                        "mode_changed" -> c.mode = value.optString("mode", "manual")
+                        "effort_changed" -> c.effort = value.optString("effort", "default")
+                    }
+                }
+            }
             "notice" -> notice = value.optString("message")
             "claude_update" -> {
                 updating = value.optBoolean("running")
@@ -886,7 +893,7 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
 
     /** `/model`, `/mode` and `/stop` act at once, also mid-answer; other commands go to the CLI engine. */
     private fun localCommand(c: Chat, text: String): Boolean {
-        val name = text.substringBefore(' ')
+        val name = text.substringBefore(' ').lowercase()
         val arg = text.substringAfter(' ', "").trim()
         when {
             name == "/clear" || name == "/new" -> {
@@ -900,8 +907,13 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                     "low", "быстро" -> "low"
                     "medium", "средне" -> "medium"
                     "high", "глубоко" -> "high"
+                    "xhigh" -> "xhigh"
                     "max", "макс" -> "max"
-                    else -> "default"
+                    "auto", "default", "авто" -> "default"
+                    else -> null
+                } ?: run {
+                    notice = "Глубина: auto, low, medium, high, xhigh или max."
+                    return true
                 }
                 notice = "Глубина: ${c.effort}"
             }
@@ -913,18 +925,31 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                     "agy" -> catalogFor("agy")
                     else -> models
                 }
-                val value = resolveModel(catalog, arg)
+                val value = if (arg.equals("default", ignoreCase = true) && active != "api") {
+                    "default"
+                } else {
+                    resolveModel(catalog, arg) ?: arg.takeIf { active == "api" }
+                }
                 if (value == null) {
                     c.transcript.error = "Нет такой модели: $arg. Доступны: " + catalog.joinToString { it.value }
                 } else {
                     c.updateSelectedModel(value)
-                    send(JSONObject().put("op", "control").put("sid", c.sid).put("action", "model").put("value", value))
+                    send(JSONObject().put("op", "control").put("sid", c.sid).put("backend", c.activeBackend()).put("action", "model").put("value", value))
                     notice = "Модель: " + modelLabel(catalog, value)
                 }
             }
             name == "/mode" && arg.isNotEmpty() -> {
-                c.mode = when (arg) { "auto", "авто" -> "auto"; "plan", "план" -> "plan"; "edits", "acceptEdits", "правки" -> "acceptEdits"; else -> "manual" }
-                send(JSONObject().put("op", "control").put("sid", c.sid).put("action", "mode").put("value", c.mode))
+                c.mode = when (arg.lowercase()) {
+                    "auto", "авто" -> "auto"
+                    "plan", "план" -> "plan"
+                    "edits", "acceptedits", "правки" -> "acceptEdits"
+                    "manual", "ручной" -> "manual"
+                    else -> {
+                        notice = "Режим: auto, manual, edits или plan."
+                        return true
+                    }
+                }
+                send(JSONObject().put("op", "control").put("sid", c.sid).put("backend", c.activeBackend()).put("action", "mode").put("value", c.mode))
             }
             name == "/stop" -> stop()
             else -> return false
@@ -937,8 +962,8 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
     /** Model or mode picked while the agent answers: switch it live. */
     fun liveChange(c: Chat) {
         if (protocol >= 4 && c.transcript.busy) {
-            send(JSONObject().put("op", "control").put("sid", c.sid).put("action", "model").put("value", c.selectedModel(current)))
-            send(JSONObject().put("op", "control").put("sid", c.sid).put("action", "mode").put("value", c.mode))
+            send(JSONObject().put("op", "control").put("sid", c.sid).put("backend", c.activeBackend()).put("action", "model").put("value", c.selectedModel(current)))
+            send(JSONObject().put("op", "control").put("sid", c.sid).put("backend", c.activeBackend()).put("action", "mode").put("value", c.mode))
         }
     }
 
@@ -983,10 +1008,15 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         val profile = current ?: return
         if (c.isLockedGate()) return
         val activeBackend = c.activeBackend()
-        val text = c.draft.trim()
-        val quickSlash = c.picked.isEmpty() && text.substringBefore(' ') in setOf(
-            "/usage", "/limits", "/quota", "/cost", "/tokens", "/status", "/info", "/help", "/commands"
+        val draft = c.draft
+        val command = draft.trim()
+        if ((command.isEmpty() && c.picked.isEmpty()) || link != Link.Online) return
+        if (c.picked.isEmpty() && localCommand(c, command)) return
+        val quickSlash = c.picked.isEmpty() && command.substringBefore(' ').lowercase() in setOf(
+            "/usage", "/limits", "/quota", "/cost", "/tokens", "/status", "/info", "/help", "/commands",
+            "/model", "/mode", "/effort"
         )
+        val text = if (quickSlash) command else draft
         if (activeBackend == "api" && !quickSlash) {
             profile.api.copy(model = c.apiModel.ifBlank { profile.api.model }).error()?.let {
                 c.transcript.error = it
@@ -994,8 +1024,6 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                 return
             }
         }
-        if ((text.isEmpty() && c.picked.isEmpty()) || link != Link.Online) return
-        if (c.picked.isEmpty() && localCommand(c, text)) return
         if (!canSend(c)) return
         c.transcript.error = ""
         val steering = c.transcript.busy
@@ -1047,7 +1075,7 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
             .put("desktop_enabled", false)
             .put("desktop_context", JSONObject())
             .put("backend", activeBackend)
-        if (activeBackend == "api") {
+        if (activeBackend == "api" && !quickSlash) {
             request.put("api", profile.api.request(store.apiKey(profile.id).orEmpty(), c.apiModel))
         }
         send(request)

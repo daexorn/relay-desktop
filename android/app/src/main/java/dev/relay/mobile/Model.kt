@@ -208,7 +208,7 @@ fun slashMatches(draft: String, commands: List<CommandInfo>): List<CommandInfo> 
 }
 
 fun builtinSlashCommands(): List<CommandInfo> = listOf(
-    CommandInfo("usage", "Лимиты подписки Claude, сброс таймеров и расход токенов", ""),
+    CommandInfo("usage", "Лимиты и токены выбранного агента", ""),
     CommandInfo("cost", "Статистика токенов и вызовов инструментов сессии", ""),
     CommandInfo("status", "Состояние сервера, установленных CLI и текущей сессии", ""),
     CommandInfo("clear", "Начать новую чистую сессию в этой папке", ""),

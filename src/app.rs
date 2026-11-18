@@ -1159,12 +1159,18 @@ impl RelayApp {
             }
             "api_models" => self.api_models_reply(&server, &value),
             "auth"|"auth_frame"|"auth_browser"|"auth_clipboard"|"browser_info"|"browser_setup"|"browser_navigation" => self.login_event(&server, &value),
-            "model_changed" | "mode_changed" | "notice" => {
+            "model_changed" | "mode_changed" | "effort_changed" | "notice" => {
                 let sid = value["sid"].as_str().unwrap_or("");
-                if let Some(c) = self.chats.get_mut(&key(&server, sid)) {
+                let chat_key = key(&server, sid);
+                let applies = value["backend"].as_str().is_none_or(|backend| {
+                    self.settings.servers.iter().find(|profile| profile.id == server)
+                        .is_some_and(|profile| self.backend_for_chat(profile, &chat_key) == backend)
+                });
+                if let Some(c) = self.chats.get_mut(&chat_key).filter(|_| applies) {
                     match kind {
                         "model_changed" => c.model = value["model"].as_str().unwrap_or("default").into(),
                         "mode_changed" => c.mode = value["mode"].as_str().unwrap_or("manual").into(),
+                        "effort_changed" => c.effort = value["effort"].as_str().unwrap_or("default").into(),
                         _ => {}
                     }
                 }
@@ -1754,8 +1760,8 @@ impl RelayApp {
         let mut saved_profile_change = false;
         let done = match name {
             "/model" if !arg.is_empty() => match resolve_model(&models, arg).or_else(|| {
-                (backend != "claude").then(|| arg.to_owned())
-            }) {
+                (backend == "api" || (models.is_empty() && backend != "claude")).then(|| arg.to_owned())
+            }).or_else(|| (arg.eq_ignore_ascii_case("default") && backend != "api").then(|| "default".into())) {
                 Some(value) => {
                     if backend == "api" {
                         if let Some(profile) = self.settings.servers.iter_mut().find(|s| s.id == server.id) {
@@ -1768,7 +1774,7 @@ impl RelayApp {
                             profile.set_model_for(backend, value.clone());
                         }
                         saved_profile_change = true;
-                        self.controller.send(&server.id, json!({"op":"control","sid":c.sid,"action":"model","value":value}));
+                        self.controller.send(&server.id, json!({"op":"control","sid":c.sid,"backend":backend,"action":"model","value":value}));
                     }
                     self.notice = format!("Модель: {}", model_label(&models, &value));
                     true
@@ -1779,14 +1785,18 @@ impl RelayApp {
                 }
             },
             "/mode" if !arg.is_empty() => {
-                let mode = match arg {
+                let mode = match arg.to_lowercase().as_str() {
                     "auto" | "авто" => "auto",
                     "plan" | "план" => "plan",
-                    "edits" | "acceptEdits" | "правки" => "acceptEdits",
-                    _ => "manual",
+                    "edits" | "acceptedits" | "правки" => "acceptEdits",
+                    "manual" | "ручной" => "manual",
+                    _ => {
+                        c.error = "Режим: auto, manual, edits или plan.".into();
+                        return true;
+                    }
                 };
                 c.mode = mode.into();
-                self.controller.send(&server.id, json!({"op":"control","sid":c.sid,"action":"mode","value":mode}));
+                self.controller.send(&server.id, json!({"op":"control","sid":c.sid,"backend":backend,"action":"mode","value":mode}));
                 true
             }
             "/effort" if !arg.is_empty() => {
@@ -1794,8 +1804,13 @@ impl RelayApp {
                     "low" | "быстро" => "low",
                     "medium" | "средне" => "medium",
                     "high" | "глубоко" => "high",
+                    "xhigh" => "xhigh",
                     "max" | "макс" => "max",
-                    _ => "default",
+                    "auto" | "default" | "авто" => "default",
+                    _ => {
+                        c.error = "Глубина: auto, low, medium, high, xhigh или max.".into();
+                        return true;
+                    },
                 };
                 c.effort = eff.into();
                 self.notice = format!("Глубина: {eff}");
@@ -2188,7 +2203,7 @@ impl RelayApp {
                     |ui| {
                         ui.spacing_mut().item_spacing.x = 6.;
                         let (mascot_r, mascot_resp) =
-                            ui.allocate_exact_size(Vec2::new(22., 18.), egui::Sense::hover());
+                            ui.allocate_exact_size(Vec2::splat(24.), egui::Sense::hover());
                         design::engine_icon(ui, mascot_r, "claude");
                         mascot_resp.on_hover_text(if any_busy {
                             "Клодёнок сейчас трудится над задачей!"
@@ -2197,7 +2212,7 @@ impl RelayApp {
                         });
                         ui.label(RichText::new("Relay").size(18.5).color(p.text).strong());
                         let (star_r, _) =
-                            ui.allocate_exact_size(Vec2::splat(14.), egui::Sense::hover());
+                            ui.allocate_exact_size(Vec2::splat(18.), egui::Sense::hover());
                         design::engine_icon(ui, star_r, "agy");
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             ui.spacing_mut().item_spacing.x = 5.;
@@ -3476,7 +3491,7 @@ impl RelayApp {
                                             ui,
                                             egui::Rect::from_center_size(
                                                 egui::pos2(pr.left() + 15., pr.center().y),
-                                                Vec2::new(16., 14.),
+                                                Vec2::splat(18.),
                                             ),
                                             bid,
                                         );
@@ -3692,7 +3707,7 @@ impl RelayApp {
                                         ui.horizontal_wrapped(|ui| {
                                             ui.spacing_mut().item_spacing = Vec2::new(5.5, 2.);
                                             let (er, _) = ui.allocate_exact_size(
-                                                Vec2::new(16., 14.),
+                                                Vec2::splat(18.),
                                                 egui::Sense::hover(),
                                             );
                                             design::engine_icon(ui, er, &attr.backend);
@@ -4360,7 +4375,7 @@ impl RelayApp {
                             chat.queue_paused = true;
                         }
                         let (pet_rect, pet_resp) = ui.allocate_exact_size(
-                            Vec2::new(22., 18.),
+                            Vec2::splat(26.),
                             egui::Sense::click(),
                         );
                         design::engine_icon(ui, pet_rect, &backend);
@@ -4389,10 +4404,10 @@ impl RelayApp {
         // With the server host, model and mode switch even while the agent is answering.
         if live && chat.busy {
             if previous.0 != current.0 && backend != "api" {
-                self.controller.send(&server.id, json!({"op":"control","sid":chat.sid,"action":"model","value":current.0}));
+                self.controller.send(&server.id, json!({"op":"control","sid":chat.sid,"backend":backend,"action":"model","value":current.0}));
             }
             if previous.1 != current.1 {
-                self.controller.send(&server.id, json!({"op":"control","sid":chat.sid,"action":"mode","value":current.1}));
+                self.controller.send(&server.id, json!({"op":"control","sid":chat.sid,"backend":backend,"action":"mode","value":current.1}));
             }
         }
         if previous.1 != current.1 {

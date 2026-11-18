@@ -405,7 +405,7 @@ class AgyRun:
         self.prior_handoff = native_handoff(self.shared_rows, self.backend, "agySessionId", self.session_id, resumed)
         self.shared_rows = []
 
-    def _append_shared(self, role, content, context_complete=False):
+    def _append_shared(self, role, content, context_complete=False, usage=None):
         ident = str(uuid.uuid4())
         message = {"role": role, "content": content}
         if role == "assistant":
@@ -415,7 +415,7 @@ class AgyRun:
                 model=self.model,
                 stop_reason="end_turn",
                 stop_sequence=None,
-                usage={"input_tokens": 0, "output_tokens": 0},
+                usage=usage or {},
             )
         row = {
             "type": role,
@@ -434,6 +434,8 @@ class AgyRun:
             "relayAgentName": (self.cluster_context or {}).get("name", ""),
             "message": message,
         }
+        if usage:
+            row["relayReportedUsage"] = True
         if self.session_id:
             row["agySessionId"] = self.session_id
         if context_complete:
@@ -825,13 +827,30 @@ class AgyRun:
                             "mimeType": img.get("media_type") or "image/png",
                             "data": img["data"],
                         })
-                self._rpc("session/prompt", {"sessionId": self.session_id, "prompt": blocks or [{"type": "text", "text": ""}]}, timeout=1800)
+                response = self._rpc("session/prompt", {"sessionId": self.session_id, "prompt": blocks or [{"type": "text", "text": ""}]}, timeout=1800)
+                raw_usage = response.get("usage")
+                usage = {}
+                if isinstance(raw_usage, dict):
+                    usage = {
+                        transcript_key: raw_usage[acp_key]
+                        for transcript_key, acp_key in (
+                            ("input_tokens", "inputTokens"),
+                            ("output_tokens", "outputTokens"),
+                            ("cache_read_input_tokens", "cachedReadTokens"),
+                            ("cache_creation_input_tokens", "cachedWriteTokens"),
+                        )
+                        if type(raw_usage.get(acp_key)) is int and raw_usage[acp_key] >= 0
+                    }
                 flushed = self._flush_text_block()
                 texts = [b["text"] for role, blks in self.turn_blocks if role == "assistant" for b in blks if b.get("type") == "text"]
                 final_text = "\n\n".join(texts).strip() or flushed
                 if mirror:
                     for i, (role, blks) in enumerate(self.turn_blocks):
-                        self._append_shared(role, blks, context_complete=i == len(self.turn_blocks) - 1)
+                        last = i == len(self.turn_blocks) - 1
+                        self._append_shared(role, blks, context_complete=last and (role == "assistant" or not usage),
+                                            usage=usage if last and role == "assistant" else None)
+                    if usage and (not self.turn_blocks or self.turn_blocks[-1][0] != "assistant"):
+                        self._append_shared("assistant", [], context_complete=True, usage=usage)
                 self.prior_handoff = ""
             except Exception as exc:
                 self._flush_text_block()

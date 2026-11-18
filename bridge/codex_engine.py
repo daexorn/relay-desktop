@@ -128,11 +128,27 @@ def probe_catalog(binary=None):
     ver = codex_version(binary) or ""
     if cached:
         return cached, ver
-    proc = None
+    result = _probe_app_server(binary, "model/list", {"limit": 100}, timeout=15)
+    models = []
+    for model in result.get("data") or []:
+        if isinstance(model, dict) and not model.get("hidden") and isinstance(model.get("model") or model.get("id"), str):
+            value = model.get("model") or model["id"]
+            models.append({
+                "value": value,
+                "displayName": str(model.get("displayName") or value),
+                "description": str(model.get("description") or "")[:240],
+            })
+    return models or cached, ver
+
+
+def probe_rate_limits():
+    binary = codex_binary()
+    return _probe_app_server(binary, "account/rateLimits/read", {}, timeout=6) if binary else {}
+
+
+def _probe_app_server(binary, method, params, timeout):
     try:
-        home = codex_home()
-        home.mkdir(parents=True, mode=0o700, exist_ok=True)
-        proc = subprocess.Popen(
+        with subprocess.Popen(
             [binary, "app-server", "--stdio"],
             cwd=str(Path.home()),
             stdin=subprocess.PIPE,
@@ -142,56 +158,78 @@ def probe_catalog(binary=None):
             encoding="utf-8",
             errors="replace",
             start_new_session=True,
-        )
-        timer = threading.Timer(15, proc.terminate)
-        timer.start()
-        try:
-            proc.stdin.write(json.dumps({
-                "jsonrpc": "2.0", "id": 1, "method": "initialize",
-                "params": {"clientInfo": {"name": "relay-desktop", "version": "0.15.0"}}
-            }) + "\n")
-            proc.stdin.flush()
-            models = []
-            for line in proc.stdout:
-                try:
-                    msg = json.loads(line)
-                except ValueError:
-                    continue
-                if msg.get("id") == 1:
-                    proc.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "initialized"}) + "\n")
-                    proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "model/list", "params": {"limit": 100}}) + "\n")
-                    proc.stdin.flush()
-                elif msg.get("id") == 2:
-                    for m in ((msg.get("result") or {}).get("data") or []):
-                        if isinstance(m, dict) and not m.get("hidden") and isinstance(m.get("model") or m.get("id"), str):
-                            val = m.get("model") or m.get("id")
-                            models.append({
-                                "value": val,
-                                "displayName": str(m.get("displayName") or val),
-                                "description": str(m.get("description") or "")[:240],
-                            })
-                    break
-            return models, ver
-        finally:
-            timer.cancel()
-    except (OSError, ValueError):
-        return cached, ver
-    finally:
-        if proc is not None:
-            try:
-                proc.stdin.close()
-                proc.wait(timeout=2)
-            except Exception:
-                try:
-                    os.killpg(proc.pid, signal.SIGTERM)
-                except OSError:
-                    pass
-            for stream in (proc.stdin, proc.stdout):
-                if stream is not None:
+        ) as proc:
+            def stop():
+                if proc.poll() is None:
                     try:
-                        stream.close()
-                    except OSError:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
                         pass
+
+            def send(request):
+                proc.stdin.write(json.dumps({"jsonrpc": "2.0", **request}) + "\n")
+                proc.stdin.flush()
+
+            timer = threading.Timer(timeout, stop)
+            timer.start()
+            try:
+                send({"id": 1, "method": "initialize",
+                      "params": {"clientInfo": {"name": "relay-desktop", "version": "0.15.0"}}})
+                for line in proc.stdout:
+                    try:
+                        message = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(message, dict):
+                        continue
+                    if message.get("id") == 1:
+                        if "error" in message:
+                            break
+                        send({"method": "initialized"})
+                        send({"id": 2, "method": method, "params": params})
+                    elif message.get("id") == 2:
+                        result = message.get("result")
+                        return result if isinstance(result, dict) else {}
+            finally:
+                timer.cancel()
+                stop()
+    except OSError:
+        pass
+    return {}
+
+
+def native_token_totals(sid):
+    """Read the last cumulative token count, including for existing threads."""
+    if not _valid_uuid(sid):
+        return {}
+    home = codex_home()
+    rollouts = list((home / "sessions").glob(f"*/*/*/rollout-*-{sid.lower()}.jsonl"))
+    rollouts.extend((home / "archived_sessions").glob(f"rollout-*-{sid.lower()}.jsonl"))
+    for rollout in rollouts:
+        try:
+            with rollout.open("rb") as stream:
+                size = os.fstat(stream.fileno()).st_size
+                start = max(0, size - 16 * 1024 * 1024)
+                stream.seek(start)
+                if start:
+                    stream.readline(size - start)
+                for line in reversed(stream.read(size - stream.tell()).splitlines()):
+                    if b'"token_count"' not in line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except (ValueError, UnicodeError):
+                        continue
+                    payload = row.get("payload") if isinstance(row, dict) else None
+                    if not isinstance(payload, dict) or payload.get("type") != "token_count":
+                        continue
+                    info = payload.get("info")
+                    totals = info.get("total_token_usage") if isinstance(info, dict) else None
+                    if isinstance(totals, dict):
+                        return totals
+        except OSError:
+            continue
+    return {}
 
 
 def _valid_uuid(val):

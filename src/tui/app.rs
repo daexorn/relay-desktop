@@ -1658,15 +1658,16 @@ impl App {
                     }
                 }
             }
-            "model_changed" => {
-                if let Some(c) = self.chats.get_mut(&key) {
-                    c.model = value["model"].as_str().unwrap_or("default").into();
-                    self.dirty = true;
-                }
-            }
-            "mode_changed" => {
-                if let Some(c) = self.chats.get_mut(&key) {
-                    c.mode = value["mode"].as_str().unwrap_or("manual").into();
+            "model_changed" | "mode_changed" | "effort_changed" => {
+                if let Some(c) = self.chats.get_mut(&key).filter(|chat| {
+                    value["backend"].as_str().is_none_or(|backend| backend == chat.backend)
+                }) {
+                    match kind {
+                        "model_changed" => c.model = value["model"].as_str().unwrap_or("default").into(),
+                        "mode_changed" => c.mode = value["mode"].as_str().unwrap_or("manual").into(),
+                        "effort_changed" => c.effort = value["effort"].as_str().unwrap_or("default").into(),
+                        _ => {}
+                    }
                     self.dirty = true;
                 }
             }
@@ -2515,7 +2516,7 @@ impl App {
             if c.busy {
                 self.controller.send(
                     h,
-                    json!({"op":"control","sid":c.sid,"action":action,"value":value}),
+                    json!({"op":"control","sid":c.sid,"backend":c.backend,"action":action,"value":value}),
                 );
             }
         }
