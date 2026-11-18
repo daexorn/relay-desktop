@@ -367,7 +367,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, view: &mut View) {
         .chat()
         .map(|c| {
             c.editor
-                .visual(content.width.saturating_sub(4) as usize, false)
+                .visual(content.width.saturating_sub(11) as usize, false)
                 .0
                 .len()
         })
@@ -890,6 +890,45 @@ fn status(frame: &mut Frame, app: &App, area: Rect, p: Palette) {
     put(frame, area, Line::from(spans), p);
 }
 
+fn pixel_icon(backend: &str) -> Vec<Line<'static>> {
+    use relay_desktop::agent_icons::{pixels, SIZE};
+    let pixels = pixels(backend);
+    let dots = [[0, 3], [1, 4], [2, 5], [6, 7]];
+    (0..SIZE / 4)
+        .map(|row| {
+            Line::from(
+                (0..SIZE / 2)
+                    .map(|col| {
+                        let mut mask = 0;
+                        let mut count = 0;
+                        let mut rgb = [0u16; 3];
+                        for (dy, pair) in dots.iter().enumerate() {
+                            for (dx, bit) in pair.iter().enumerate() {
+                                if let Some(pixel) = pixels[row * 4 + dy][col * 2 + dx] {
+                                    mask |= 1 << bit;
+                                    count += 1;
+                                    for (sum, value) in rgb.iter_mut().zip(pixel) {
+                                        *sum += u16::from(value);
+                                    }
+                                }
+                            }
+                        }
+                        if count == 0 {
+                            Span::raw(" ")
+                        } else {
+                            let [r, g, b] = rgb.map(|sum| (sum / count) as u8);
+                            label(
+                                char::from_u32(0x2800 + mask).unwrap().to_string(),
+                                Color::Rgb(r, g, b),
+                            )
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect()
+}
+
 fn composer(frame: &mut Frame, app: &App, area: Rect, p: Palette) {
     let title = app
         .chat()
@@ -938,13 +977,22 @@ fn composer(frame: &mut Frame, app: &App, area: Rect, p: Palette) {
     );
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
-    let edit_area = Rect {
+    let mut edit_area = Rect {
         x: inner.x + 1,
         y: inner.y,
         width: inner.width.saturating_sub(2),
         height: inner.height.saturating_sub(1),
     };
     if let Some(c) = app.chat() {
+        if inner.width >= 20 && inner.height >= 3 {
+            put(
+                frame,
+                Rect::new(inner.right() - 7, inner.y, 6, 3),
+                Text::from(pixel_icon(&c.backend)),
+                p,
+            );
+            edit_area.width -= 7;
+        }
         let placeholder = if c.is_locked_gate() {
             "🔒 Сессия закрыта · нажми Enter или введи /unlock"
         } else {

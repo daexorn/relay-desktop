@@ -268,7 +268,7 @@ def native_history(sid):
             step_idx = row.get("step_index", len(messages))
             if kind == "USER_INPUT":
                 pending_tool_ids.clear()
-                txt = _strip_tags(row.get("content", ""))
+                txt = without_relay_context(_strip_tags(row.get("content", "")))
                 if txt:
                     messages.append({"role": "user", "text": txt, "uuid": f"agy-u-{step_idx}", "backend": "agy"})
             elif kind == "PLANNER_RESPONSE":
@@ -393,33 +393,19 @@ class AgyRun:
         threading.Thread(target=self._worker, daemon=True).start()
 
     def _inspect_shared_transcript(self, resume):
-        if self.path.exists():
-            rows = list(self.owner.api_records(self.path))
-            for row in rows:
-                if row.get("uuid") and not row.get("isSidechain"):
-                    self.parent = row["uuid"]
-                if isinstance(row.get("agySessionId"), str):
-                    self.linked_session_id = row["agySessionId"]
-            tail = []
-            for row in rows[-16:]:
-                if row.get("agySessionId"):
-                    tail.clear()
-                    continue
-                msg = row.get("message") if isinstance(row.get("message"), dict) else {}
-                role = msg.get("role", row.get("type"))
-                if role in ("user", "assistant"):
-                    content = msg.get("content", "")
-                    txt = content if isinstance(content, str) else "\n".join(
-                        str(b.get("text") or "") for b in content if isinstance(b, dict) and b.get("type") == "text"
-                    )
-                    if txt.strip():
-                        tail.append(f"{role.upper()}: {txt.strip()[:1500]}")
-            if tail:
-                self.prior_handoff = "\n\nPrevious conversation context in this Relay session:\n" + "\n\n".join(tail[-8:])
+        self.shared_rows = primary_chain(self.owner.api_records(self.path)) if self.path.exists() else []
+        if self.shared_rows:
+            self.parent = self.shared_rows[-1].get("uuid")
+            self.linked_session_id = next((row["agySessionId"] for row in reversed(self.shared_rows)
+                                          if isinstance(row.get("agySessionId"), str)), None)
         elif resume and has_native_session(self.sid):
             self.linked_session_id = self.sid
 
-    def _append_shared(self, role, content):
+    def _load_relay_context(self, resumed):
+        self.prior_handoff = native_handoff(self.shared_rows, self.backend, "agySessionId", self.session_id, resumed)
+        self.shared_rows = []
+
+    def _append_shared(self, role, content, context_complete=False):
         ident = str(uuid.uuid4())
         message = {"role": role, "content": content}
         if role == "assistant":
@@ -450,6 +436,8 @@ class AgyRun:
         }
         if self.session_id:
             row["agySessionId"] = self.session_id
+        if context_complete:
+            row["relayContextVersion"] = 1
         try:
             with self.path.open("a", encoding="utf-8") as f:
                 fcntl.flock(f, fcntl.LOCK_EX)
@@ -512,8 +500,6 @@ class AgyRun:
                 prompt += " Relay desktop tools operate on the user's computer. Local context: " + self.desktop_context
         if self.custom_prompt:
             prompt += "\n\nUser's custom instructions:\n" + self.custom_prompt
-        if self.prior_handoff:
-            prompt += self.prior_handoff
         return mcp_list, prompt[:110000]
 
     def _emit(self, data):
@@ -774,14 +760,18 @@ class AgyRun:
             try:
                 res = self._rpc("session/resume", {"sessionId": self.linked_session_id, **base_params}, timeout=45)
                 self.session_id = res.get("sessionId") or self.linked_session_id
+                self._load_relay_context(resumed=True)
                 self._learn_session_state(res)
                 self._apply_session_settings()
                 return
             except Exception:
                 pass
 
-        res = self._rpc("session/new", {"sessionId": self.sid, **base_params}, timeout=45)
-        self.session_id = res.get("sessionId") or self.sid
+        res = self._rpc("session/new", base_params, timeout=45)
+        self.session_id = res.get("sessionId")
+        if not self.session_id:
+            raise ValueError("Antigravity не создал сессию. Проверь вход на сервере.")
+        self._load_relay_context(resumed=False)
         self.linked_session_id = self.session_id
         self._learn_session_state(res)
         self._apply_session_settings()
@@ -826,8 +816,8 @@ class AgyRun:
                     )
                 self._emit({"type": "system", "subtype": "init", "session_id": self.sid, "model": self.model, "relay_backend": "agy"})
                 blocks = []
-                if text:
-                    blocks.append({"type": "text", "text": text})
+                if self.prior_handoff or text:
+                    blocks.append({"type": "text", "text": self.prior_handoff + text})
                 for img in images or []:
                     if isinstance(img, dict) and img.get("data"):
                         blocks.append({
@@ -840,8 +830,9 @@ class AgyRun:
                 texts = [b["text"] for role, blks in self.turn_blocks if role == "assistant" for b in blks if b.get("type") == "text"]
                 final_text = "\n\n".join(texts).strip() or flushed
                 if mirror:
-                    for role, blks in self.turn_blocks:
-                        self._append_shared(role, blks)
+                    for i, (role, blks) in enumerate(self.turn_blocks):
+                        self._append_shared(role, blks, context_complete=i == len(self.turn_blocks) - 1)
+                self.prior_handoff = ""
             except Exception as exc:
                 self._flush_text_block()
                 error = clean_error(exc)

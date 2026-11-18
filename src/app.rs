@@ -2189,7 +2189,7 @@ impl RelayApp {
                         ui.spacing_mut().item_spacing.x = 6.;
                         let (mascot_r, mascot_resp) =
                             ui.allocate_exact_size(Vec2::new(22., 18.), egui::Sense::hover());
-                        design::pixel_claude_mascot(ui, mascot_r, any_busy);
+                        design::engine_icon(ui, mascot_r, "claude");
                         mascot_resp.on_hover_text(if any_busy {
                             "Клодёнок сейчас трудится над задачей!"
                         } else {
@@ -2198,7 +2198,7 @@ impl RelayApp {
                         ui.label(RichText::new("Relay").size(18.5).color(p.text).strong());
                         let (star_r, _) =
                             ui.allocate_exact_size(Vec2::splat(14.), egui::Sense::hover());
-                        design::pixel_rainbow_star(ui.painter(), star_r);
+                        design::engine_icon(ui, star_r, "agy");
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             ui.spacing_mut().item_spacing.x = 5.;
                             if design::button(
@@ -3156,13 +3156,13 @@ impl RelayApp {
                                     ui.spacing_mut().item_spacing.x = 6.;
                                     if chat_busy {
                                         let (orb,_)=ui.allocate_exact_size(Vec2::new(18., 15.),egui::Sense::hover());
-                                        design::engine_mascot(ui, orb, &active_backend_id, true);
+                                        design::engine_icon(ui, orb, &active_backend_id);
                                     } else if chat_locked {
                                         let (lr,_)=ui.allocate_exact_size(Vec2::splat(14.),egui::Sense::hover());
                                         design::icon(ui.painter(),lr,if chat_unlocked{Icon::Unlock}else{Icon::Lock},if chat_unlocked{GREEN}else{accent()});
                                     } else {
                                         let (mr,_)=ui.allocate_exact_size(Vec2::new(16., 14.),egui::Sense::hover());
-                                        design::engine_mascot(ui, mr, &active_backend_id, false);
+                                        design::engine_icon(ui, mr, &active_backend_id);
                                     }
                                     ui.add(egui::Label::new(RichText::new(title).size(15.).color(p.text)).truncate());
                                 });
@@ -3406,7 +3406,7 @@ impl RelayApp {
                                         Vec2::new(42., 34.),
                                         egui::Sense::hover(),
                                     );
-                                    design::engine_mascot(ui, orb, &active_backend_id, false);
+                                    design::engine_icon(ui, orb, &active_backend_id);
                                     ui.add_space(6.);
                                     ui.vertical(|ui| {
                                         label(
@@ -3472,14 +3472,13 @@ impl RelayApp {
                                             ),
                                             egui::StrokeKind::Inside,
                                         );
-                                        design::engine_mascot(
+                                        design::engine_icon(
                                             ui,
                                             egui::Rect::from_center_size(
                                                 egui::pos2(pr.left() + 15., pr.center().y),
                                                 Vec2::new(16., 14.),
                                             ),
                                             bid,
-                                            false,
                                         );
                                         ui.painter().galley(
                                             egui::pos2(
@@ -3696,7 +3695,7 @@ impl RelayApp {
                                                 Vec2::new(16., 14.),
                                                 egui::Sense::hover(),
                                             );
-                                            design::engine_mascot(ui, er, &attr.backend, false);
+                                            design::engine_icon(ui, er, &attr.backend);
                                             label(ui, &attr.who, 11.4, msg_col);
                                             if !attr.to_whom.is_empty() {
                                                 label(
@@ -3838,7 +3837,7 @@ impl RelayApp {
                                                     Vec2::new(24., 20.),
                                                     egui::Sense::hover(),
                                                 );
-                                                design::engine_mascot(ui, orb, turn_bid, true);
+                                                design::engine_icon(ui, orb, turn_bid);
                                                 ui.add_space(3.);
                                                 ui.vertical(|ui| {
                                                     ui.horizontal_wrapped(|ui| {
@@ -4364,10 +4363,10 @@ impl RelayApp {
                             Vec2::new(22., 18.),
                             egui::Sense::click(),
                         );
-                        design::pixel_claude_mascot(ui, pet_rect, chat.busy);
+                        design::engine_icon(ui, pet_rect, &backend);
                         if pet_resp
                             .on_hover_cursor(egui::CursorIcon::PointingHand)
-                            .on_hover_text("Клодёнок на связи · Нажми для меню команд (/usage, /cost, /status, /help)")
+                            .on_hover_text("Меню команд (/usage, /cost, /status, /help)")
                             .clicked()
                         {
                             if chat.draft.trim().is_empty() {
@@ -6180,7 +6179,7 @@ fn user_turn_caption(
             if !attr.to_whom.is_empty() {
                 label(ui, &attr.to_whom, 10.9, bcol);
                 let (mr, _) = ui.allocate_exact_size(Vec2::new(14., 12.), egui::Sense::hover());
-                design::engine_mascot(ui, mr, &attr.backend, false);
+                design::engine_icon(ui, mr, &attr.backend);
                 label(ui, "→", 10.6, p.muted);
             }
             label(ui, &attr.who, 10.9, p.muted);

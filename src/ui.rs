@@ -570,185 +570,33 @@ pub fn phase_icon(phase: crate::model::ToolPhase) -> Icon {
 /// Top stripes intentionally removed for a clean, band-free matte header.
 pub fn ambient_horizon(_painter: &egui::Painter, _rect: Rect, _color: Color32, _light: bool) {}
 
-fn paint_pixel_grid(
-    painter: &egui::Painter,
-    rect: Rect,
-    cols: usize,
-    rows: usize,
-    grid: &[&str],
-    palette: &[(char, Color32)],
-) {
-    let cell = (rect.width() / cols as f32)
-        .min(rect.height() / rows as f32)
-        .max(1.0);
-    let ox = rect.center().x - (cols as f32 * cell) * 0.5;
-    let oy = rect.center().y - (rows as f32 * cell) * 0.5;
-    for (ry, row_s) in grid.iter().take(rows).enumerate() {
-        for (cx, ch) in row_s.chars().take(cols).enumerate() {
-            if ch == '.' || ch == ' ' {
-                continue;
-            }
-            if let Some(&(_, col)) = palette.iter().find(|&&(k, _)| k == ch) {
-                let px = Rect::from_min_size(
-                    Pos2::new(ox + cx as f32 * cell, oy + ry as f32 * cell),
-                    Vec2::splat((cell + 0.25).max(1.0)),
+fn paint_engine_icon(painter: &egui::Painter, rect: Rect, backend: &str) {
+    use relay_desktop::agent_icons::{pixels, SIZE};
+    let scale = painter.ctx().pixels_per_point();
+    let available = rect.width().min(rect.height()) * scale / SIZE as f32;
+    let cell = if available >= 1.0 { available.floor() } else { available } / scale;
+    let extent = SIZE as f32 * cell;
+    let origin = (rect.center() - Vec2::splat(extent * 0.5)).to_vec2();
+    let origin = ((origin * scale).round() / scale).to_pos2();
+    // Egui fades the edges of small filled shapes. Pixel squares need sharp edges
+    // so a one-pixel cell remains visible at the default scale.
+    let mut mesh = egui::epaint::Mesh::default();
+    for (y, row) in pixels(backend).iter().enumerate() {
+        for (x, pixel) in row.iter().enumerate() {
+            if let Some([r, g, b]) = pixel {
+                let square = Rect::from_min_size(
+                    origin + Vec2::new(x as f32 * cell, y as f32 * cell),
+                    Vec2::splat(cell),
                 );
-                painter.rect_filled(px, 0.0, col);
+                mesh.add_colored_rect(square, Color32::from_rgb(*r, *g, *b));
             }
         }
     }
+    painter.add(egui::Shape::mesh(mesh));
 }
 
-/// Cute pixel-art Claude buddy ("клодёнок") — gently blinks idle and trots its legs when working!
-pub fn pixel_claude_mascot(ui: &egui::Ui, rect: Rect, busy: bool) {
-    let animated = ui
-        .ctx()
-        .data(|d| d.get_temp::<bool>(egui::Id::new("relay-animations")))
-        .unwrap_or(true);
-    let t = if animated {
-        if busy {
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_millis(120));
-        } else {
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_millis(600));
-        }
-        ui.input(|i| i.time)
-    } else {
-        0.0
-    };
-    let step = busy && ((t * 5.5) as i64 % 2 == 1);
-    let blink = !busy && animated && ((t * 1.4) as i64 % 9 == 0);
-    let bob = if step { -0.8 } else { 0.0 };
-    let shifted = rect.translate(Vec2::new(0.0, bob));
-    let body = Color32::from_rgb(232, 130, 90);
-    let hi = Color32::from_rgb(248, 168, 132);
-    let shade = Color32::from_rgb(196, 98, 62);
-    let eye = Color32::from_rgb(24, 18, 18);
-    let eyes_row = if blink { ".BBBBBBBBBB." } else { ".BBEEBBEEBB." };
-    let (legs_1, legs_2) = if step {
-        (".SS..SS..SS.", ".S........S.")
-    } else {
-        ("..SS.SS.SS..", "..SS....SS..")
-    };
-    let sprite = [
-        "..HHHHHHHH..",
-        ".HHBBBBBBHH.",
-        "BBBBBBBBBBBB",
-        eyes_row,
-        "BBBBBBBBBBBB",
-        ".BBBBBBBBBB.",
-        "..SSSSSSSS..",
-        legs_1,
-        legs_2,
-    ];
-    paint_pixel_grid(
-        ui.painter(),
-        shifted,
-        12,
-        9,
-        &sprite,
-        &[('B', body), ('H', hi), ('S', shade), ('E', eye)],
-    );
-}
-
-/// Crisp 11×11 pixel-art GPT / OpenAI knot icon.
-pub fn pixel_gpt_mascot(painter: &egui::Painter, rect: Rect) {
-    let main = Color32::from_rgb(62, 219, 168);
-    let hi = Color32::from_rgb(142, 248, 212);
-    let deep = Color32::from_rgb(32, 156, 118);
-    let sprite = [
-        "...HHHHH...",
-        "..HH...MM..",
-        ".HH.MMM.MM.",
-        "HH.MM.MM.MM",
-        "MM.M...M.DD",
-        "MM..M.M..DD",
-        "MM.MM.MM.DD",
-        ".DD.MMM.MM.",
-        "..DD...MM..",
-        "...DDDDD...",
-        "...........",
-    ];
-    paint_pixel_grid(
-        painter,
-        rect,
-        11,
-        11,
-        &sprite,
-        &[('H', hi), ('M', main), ('D', deep)],
-    );
-}
-
-/// Crisp 11×11 pixel-art Rainbow 4-Point Star (AGY / Antigravity).
-pub fn pixel_rainbow_star(painter: &egui::Painter, rect: Rect) {
-    let sprite = [
-        ".....C.....",
-        ".....C.....",
-        "....BCB....",
-        "....BWB....",
-        "..BBWWWVV..",
-        "CCWWWWWWWRR",
-        "..GGWWWRR..",
-        "....YWR....",
-        "....YYY....",
-        ".....Y.....",
-        ".....G.....",
-    ];
-    paint_pixel_grid(
-        painter,
-        rect,
-        11,
-        11,
-        &sprite,
-        &[
-            ('C', Color32::from_rgb(56, 232, 255)),
-            ('B', Color32::from_rgb(76, 140, 255)),
-            ('V', Color32::from_rgb(184, 128, 255)),
-            ('R', Color32::from_rgb(255, 108, 156)),
-            ('Y', Color32::from_rgb(255, 209, 102)),
-            ('G', Color32::from_rgb(94, 234, 180)),
-            ('W', Color32::from_rgb(250, 252, 255)),
-        ],
-    );
-}
-
-/// Crisp 11×11 pixel-art API microchip / bolt icon.
-pub fn pixel_api_mascot(painter: &egui::Painter, rect: Rect) {
-    let sky = Color32::from_rgb(92, 194, 242);
-    let hi = Color32::from_rgb(178, 232, 255);
-    let core = Color32::from_rgb(255, 216, 108);
-    let sprite = [
-        "..S..S..S..",
-        ".HHHHHHHHH.",
-        "SHSSSSSSSHS",
-        ".S..CCC..S.",
-        "SS.CCCCC.SS",
-        ".S..CCC..S.",
-        "SS..CCC..SS",
-        ".SSSSSSSSS.",
-        "..S..S..S..",
-        "...........",
-        "...........",
-    ];
-    paint_pixel_grid(
-        painter,
-        rect,
-        11,
-        11,
-        &sprite,
-        &[('S', sky), ('H', hi), ('C', core)],
-    );
-}
-
-/// Draws the signature pixel-art mascot for any backend (`claude`, `codex`, `agy`, `api`).
-pub fn engine_mascot(ui: &egui::Ui, rect: Rect, backend: &str, busy: bool) {
-    match backend {
-        "codex" => pixel_gpt_mascot(ui.painter(), rect),
-        "agy" => pixel_rainbow_star(ui.painter(), rect),
-        "api" => pixel_api_mascot(ui.painter(), rect),
-        _ => pixel_claude_mascot(ui, rect, busy),
-    }
+pub fn engine_icon(ui: &egui::Ui, rect: Rect, backend: &str) {
+    paint_engine_icon(ui.painter(), rect, backend);
 }
 
 /// Specular 1px top-edge highlight on elevated glass cards.

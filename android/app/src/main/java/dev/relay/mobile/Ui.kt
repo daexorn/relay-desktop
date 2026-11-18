@@ -494,131 +494,33 @@ fun AtmosphericHorizon(glowColor: Color, modifier: Modifier = Modifier) {
     val _unusedMod = modifier
 }
 
-/** Crisp pixel-art mascots: Клодёнок ("claude"), Pixel GPT ("codex"), Rainbow Star ("agy"), Pixel API ("api"). */
+private data class AgentIcon(val colors: List<Color>, val rows: List<String>)
+
+/** Shared pixel artwork used by the agent picker and the chat. */
 @Composable
-fun PixelMascot(backend: String, active: Boolean = false, size: Dp = 18.dp, modifier: Modifier = Modifier) {
-    Canvas(modifier.size(size)) {
-        fun drawGrid(rows: Array<String>, colorFor: (Char) -> Color?) {
-            val gh = rows.size.coerceAtLeast(1)
-            val gw = rows[0].length.coerceAtLeast(1)
-            val px = minOf(this.size.width / gw, this.size.height / gh)
-            val ox = (this.size.width - px * gw) * 0.5f
-            val oy = (this.size.height - px * gh) * 0.5f
-            for (y in rows.indices) {
-                val row = rows[y]
-                for (x in row.indices) {
-                    val col = colorFor(row[x]) ?: continue
-                    drawRect(
-                        color = col,
-                        topLeft = Offset(ox + x * px, oy + y * px),
-                        size = Size(px + 0.35f, px + 0.35f),
-                    )
-                }
+fun PixelMascot(backend: String, size: Dp = 18.dp, modifier: Modifier = Modifier) {
+    val assets = androidx.compose.ui.platform.LocalContext.current.assets
+    val icons = remember(assets) {
+        assets.open("bridge/agent-icons.txt").bufferedReader().useLines { lines ->
+            lines.associate { line ->
+                val (name, palette, grid) = line.split(' ')
+                name to AgentIcon(
+                    palette.split(',').map { Color(0xFF000000L or it.toLong(16)) },
+                    grid.split('/'),
+                )
             }
         }
-        when (backend) {
-            "codex" -> {
-                val main = Color(0xFF3ED6A8)
-                val hi = Color(0xFF9DF7DC)
-                val core = Color(0xFF102A22)
-                drawGrid(
-                    arrayOf(
-                        "..#####..",
-                        ".##...##.",
-                        "##.###.##",
-                        "#.#...#.#",
-                        "#.#.*.#.#",
-                        "#.#...#.#",
-                        "##.###.##",
-                        ".##...##.",
-                        "..#####..",
-                    )
-                ) { ch ->
-                    when (ch) {
-                        '#' -> main
-                        '*' -> hi
-                        '.' -> if (active) core.copy(alpha = 0.0f) else null
-                        else -> null
-                    }
-                }
-            }
-            "agy" -> {
-                drawGrid(
-                    arrayOf(
-                        "....1....",
-                        "....2....",
-                        "..3.2.4..",
-                        "...354...",
-                        "125***671",
-                        "...896...",
-                        "..8.9.7..",
-                        "....9....",
-                        "....1....",
-                    )
-                ) { ch ->
-                    when (ch) {
-                        '*' -> Color.White
-                        '1' -> Color(0xFFFF6B8B)
-                        '2' -> Color(0xFFFFA94D)
-                        '3' -> Color(0xFFFFE066)
-                        '4' -> Color(0xFF69DB7C)
-                        '5' -> Color(0xFF38D9A9)
-                        '6' -> Color(0xFF4DABF7)
-                        '7' -> Color(0xFF9775FA)
-                        '8' -> Color(0xFFDA77F2)
-                        '9' -> Color(0xFFF783AC)
-                        else -> null
-                    }
-                }
-            }
-            "api" -> {
-                val main = Color(0xFF5EA8FF)
-                val hi = Color(0xFFC7E2FF)
-                drawGrid(
-                    arrayOf(
-                        ".#.#.#.#.",
-                        "..#####..",
-                        "###***###",
-                        "..#*#*#..",
-                        "###***###",
-                        "..#####..",
-                        ".#.#.#.#.",
-                    )
-                ) { ch ->
-                    when (ch) {
-                        '#' -> main
-                        '*' -> hi
-                        else -> null
-                    }
-                }
-            }
-            else -> {
-                val body = Color(0xFFDF7C52)
-                val shade = Color(0xFFC15F38)
-                val hi = Color(0xFFF6A57F)
-                val eye = Color(0xFF161210)
-                val legsA = if (active) "..#..#.#..#." else "..#.#...#.#."
-                val legsB = if (active) ".#....#....#" else "..#.#...#.#."
-                drawGrid(
-                    arrayOf(
-                        "..########..",
-                        ".##########.",
-                        "###E####E###",
-                        "###E####E###",
-                        "############",
-                        ".##########.",
-                        "..########..",
-                        legsA,
-                        legsB,
-                    )
-                ) { ch ->
-                    when (ch) {
-                        '#' -> body
-                        'E' -> eye
-                        '+' -> hi
-                        '-' -> shade
-                        else -> null
-                    }
+    }
+    val icon = icons[backend] ?: icons.getValue("claude")
+    Canvas(modifier.size(size)) {
+        val scale = minOf(this.size.width, this.size.height) / icon.rows.size
+        val cell = if (scale >= 1f) kotlin.math.floor(scale) else scale
+        val x = kotlin.math.round((this.size.width - cell * icon.rows.size) / 2)
+        val y = kotlin.math.round((this.size.height - cell * icon.rows.size) / 2)
+        icon.rows.forEachIndexed { row, pixels ->
+            pixels.forEachIndexed { col, pixel ->
+                pixel.digitToIntOrNull()?.let { index ->
+                    drawRect(icon.colors[index], Offset(x + col * cell, y + row * cell), Size(cell, cell))
                 }
             }
         }
@@ -721,7 +623,7 @@ fun BackendBadge(backend: String, compact: Boolean = false, showDot: Boolean = f
         horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         if (showDot) {
-            PixelMascot(backend, active = false, size = if (compact) 12.dp else 14.dp)
+            PixelMascot(backend, size = if (compact) 12.dp else 14.dp)
         }
         Label(label, if (compact) 10.5.sp else 11.5.sp, tone, FontWeight.SemiBold, maxLines = 1)
     }
@@ -2393,7 +2295,7 @@ fun AssistantText(
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                PixelMascot(effectiveBackend, active = streaming, size = 14.dp)
+                PixelMascot(effectiveBackend, size = 14.dp)
                 Label(whoTitle, 11.5.sp, engineTone, FontWeight.SemiBold, maxLines = 1)
             }
             if (attr != null && attr.toWhom.isNotEmpty()) {
@@ -2908,7 +2810,7 @@ fun AgentTelemetryPod(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            PixelMascot(backend, active = true, size = 28.dp)
+            PixelMascot(backend, size = 28.dp)
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Label(engineSignatureTitle(backend), 11.sp, engineTone, FontWeight.Bold, maxLines = 1)
@@ -3273,7 +3175,7 @@ fun Composer(vm: RelayViewModel, chat: Chat, onOpenAgents: () -> Unit = {}) {
                 }
             }
 
-            // Persistent Little Claude ("Клодёнок") in Composer — tap to open `/` commands
+            // Tap the active engine icon to open slash commands.
             Box(
                 Modifier
                     .size(30.dp)
@@ -3283,7 +3185,7 @@ fun Composer(vm: RelayViewModel, chat: Chat, onOpenAgents: () -> Unit = {}) {
                     },
                 contentAlignment = Alignment.Center,
             ) {
-                PixelMascot("claude", active = busy, size = 21.dp)
+                PixelMascot(activeBackend, size = 21.dp)
             }
 
             val ready = (chat.draft.isNotBlank() || chat.picked.isNotEmpty()) && (vm.canSend(chat) || chat.draft.trim().startsWith("/"))

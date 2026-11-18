@@ -135,6 +135,43 @@ class CodexEngineTests(unittest.TestCase):
         )
         self.addCleanup(self.host.close)
 
+    def test_switch_to_existing_codex_thread_sends_visible_relay_history_in_actual_turn(self):
+        sid = str(uuid.uuid4())
+        native = "11111111-2222-4333-8444-555555555555"
+        path = self.root / ".claude/projects/test" / (sid + ".jsonl")
+        path.parent.mkdir(parents=True)
+        question = "Исправь редактор ролей"
+        report = "Работа на сайте завершена. " + "детали " * 350 + "Маршрут /moderation/roles проверен."
+        rows = [
+            {"type": "user", "uuid": "a", "cwd": str(self.project), "message": {"role": "user", "content": question}},
+            {"type": "progress", "uuid": "progress", "parentUuid": "a"},
+            {"type": "assistant", "uuid": "b", "parentUuid": "progress", "message": {"role": "assistant", "content": report}},
+            {"type": "assistant", "uuid": "discarded", "parentUuid": "a", "message": {"role": "assistant", "content": "Abandoned branch"}},
+            {"type": "assistant", "uuid": "c", "parentUuid": "b", "codexThreadId": native,
+             "relayBackend": "codex", "message": {"role": "assistant", "content": "Привет"}},
+        ]
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        self.host.codex["has_native_session"] = lambda ident: ident == native
+        request = {"op": "prompt", "backend": "codex", "sid": sid, "cwd": str(self.project), "text": "Сделано тут было?"}
+        self.host.dispatch(request)
+        result, _ = self.wait_for(lambda e: e.get("type") == "claude" and e["data"].get("type") == "result")
+        self.assertFalse(result["data"]["is_error"])
+        calls = [json.loads(line) for line in self.rpc_log.read_text().splitlines()]
+        self.assertEqual(next(m for m in calls if m.get("method") == "thread/resume")["params"]["threadId"], native)
+        sent = next(m for m in calls if m.get("method") == "turn/start")["params"]["input"][0]["text"]
+        self.assertIn(question, sent)
+        self.assertIn(report, sent)
+        self.assertNotIn("Abandoned branch", sent)
+        self.assertTrue(sent.endswith(request["text"]))
+        self.assertIn(request["text"], [m["text"] for m in self.host.transcripts.history(sid) if m["role"] == "user"])
+        # Reopening a synced native thread must not resend the handoff.
+        self.host.runs.pop(sid).close()
+        request["text"] = "Продолжай"
+        self.host.dispatch(request)
+        self.wait_for(lambda e: e.get("type") == "claude" and e["data"].get("type") == "result")
+        calls = [json.loads(line) for line in self.rpc_log.read_text().splitlines()]
+        self.assertEqual([m for m in calls if m.get("method") == "turn/start"][-1]["params"]["input"][0]["text"], "Продолжай")
+
     def wait_for(self, predicate, timeout=6.0):
         end = time.monotonic() + timeout
         seen = []

@@ -13,3 +13,4 @@ pub mod uploads;
 pub mod auth_browser;
 #[cfg(feature = "desktop")]
 pub mod images;
+pub mod agent_icons;

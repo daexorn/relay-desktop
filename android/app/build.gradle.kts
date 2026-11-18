@@ -12,8 +12,8 @@ android {
         applicationId = "dev.relay.mobile"
         minSdk = 26
         targetSdk = 35
-        versionCode = 20
-        versionName = "0.6.0"
+        versionCode = 21
+        versionName = "0.6.1"
     }
     buildTypes {
         release {
@@ -43,6 +43,7 @@ val copyBridge by tasks.registering(Copy::class) {
             "codex_engine.py", "agy_engine.py", "agent_installer.py",
         )
     }
+    from(rootProject.file("../assets/agent-icons.txt"))
     into(layout.buildDirectory.dir("generated/bridge/bridge"))
 }
 tasks.named("preBuild") { dependsOn(copyBridge) }

@@ -128,19 +128,9 @@ class ApiRun:
 
     def chain(self):
         if not self.path.exists():return []
-        nodes=collections.OrderedDict();parents={}
-        # Same branch traversal as the desktop history, retaining original image/tool blocks.
-        for row in self.owner.api_records(self.path):
-            if row.get('isSidechain') or not row.get('uuid'):continue
-            parents[row['uuid']]=row.get('parentUuid')
-            if row.get('type') in ('user','assistant') and isinstance(row.get('message'),dict):nodes[row['uuid']]=row
-        result=[];seen=set();key=next(reversed(nodes),None)
-        self.parent=key
-        while key and key not in seen and key in parents:
-            seen.add(key)
-            if key in nodes:result.append(nodes[key])
-            key=parents[key]
-        return list(reversed(result)) or list(nodes.values())
+        rows = primary_chain(self.owner.api_records(self.path))
+        self.parent = rows[-1].get('uuid') if rows else None
+        return [r for r in rows if isinstance(r.get('message'), dict)]
 
     def append(self,role,content,partial=False):
         ident=str(uuid.uuid4())
@@ -189,6 +179,7 @@ class ApiRun:
                 for ident in sorted(pending_calls):result.append({'role':'tool','tool_call_id':ident,'content':'The previous tool was interrupted; check actual state before retrying.'})
                 pending_calls.clear();flush_images()
                 entry={'role':role if role in ('user','assistant') else 'user','content':'\n'.join(text)}
+                if role=='user':entry['content']=without_relay_context(entry['content'])
                 if pictures:entry['content']=([{'type':'text','text':entry['content']}] if entry['content'] else [])+pictures
                 if calls and entry['role']=='assistant':entry['tool_calls']=calls;pending_calls.update(c['id'] for c in calls)
                 result.append(entry)

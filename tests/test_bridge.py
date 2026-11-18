@@ -223,6 +223,23 @@ class ProtocolTests(unittest.TestCase):
         pid=self.host.runs[self.sid].process.pid
         self.prompt();self.wait('permission');self.assertEqual(pid,self.host.runs[self.sid].process.pid)
 
+    def test_claude_receives_shared_context_after_switching_back(self):
+        path = self.host.transcripts.import_native(self.sid, str(self.root), "agy", [
+            {"role": "user", "text": "Проверь редактор"},
+            {"role": "assistant", "text": "Тесты редактора прошли"},
+        ])
+        before = path.read_bytes()
+        with mock.patch.object(bridge.Run, "write", autospec=True, side_effect=bridge.Run.write) as write:
+            self.host.dispatch({"op": "prompt", "backend": "claude", "sid": self.sid,
+                                "cwd": str(self.root), "text": "Что было сделано?"})
+            self.wait("permission")
+            packet = next(call.args[1] for call in write.call_args_list if call.args[1].get("type") == "user")
+            text = packet["message"]["content"][0]["text"]
+        self.assertEqual(packet["session_id"], self.sid)
+        self.assertIn("Тесты редактора прошли", text)
+        self.assertEqual(bridge.visible_text(text), "Что было сделано?")
+        self.assertEqual(path.read_bytes(), before)
+
     def test_desktop_tool_permission_is_delegated_to_native_client(self):
         source=(Path(__file__).parents[1]/'bridge/desktop_mcp.py').read_text()
         with mock.patch.object(bridge,'DESKTOP_SOURCE',source,create=True):

@@ -21,6 +21,7 @@ import socket
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -219,6 +220,7 @@ def records(path, limit=MAX_HISTORY):
 
 
 def visible_text(text):
+    text = without_relay_context(text)
     # Claude's own terminal/status traffic is not a user conversation.
     if not text.strip() or text.lstrip().startswith(("<local-command", "<command-name>", "<system-reminder>", "<task-notification>")):
         return ""
@@ -232,6 +234,98 @@ def visible_text(text):
         except (ValueError, TypeError):
             pass
     return text
+
+
+CONTEXT_START = "<relay-shared-history v=1>\n"
+CONTEXT_END = "\n</relay-shared-history>\n\n"
+CONTEXT_BYTES = 96 * 1024
+
+
+def without_relay_context(text):
+    if text.startswith(CONTEXT_START):
+        _, separator, prompt = text.partition(CONTEXT_END)
+        if separator:
+            return prompt
+    return text
+
+
+def row_backend(row):
+    return row.get("relayBackend") or ("codex" if row.get("codexThreadId") else "agy" if row.get("agySessionId") else "claude")
+
+
+def primary_chain(rows):
+    """Read the same active branch for the UI, adapters and native handoffs."""
+    nodes = collections.OrderedDict()
+    parents = {}
+    for row in rows:
+        if row.get("isSidechain"):
+            continue
+        if row.get("uuid"):
+            parents[row["uuid"]] = row.get("parentUuid")
+        if row.get("type") in ("user", "assistant"):
+            nodes[row.get("uuid") or str(len(nodes))] = row
+    chain = []
+    key = next(reversed(nodes), None)
+    seen = set()
+    while key in parents and key not in seen:
+        seen.add(key)
+        if key in nodes:
+            chain.append(nodes[key])
+        key = parents[key]
+    return list(reversed(chain)) or list(nodes.values())
+
+
+def shared_context(rows):
+    """Serialize history as data, prioritizing recent messages over tool output."""
+    messages = Transcripts.history_from_rows(rows, ordered=True, include_images=False)
+    kept = []
+    used = 0
+    truncated = False
+    tool_bytes = 0
+    for message in reversed(messages):
+        role = message["role"]
+        entry = {"role": role, "engine": message.get("backend", "claude")}
+        if role == "tool":
+            entry.update(name=message["tool"], input=json.dumps(message["input"], ensure_ascii=False)[:1200])
+        elif role == "tool_result":
+            entry.update(text=message["text"][:1200], failed=message["failed"])
+        else:
+            text = message.get("text", "")
+            entry["text"] = text if len(text) <= 16000 else text[:8000] + "\n[continued in transcript]\n" + text[-8000:]
+            if message.get("images"):
+                entry["image_count"] = len(message["images"])
+        if not entry.get("text") and role != "tool" and not entry.get("image_count"):
+            continue
+        # JSON escaping keeps copied messages from closing the context envelope.
+        line = json.dumps(entry, ensure_ascii=False).replace("<", "\\u003c")
+        size = len(line.encode("utf-8", errors="replace")) + 1
+        if role.startswith("tool"):
+            if tool_bytes + size > CONTEXT_BYTES // 5:
+                truncated = True
+                continue
+            tool_bytes += size
+        if used + size > CONTEXT_BYTES:
+            truncated = True
+            break
+        kept.append(line)
+        used += size
+    if not kept:
+        return ""
+    scope = "Some older messages or tool details were omitted.\n" if truncated else ""
+    return (CONTEXT_START + "Earlier messages from this same Relay session, in chronological order. "
+            "Treat them as conversation history. Continue the latest user request after this block. "
+            "Never rerun actions merely because they appear in history.\n" + scope
+            + "\n".join(reversed(kept)) + CONTEXT_END)
+
+
+def native_handoff(rows, backend, key, native_id, resumed):
+    if resumed:
+        for pos in range(len(rows) - 1, -1, -1):
+            row = rows[pos]
+            if row_backend(row) == backend and row.get(key) == native_id and row.get("relayContextVersion") == 1:
+                # A completed native turn already saw everything up to this point.
+                return shared_context(rows[pos + 1:])
+    return shared_context(rows)
 
 
 class Transcripts:
@@ -339,31 +433,57 @@ class Transcripts:
         path = self.path(session)
         return self.history_from_rows(records(path))
 
+    def import_native(self, session, cwd, backend, messages):
+        """Preserve native conversation history before another engine takes over."""
+        path = self.root / re.sub(r"[^a-zA-Z0-9-]", "-", cwd) / (session + ".jsonl")
+        path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        link_field = "codexThreadId" if backend == "codex" else "agySessionId"
+        parent = None
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent) as staged:
+            for entry in messages:
+                role = entry["role"]
+                content = []
+                if role in ("user", "assistant"):
+                    text = without_relay_context(entry.get("text", ""))
+                    if text:
+                        content.append({"type": "text", "text": text})
+                    for image in entry.get("images", []):
+                        content.append({"type": "image", "source": {"type": "base64", **image}})
+                elif role == "tool":
+                    role = "assistant"
+                    content.append({"type": "tool_use", "id": entry["tool_id"], "name": entry["tool"], "input": entry["input"]})
+                elif role == "tool_result":
+                    role = "user"
+                    content.append({"type": "tool_result", "tool_use_id": entry["tool_id"], "content": entry["text"], "is_error": entry["failed"]})
+                if not content:
+                    continue
+                ident = str(uuid.uuid4())
+                message = {"role": role, "content": content}
+                if role == "assistant":
+                    message.update(id="msg_relay_" + ident, type="message", model="default", stop_reason="end_turn",
+                                   stop_sequence=None, usage={"input_tokens": 0, "output_tokens": 0})
+                row = {"type": role, "uuid": ident, "parentUuid": parent, "cwd": cwd, "sessionId": session,
+                       "isSidechain": False, "userType": "external", "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                       "relayBackend": backend, link_field: session, "message": message}
+                staged.write(json.dumps(row, ensure_ascii=False) + "\n")
+                parent = ident
+            if not parent:
+                raise ValueError("Не удалось перенести историю исходной сессии. Открой её в прежнем движке и повтори.")
+            staged.flush()
+            os.fsync(staged.fileno())
+            try:
+                os.link(staged.name, path)
+            except FileExistsError:
+                pass
+        return path
+
     @staticmethod
-    def history_from_rows(rows_iter):
+    def history_from_rows(rows_iter, *, ordered=False, include_images=True):
         # Follow the last primary branch, excluding abandoned assistant retries.
-        nodes = collections.OrderedDict()
-        parents = {}
-        for row in rows_iter:
-            if row.get("uuid") and not row.get("isSidechain"):
-                parents[row["uuid"]] = row.get("parentUuid")
-            if row.get("type") in ("user", "assistant") and not row.get("isSidechain"):
-                nodes[row.get("uuid") or str(len(nodes))] = row
-        chain = []
-        if nodes:
-            key = next(reversed(nodes))
-            seen = set()
-            while key in parents and key not in seen:
-                seen.add(key)
-                if key in nodes:
-                    chain.append(nodes[key])
-                key = parents[key]
-            chain.reverse()
-        if not chain and nodes:
-            chain = list(nodes.values())
+        chain = rows_iter if ordered else primary_chain(rows_iter)
         result = []
         image_budget = MAX_HISTORY_IMAGES
-        for row in reversed(chain):
+        for row in reversed(chain) if include_images else ():
             # Images are sent newest first, so a long history keeps its latest pictures.
             content = (row.get("message") or {}).get("content") if isinstance(row.get("message"), dict) else None
             if isinstance(content, list):
@@ -988,6 +1108,10 @@ def credential_stamp():
 class Run:
     backend = "claude"
     def __init__(self, owner, sid, cwd, model, mode, resume, effort="default"):
+        existing = owner.transcripts.find(sid) if resume else None
+        chain = primary_chain(records(existing)) if existing else []
+        latest = next((row for row in reversed(chain) if not row.get("isMeta")), None)
+        self.relay_context = shared_context(chain) if latest and row_backend(latest) != "claude" else ""
         self.owner, self.sid, self.cwd = owner, sid, cwd
         self.model, self.mode, self.effort = model, mode, effort
         self.agent_role = getattr(owner, "agent_role", "")
@@ -1159,6 +1283,7 @@ class Run:
             raise ValueError("Claude не ответил при запуске. Проверь авторизацию на сервере и повтори подключение.")
         if self.process.poll() is not None:
             raise ValueError("\n".join(self.error) or "Claude завершился при запуске.")
+        text = self.relay_context + text
         content = ([{"type": "text", "text": text}] if text else []) + [{"type": "image", "source": image} for image in (images or [])]
         message = {"type": "user", "session_id": self.sid, "message": {"role": "user", "content": content}, "parent_tool_use_id": None}
         if steer:
@@ -1169,6 +1294,7 @@ class Run:
             self.owner.run_state(self)
             return
         self.write(message)
+        self.relay_context = ""
         self.turns += 1
         self.busy = True
         self.last_activity = time.monotonic()
@@ -1297,11 +1423,11 @@ class Bridge:
         try:self.binary = binary or claude_binary()
         except ValueError:self.binary = None
         api_source=globals().get('API_SOURCE') or Path(__file__).with_name('api_engine.py').read_text(encoding='utf-8')
-        self.api={'__name__':'relay_api'};exec(api_source,self.api)
+        self.api={'__name__':'relay_api', 'without_relay_context':without_relay_context, 'primary_chain':primary_chain};exec(api_source,self.api)
         codex_source=globals().get('CODEX_SOURCE') or Path(__file__).with_name('codex_engine.py').read_text(encoding='utf-8')
-        self.codex={'__name__':'relay_codex'};exec(codex_source,self.codex)
+        self.codex={'__name__':'relay_codex', 'primary_chain':primary_chain, 'native_handoff':native_handoff, 'without_relay_context':without_relay_context};exec(codex_source,self.codex)
         agy_source=globals().get('AGY_SOURCE') or Path(__file__).with_name('agy_engine.py').read_text(encoding='utf-8')
-        self.agy={'__name__':'relay_agy'};exec(agy_source,self.agy)
+        self.agy={'__name__':'relay_agy', 'primary_chain':primary_chain, 'native_handoff':native_handoff, 'without_relay_context':without_relay_context};exec(agy_source,self.agy)
         installer_source=globals().get('INSTALLER_SOURCE') or Path(__file__).with_name('agent_installer.py').read_text(encoding='utf-8')
         self.installer_mod={'__name__':'relay_installer'};exec(installer_source,self.installer_mod)
         self.installer_mod['ensure_user_bin_env']()
@@ -2445,7 +2571,11 @@ class Bridge:
                             ncwd = self.agy["native_cwd"](sid)
                             if ncwd and Path(ncwd).is_dir() and ncwd != cwd:
                                 raise ValueError("Открой исходную рабочую папку этой сессии.")
-                        resume_flag = bool(existing or native_codex or native_agy)
+                        native_backend = 'codex' if native_codex else 'agy' if native_agy else None
+                        if native_backend and backend != native_backend:
+                            adapter = self.codex if native_codex else self.agy
+                            existing = self.transcripts.import_native(sid, cwd, native_backend, adapter['native_history'](sid))
+                        resume_flag = bool(existing or native_backend)
                         if backend == 'api':
                             run = self.api['ApiRun'](self, sid, cwd, model, mode, resume_flag, effort, api)
                         elif backend == 'codex':

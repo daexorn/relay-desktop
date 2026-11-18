@@ -145,6 +145,25 @@ class AgyEngineTests(unittest.TestCase):
         )
         self.addCleanup(self.host.close)
 
+    def test_switch_from_native_codex_keeps_session_and_sends_history_to_agy(self):
+        sid = str(uuid.uuid4())
+        self.host.codex["has_native_session"] = lambda ident: ident == sid
+        self.host.codex["native_cwd"] = lambda ident: str(self.project)
+        self.host.codex["native_history"] = lambda ident: [
+            {"role": "user", "text": "Проверь сайт"},
+            {"role": "assistant", "text": "Редактор ролей проверен, все маршруты доступны."},
+        ]
+        self.host.dispatch({"op": "prompt", "sid": sid, "cwd": str(self.project), "backend": "agy", "text": "Что было сделано?"})
+        result, _ = self.wait_for(lambda e: e.get("type") == "claude" and e["data"].get("type") == "result")
+        self.assertFalse(result["data"]["is_error"])
+        self.assertEqual(result["sid"], sid)
+        calls = [json.loads(line) for line in self.rpc_log.read_text().splitlines()]
+        sent = next(m for m in calls if m.get("method") == "session/prompt")["params"]["prompt"][0]["text"]
+        self.assertIn("Редактор ролей проверен, все маршруты доступны.", sent)
+        self.assertTrue(sent.endswith("Что было сделано?"))
+        messages = self.host.transcripts.history(sid)
+        self.assertEqual([m["text"] for m in messages if m["role"] == "user"], ["Проверь сайт", "Что было сделано?"])
+
     def wait_for(self, predicate, timeout=6.0):
         end = time.monotonic() + timeout
         seen = []

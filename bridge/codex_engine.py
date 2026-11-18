@@ -351,7 +351,7 @@ def _item_to_messages(item):
                 texts.append(str(part["text"]))
             elif part.get("type") in ("image", "localImage"):
                 images.append({"media_type": "image/png", "data": ""})
-        txt = "\n".join(texts).strip()
+        txt = without_relay_context("\n".join(texts)).strip()
         if not txt and not images:
             return []
         msg = {"role": "user", "text": txt, "uuid": ident, "backend": "codex"}
@@ -454,6 +454,8 @@ def native_history(sid):
                                 ).strip()
                             else:
                                 text = str(content).strip()
+                            if role == "user":
+                                text = without_relay_context(text)
                             if text:
                                 messages.append({"role": role, "text": text, "uuid": str(row.get("id") or len(messages))})
             except OSError:
@@ -565,34 +567,19 @@ class CodexRun:
         threading.Thread(target=self._worker, daemon=True).start()
 
     def _inspect_shared_transcript(self, resume):
-        if self.path.exists():
-            rows = list(self.owner.api_records(self.path))
-            for row in rows:
-                if row.get("uuid") and not row.get("isSidechain"):
-                    self.parent = row["uuid"]
-                if isinstance(row.get("codexThreadId"), str):
-                    self.linked_thread_id = row["codexThreadId"]
-            # If switching into Codex from prior Claude/AGY/API messages, prepare a compact handoff
-            tail = []
-            for row in rows[-16:]:
-                if row.get("codexThreadId"):
-                    tail.clear()
-                    continue
-                msg = row.get("message") if isinstance(row.get("message"), dict) else {}
-                role = msg.get("role", row.get("type"))
-                if role in ("user", "assistant"):
-                    content = msg.get("content", "")
-                    txt = content if isinstance(content, str) else "\n".join(
-                        str(b.get("text") or "") for b in content if isinstance(b, dict) and b.get("type") == "text"
-                    )
-                    if txt.strip():
-                        tail.append(f"{role.upper()}: {txt.strip()[:1500]}")
-            if tail:
-                self.prior_handoff = "\n\nPrevious conversation context in this Relay session:\n" + "\n\n".join(tail[-8:])
+        self.shared_rows = primary_chain(self.owner.api_records(self.path)) if self.path.exists() else []
+        if self.shared_rows:
+            self.parent = self.shared_rows[-1].get("uuid")
+            self.linked_thread_id = next((row["codexThreadId"] for row in reversed(self.shared_rows)
+                                          if isinstance(row.get("codexThreadId"), str)), None)
         elif resume and has_native_session(self.sid):
             self.linked_thread_id = self.sid
 
-    def _append_shared(self, role, content):
+    def _load_relay_context(self, resumed):
+        self.prior_handoff = native_handoff(self.shared_rows, self.backend, "codexThreadId", self.thread_id, resumed)
+        self.shared_rows = []
+
+    def _append_shared(self, role, content, context_complete=False):
         ident = str(uuid.uuid4())
         message = {"role": role, "content": content}
         if role == "assistant":
@@ -623,6 +610,8 @@ class CodexRun:
         }
         if self.thread_id:
             row["codexThreadId"] = self.thread_id
+        if context_complete:
+            row["relayContextVersion"] = 1
         try:
             with self.path.open("a", encoding="utf-8") as f:
                 fcntl.flock(f, fcntl.LOCK_EX)
@@ -681,8 +670,6 @@ class CodexRun:
                 prompt += " Relay desktop tools operate on the user's computer. Local context: " + self.desktop_context
         if self.custom_prompt:
             prompt += "\n\nUser's custom instructions:\n" + self.custom_prompt
-        if self.prior_handoff:
-            prompt += self.prior_handoff
         return servers, prompt[:110000]
 
     def _emit(self, data):
@@ -966,6 +953,7 @@ class CodexRun:
                 params["config"] = cfg
             res = self._rpc("thread/resume", params, timeout=30)
             self.thread_id = (res.get("thread") or {}).get("id") or self.linked_thread_id
+            self._load_relay_context(resumed=True)
         else:
             params = {
                 "cwd": self.cwd,
@@ -982,6 +970,7 @@ class CodexRun:
             if not self.thread_id:
                 raise ValueError("Codex не создал сессию. Проверь вход в Codex на сервере.")
             self.linked_thread_id = self.thread_id
+            self._load_relay_context(resumed=False)
 
     @staticmethod
     def _build_inputs(text, images):
@@ -1048,7 +1037,7 @@ class CodexRun:
                 turn_params = {
                     "threadId": self.thread_id,
                     "cwd": self.cwd,
-                    "input": self._build_inputs(text, images),
+                    "input": self._build_inputs(self.prior_handoff + text, images),
                     "approvalPolicy": approval,
                     "sandboxPolicy": sandbox_policy,
                 }
@@ -1067,8 +1056,10 @@ class CodexRun:
                 if self.turn_error:
                     error = self.turn_error
                 if mirror:
-                    for role, blocks in self.turn_blocks:
-                        self._append_shared(role, blocks)
+                    for i, (role, blocks) in enumerate(self.turn_blocks):
+                        self._append_shared(role, blocks, context_complete=not error and i == len(self.turn_blocks) - 1)
+                if not error:
+                    self.prior_handoff = ""
             except Exception as exc:
                 error = clean_error(exc)
 
