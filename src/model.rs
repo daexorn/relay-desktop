@@ -409,9 +409,9 @@ fn default_true() -> bool {
     true
 }
 
-/// Shared 24-theme catalog across Desktop GUI and Relay TUI:
+/// Shared 40-theme catalog across Desktop GUI, Relay TUI, and Android (30 dark + 10 light):
 /// `(id, label, is_light, [base, side, rail, surface, line, text, muted, accent])`.
-pub const THEME_SPECS: [(&str, &str, bool, [u32; 8]); 24] = [
+pub const THEME_SPECS: [(&str, &str, bool, [u32; 8]); 40] = [
     ("graphite", "Графит", false, [0x10141a, 0x151b23, 0x0c1016, 0x1b242e, 0x2a3643, 0xe6edf3, 0x8d9cab, 0x83c4b3]),
     ("midnight", "Полночь", false, [0x0f1520, 0x141d2b, 0x0b111b, 0x1b2739, 0x2b3b52, 0xe5edf9, 0x95a5bd, 0x89aef1]),
     ("obsidian", "Обсидиан", false, [0x0d0f12, 0x12151a, 0x090b0e, 0x191d24, 0x2a303b, 0xedeff2, 0x9098a6, 0xe5b567]),
@@ -430,12 +430,28 @@ pub const THEME_SPECS: [(&str, &str, bool, [u32; 8]); 24] = [
     ("rose", "Роза", false, [0x1e1619, 0x181114, 0x130d10, 0x2c2024, 0x402e34, 0xf6e8ec, 0xb79aa3, 0xf28ba8]),
     ("dracula", "Дракула", false, [0x282a36, 0x21222c, 0x1b1c24, 0x343746, 0x44475a, 0xf8f8f2, 0xa4a9c6, 0xbd93f9]),
     ("oled", "OLED", false, [0x000000, 0x050506, 0x000000, 0x121214, 0x232327, 0xf2f2f4, 0x8a8a93, 0xa78bfa]),
+    ("monokai", "Монокай", false, [0x1e1f1c, 0x181916, 0x131411, 0x2b2c27, 0x3e4038, 0xf8f8f2, 0xa6a28c, 0xa6e22e]),
+    ("ayu", "Аю Мираж", false, [0x1f2430, 0x191e2a, 0x141822, 0x272d3d, 0x384157, 0xcbccc6, 0x8a9199, 0xffcc66]),
+    ("synthwave", "Синтвейв", false, [0x1a1426, 0x140f1e, 0x0f0b17, 0x261d38, 0x3b2d56, 0xfdf4ff, 0xb59ec9, 0xff5ec4]),
+    ("cobalt", "Кобальт", false, [0x122338, 0x0e1c2d, 0x0a1522, 0x1a314d, 0x28476e, 0xeaf2fb, 0x8fb0d4, 0xffc600]),
+    ("matrix", "Матрица", false, [0x080f0a, 0x060b07, 0x040805, 0x101f14, 0x1d3824, 0xd8f8df, 0x6ea87c, 0x39ff88]),
+    ("vesper", "Веспер", false, [0x101010, 0x0c0c0c, 0x080808, 0x1b1b1b, 0x2c2c2c, 0xf5f5f5, 0x999999, 0xffc799]),
+    ("poimandres", "Поймандрес", false, [0x1b1e28, 0x161922, 0x11141c, 0x252937, 0x353b4f, 0xe4f0fb, 0x8695b7, 0x5de4c7]),
+    ("horizon", "Горизонт", false, [0x1c1e26, 0x16181f, 0x111319, 0x282a36, 0x3b3e4f, 0xe9ecf2, 0x9da3b4, 0xe95678]),
+    ("zenburn", "Зенбёрн", false, [0x2b2b2b, 0x242424, 0x1d1d1d, 0x383838, 0x4b4b4b, 0xdcdccc, 0x9f9f91, 0x8cd0d3]),
+    ("sakura_night", "Ночная сакура", false, [0x18131d, 0x130f17, 0x0e0b12, 0x241c2c, 0x382b44, 0xf7ebf4, 0xb29ab0, 0xff85b3]),
+    ("arctic_void", "Космос", false, [0x090d16, 0x070a12, 0x05070d, 0x12192b, 0x212d4a, 0xeaf0ff, 0x8697bd, 0x7aa2f7]),
+    ("copper", "Медь", false, [0x191412, 0x14100e, 0x0f0c0a, 0x261e1a, 0x3b2f29, 0xf4ebe6, 0xad998f, 0xe08b58]),
     ("paper", "Бумага", true, [0xfcfcfb, 0xf5f4f2, 0xedece9, 0xffffff, 0xe4e2de, 0x1e1e21, 0x78777e, 0x4a6fe3]),
     ("sand", "Песок", true, [0xfbf7f0, 0xf4eee3, 0xece4d6, 0xfffdf9, 0xe3d8c6, 0x2b241c, 0x857865, 0xc2703d]),
     ("mint", "Мята", true, [0xf6fbf8, 0xedf6f1, 0xe2efe8, 0xffffff, 0xd5e7dc, 0x17261e, 0x6c8478, 0x2f9e77]),
     ("latte", "Латте", true, [0xeff1f5, 0xe6e9ef, 0xdce0e8, 0xffffff, 0xccd0da, 0x2c2f3f, 0x6c6f85, 0x1e66f5]),
     ("solarized", "Солярис", true, [0xfdf6e3, 0xf4ecd8, 0xeee8d5, 0xfffbf0, 0xded6c1, 0x37474f, 0x657b83, 0x2aa198]),
     ("frost", "Иней", true, [0xf4f7fb, 0xeaf0f7, 0xdfe8f2, 0xffffff, 0xcfdbe8, 0x172133, 0x62728a, 0x2563eb]),
+    ("lavender", "Лаванда", true, [0xf8f6fc, 0xf0ecf8, 0xe6e0f2, 0xffffff, 0xd8cfeb, 0x231d30, 0x6f6486, 0x7c3aed]),
+    ("peach", "Персик", true, [0xfdf8f5, 0xf7eee8, 0xefe3db, 0xffffff, 0xe6d4c8, 0x2d211b, 0x826c60, 0xd96b43]),
+    ("sage", "Шалфей", true, [0xf5f8f4, 0xebf1e9, 0xe0e8dd, 0xffffff, 0xcfdcd0, 0x1c261e, 0x637867, 0x3b875e]),
+    ("sky_day", "Облака", true, [0xf5f9fd, 0xebf2f9, 0xdfeaf5, 0xffffff, 0xcbdced, 0x162434, 0x5e768f, 0x0284c7]),
 ];
 
 pub fn theme_spec(name: &str) -> &'static (&'static str, &'static str, bool, [u32; 8]) {
@@ -528,6 +544,339 @@ pub struct Message {
     /// server left it out to keep the history small.
     #[serde(default)]
     pub images: Vec<Value>,
+    #[serde(default)]
+    pub backend: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub actor: String,
+    #[serde(default)]
+    pub mode: String,
+    #[serde(default)]
+    pub effort: String,
+    #[serde(default)]
+    pub steer: bool,
+    #[serde(default)]
+    pub agent_name: String,
+}
+
+pub fn builtin_slash_commands() -> Vec<CommandInfo> {
+    [
+        ("usage", "Лимиты подписки Claude, таймеры сброса и токены", ""),
+        ("cost", "Статистика токенов и вызовов инструментов сессии", ""),
+        ("status", "Состояние сервера, CLI-агентов и текущей сессии", ""),
+        ("clear", "Начать новую чистую сессию в текущей папке", ""),
+        ("compact", "Сжать длинный контекст разговора", ""),
+        ("backend", "Переключить агента: claude, codex, agy, api", "claude|codex|agy|api"),
+        ("model", "Переключить модель активного агента", "<модель>"),
+        ("mode", "Режим разрешений: auto, manual, edits, plan", "auto|manual|edits|plan"),
+        ("effort", "Глубина рассуждений: auto, low, medium, high, max", "auto|low|medium|high|max"),
+        ("lock", "Установить пароль или заблокировать сессию", ""),
+        ("folder", "Открыть окно управления папками сессий", ""),
+        ("radar", "Открыть живой радар агентов на сервере", ""),
+        ("theme", "Открыть выбор из 40 тем оформления", "[тема]"),
+        ("login", "Авторизовать агента через серверный браузер", "[claude|codex|agy]"),
+        ("install", "Установить или обновить CLI на сервере", "[claude|codex|agy|all]"),
+        ("stop", "Остановить текущий ответ агента", ""),
+        ("help", "Показать список всех быстрых команд Relay", ""),
+    ]
+    .into_iter()
+    .map(|(name, desc, hint)| CommandInfo {
+        name: name.into(),
+        description: desc.into(),
+        hint: hint.into(),
+    })
+    .collect()
+}
+
+pub fn pretty_model_name(raw: &str) -> String {
+    let s = raw.trim();
+    if s.is_empty() || s.eq_ignore_ascii_case("default") {
+        return String::new();
+    }
+    let low = s.trim_start_matches("models/").to_ascii_lowercase();
+    if low == "opus" {
+        return "Opus".into();
+    }
+    if low == "sonnet" {
+        return "Sonnet".into();
+    }
+    if low == "haiku" {
+        return "Haiku".into();
+    }
+    if low.starts_with("claude-opus-4-7") {
+        return "Opus 4.7".into();
+    }
+    if low.starts_with("claude-opus-4-6") {
+        return "Opus 4.6".into();
+    }
+    if low.starts_with("claude-opus-4-5") {
+        return "Opus 4.5".into();
+    }
+    if low.starts_with("claude-sonnet-4-6") {
+        return "Sonnet 4.6".into();
+    }
+    if low.starts_with("claude-sonnet-4-5") {
+        return "Sonnet 4.5".into();
+    }
+    if low.starts_with("claude-haiku-4-5") {
+        return "Haiku 4.5".into();
+    }
+    if low == "gpt-5.4-mini" {
+        return "GPT-5.4 Mini".into();
+    }
+    if low == "gpt-5.4" {
+        return "GPT-5.4".into();
+    }
+    if low == "gpt-5.3-codex" {
+        return "GPT-5.3 Codex".into();
+    }
+    if low.starts_with("gemini-3.1-pro") {
+        return "Gemini 3.1 Pro".into();
+    }
+    if low.starts_with("gemini-3-flash") {
+        return "Gemini 3 Flash".into();
+    }
+    shorten(s.trim_start_matches("models/"), 26)
+}
+
+pub fn mode_short_label(mode: &str) -> &'static str {
+    match mode {
+        "auto" => "Авто",
+        "acceptEdits" => "Правки",
+        "plan" => "План",
+        "manual" => "Вручную",
+        _ => "",
+    }
+}
+
+pub fn effort_short_label(effort: &str) -> &'static str {
+    match effort {
+        "low" => "Быстро",
+        "medium" => "Средне",
+        "high" => "Глубоко",
+        "max" | "xhigh" => "Макс",
+        _ => "",
+    }
+}
+
+fn step_word_ru(n: usize) -> &'static str {
+    let m100 = n % 100;
+    let m10 = n % 10;
+    if (11..=14).contains(&m100) {
+        "шагов"
+    } else if m10 == 1 {
+        "шаг"
+    } else if (2..=4).contains(&m10) {
+        "шага"
+    } else {
+        "шагов"
+    }
+}
+
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct MessageAttribution {
+    pub backend: String,
+    pub who: String,
+    pub to_whom: String,
+    pub how: String,
+}
+
+/// Computes exact per-message correspondence (`кто -> кому · как`) across user and assistant turns
+/// so historical replies never get relabeled when switching the active composer backend.
+pub fn compute_attributions(
+    messages: &[Message],
+    fallback_backend: &str,
+    chat_busy: bool,
+) -> Vec<MessageAttribution> {
+    let default_b = if valid_backend(fallback_backend) {
+        fallback_backend
+    } else {
+        "claude"
+    };
+    let mut out = vec![MessageAttribution::default(); messages.len()];
+    let user_positions: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.role == "user")
+        .map(|(idx, _)| idx)
+        .collect();
+
+    for (u_pos, &u_idx) in user_positions.iter().enumerate() {
+        let next_u = user_positions
+            .get(u_pos + 1)
+            .copied()
+            .unwrap_or(messages.len());
+        let umsg = &messages[u_idx];
+        let reply_b = (u_idx + 1..next_u).find_map(|k| {
+            let m = &messages[k];
+            ((m.role == "assistant" || m.role == "tool") && valid_backend(&m.backend))
+                .then(|| m.backend.as_str())
+        });
+        let turn_b = if valid_backend(&umsg.backend) {
+            umsg.backend.as_str()
+        } else if let Some(rb) = reply_b {
+            rb
+        } else {
+            default_b
+        };
+        let sender = if umsg.text.starts_with("<relay-cluster-results>") {
+            "Команда агентов".to_owned()
+        } else if !umsg.actor.trim().is_empty() {
+            umsg.actor.trim().to_owned()
+        } else {
+            "Вы".to_owned()
+        };
+        let target_agent = if !umsg.agent_name.trim().is_empty() {
+            format!("{} ({})", umsg.agent_name.trim(), backend_short_label(turn_b))
+        } else {
+            backend_label(turn_b).to_owned()
+        };
+        let has_reply_in_span = (u_idx + 1..next_u)
+            .any(|k| matches!(messages[k].role.as_str(), "assistant" | "tool"));
+        let mut u_how = Vec::new();
+        let u_mod = pretty_model_name(&umsg.model);
+        if !u_mod.is_empty() {
+            u_how.push(u_mod);
+        }
+        let u_mode = mode_short_label(&umsg.mode);
+        if !u_mode.is_empty() {
+            u_how.push(u_mode.into());
+        }
+        let u_eff = effort_short_label(&umsg.effort);
+        if !u_eff.is_empty() {
+            u_how.push(u_eff.into());
+        }
+        if umsg.steer {
+            u_how.push("по ходу ответа".into());
+        } else if !has_reply_in_span && u_pos + 1 < user_positions.len() {
+            u_how.push("без отдельного ответа".into());
+        } else if !has_reply_in_span && chat_busy && u_pos + 1 == user_positions.len() {
+            u_how.push("в работе".into());
+        }
+        out[u_idx] = MessageAttribution {
+            backend: turn_b.to_owned(),
+            who: sender.clone(),
+            to_whom: target_agent,
+            how: u_how.join(" · "),
+        };
+
+        let prompt_snippet = {
+            let first_line = umsg
+                .text
+                .lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty() && !l.starts_with('<'))
+                .unwrap_or("");
+            shorten(first_line, 26)
+        };
+        let mut tool_steps = 0usize;
+        for k in (u_idx + 1)..next_u {
+            let child = &messages[k];
+            if child.role == "tool" {
+                tool_steps += 1;
+                let tb = if valid_backend(&child.backend) {
+                    child.backend.as_str()
+                } else {
+                    turn_b
+                };
+                out[k].backend = tb.to_owned();
+            } else if child.role == "assistant" {
+                let ab = if valid_backend(&child.backend) {
+                    child.backend.as_str()
+                } else {
+                    turn_b
+                };
+                let who_label = if !child.agent_name.trim().is_empty() {
+                    format!("{} · {}", child.agent_name.trim(), backend_short_label(ab))
+                } else {
+                    backend_label(ab).to_owned()
+                };
+                let recipient_user = if !child.actor.trim().is_empty() {
+                    child.actor.trim()
+                } else if !umsg.actor.trim().is_empty() {
+                    umsg.actor.trim()
+                } else {
+                    ""
+                };
+                let to_whom = match (!recipient_user.is_empty(), !prompt_snippet.is_empty()) {
+                    (true, true) => format!("{recipient_user} · на «{prompt_snippet}»"),
+                    (true, false) => recipient_user.to_owned(),
+                    (false, true) => format!("на «{prompt_snippet}»"),
+                    (false, false) => String::new(),
+                };
+                let mut a_how = Vec::new();
+                let m_name = pretty_model_name(if !child.model.is_empty() {
+                    &child.model
+                } else {
+                    &umsg.model
+                });
+                if !m_name.is_empty() {
+                    a_how.push(m_name);
+                }
+                let m_mode = mode_short_label(if !child.mode.is_empty() {
+                    &child.mode
+                } else {
+                    &umsg.mode
+                });
+                if !m_mode.is_empty() {
+                    a_how.push(m_mode.into());
+                }
+                let m_eff = effort_short_label(if !child.effort.is_empty() {
+                    &child.effort
+                } else {
+                    &umsg.effort
+                });
+                if !m_eff.is_empty() {
+                    a_how.push(m_eff.into());
+                }
+                if tool_steps > 0 {
+                    a_how.push(format!("через {tool_steps} {}", step_word_ru(tool_steps)));
+                } else {
+                    a_how.push("прямой ответ".into());
+                }
+                out[k] = MessageAttribution {
+                    backend: ab.to_owned(),
+                    who: who_label,
+                    to_whom,
+                    how: a_how.join(" · "),
+                };
+            }
+        }
+    }
+
+    // Handle any orphan assistant messages before the first user message
+    if let Some(first_end) = user_positions.first().copied().or(Some(messages.len())) {
+        for k in 0..first_end {
+            if messages[k].role == "assistant" {
+                let ab = if valid_backend(&messages[k].backend) {
+                    messages[k].backend.as_str()
+                } else {
+                    default_b
+                };
+                let mut a_how = Vec::new();
+                let m_name = pretty_model_name(&messages[k].model);
+                if !m_name.is_empty() {
+                    a_how.push(m_name);
+                }
+                a_how.push("прямой ответ".into());
+                out[k] = MessageAttribution {
+                    backend: ab.to_owned(),
+                    who: backend_label(ab).to_owned(),
+                    to_whom: String::new(),
+                    how: a_how.join(" · "),
+                };
+            } else if messages[k].role == "tool" {
+                let tb = if valid_backend(&messages[k].backend) {
+                    messages[k].backend.as_str()
+                } else {
+                    default_b
+                };
+                out[k].backend = tb.to_owned();
+            }
+        }
+    }
+    out
 }
 
 #[derive(Clone)]

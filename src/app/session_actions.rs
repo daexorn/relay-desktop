@@ -21,6 +21,16 @@ pub(super) struct LockDialog {
     pub error: String,
 }
 
+pub(super) struct FolderDialog {
+    pub server: String,
+    pub name: String,
+    pub rename_folder_id: Option<String>,
+    /// `(sid, title, current_folder_id)` when moving or creating a folder for a specific session.
+    pub move_session: Option<(String, String, String)>,
+    pub focused_once: bool,
+    pub error: String,
+}
+
 impl Drop for LockDialog {
     fn drop(&mut self) {
         self.current_password.zeroize();
@@ -419,24 +429,49 @@ impl RelayApp {
                 );
                 if dialog.already_locked {
                     ui.add_space(12.);
+                    let half_w = ((ui.available_width() - 8.) * 0.5).max(120.);
                     ui.horizontal(|ui| {
-                        if design::chip(ui, "Сменить пароль", Icon::Key, p, !dialog.remove_mode)
-                            .clicked()
+                        ui.spacing_mut().item_spacing.x = 8.;
+                        if design::button(
+                            ui,
+                            "Сменить пароль",
+                            Some(Icon::Key),
+                            if !dialog.remove_mode { Kind::Primary } else { Kind::Secondary },
+                            p,
+                            Vec2::new(half_w, 32.),
+                        )
+                        .clicked()
                         {
                             dialog.remove_mode = false;
                             dialog.error.clear();
                         }
-                        if design::chip(ui, "Снять пароль", Icon::Unlock, p, dialog.remove_mode)
-                            .clicked()
+                        if design::button(
+                            ui,
+                            "Снять пароль",
+                            Some(Icon::Unlock),
+                            if dialog.remove_mode { Kind::Primary } else { Kind::Secondary },
+                            p,
+                            Vec2::new(half_w, 32.),
+                        )
+                        .clicked()
                         {
                             dialog.remove_mode = true;
                             dialog.error.clear();
                         }
-                        if design::chip(ui, "Заблокировать сейчас", Icon::Lock, p, false).clicked()
-                        {
-                            relock_now = true;
-                        }
                     });
+                    ui.add_space(6.);
+                    if design::button(
+                        ui,
+                        "Заблокировать сессию сейчас",
+                        Some(Icon::Lock),
+                        Kind::Secondary,
+                        p,
+                        Vec2::new(ui.available_width(), 32.),
+                    )
+                    .clicked()
+                    {
+                        relock_now = true;
+                    }
                     ui.add_space(12.);
                     label(ui, "Текущий пароль", 12., p.muted);
                     let r = design::field(
@@ -1174,6 +1209,214 @@ impl RelayApp {
             self.select_chat(sess);
         } else if close {
             self.radar_open = None;
+        }
+    }
+
+    pub(super) fn folder_modal(&mut self, ctx: &egui::Context, p: Palette, t: f32) {
+        let Some(mut dialog) = self.folder_dialog.take() else {
+            return;
+        };
+        let folders = self
+            .remote
+            .get(&dialog.server)
+            .map(|r| r.folders.clone())
+            .unwrap_or_default();
+        let mut cancel = false;
+        let mut submit_name = false;
+        let mut pick_existing: Option<String> = None;
+
+        let response = egui::Modal::new(egui::Id::new("session-folder-modal"))
+            .area(
+                egui::Modal::default_area(egui::Id::new("session-folder-modal"))
+                    .anchor(egui::Align2::CENTER_CENTER, Vec2::new(0., (1. - t) * 9.)),
+            )
+            .frame(
+                egui::Frame::new()
+                    .fill(p.surface)
+                    .stroke(Stroke::new(1.0_f32, p.line))
+                    .corner_radius(14.)
+                    .inner_margin(22.),
+            )
+            .show(ctx, |ui| {
+                ui.set_width(430.);
+                ui.horizontal(|ui| {
+                    let (r, _) = ui.allocate_exact_size(Vec2::splat(20.), egui::Sense::hover());
+                    design::icon(ui.painter(), r, Icon::Folder, accent());
+                    label(
+                        ui,
+                        if dialog.rename_folder_id.is_some() {
+                            "Переименовать папку"
+                        } else if dialog.move_session.is_some() {
+                            "Переместить сессию в папку"
+                        } else {
+                            "Новая папка для сессий"
+                        },
+                        18.,
+                        p.text,
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if design::button(ui, "", Some(Icon::Close), Kind::Ghost, p, Vec2::splat(28.))
+                            .clicked()
+                        {
+                            cancel = true;
+                        }
+                    });
+                });
+                ui.add_space(6.);
+                if let Some((_, ref s_title, _)) = dialog.move_session {
+                    label(
+                        ui,
+                        format!("Сессия: «{}»", model::shorten(s_title, 54)),
+                        12.5,
+                        p.muted,
+                    );
+                } else {
+                    label(
+                        ui,
+                        "Папки общие для всех участников, подключённых к этому серверу.",
+                        12.5,
+                        p.muted,
+                    );
+                }
+
+                if let Some((_, _, ref cur_folder)) = dialog.move_session {
+                    ui.add_space(12.);
+                    label(ui, "Выбери существующую папку", 11.5, p.muted);
+                    ui.add_space(4.);
+                    if folders.is_empty() && cur_folder.is_empty() {
+                        label(
+                            ui,
+                            "На сервере пока нет папок — создай первую ниже.",
+                            12.,
+                            p.muted,
+                        );
+                    } else {
+                        egui::ScrollArea::vertical()
+                            .id_salt("folder-modal-list")
+                            .max_height(190.)
+                            .show(ui, |ui| {
+                                ui.spacing_mut().item_spacing.y = 5.;
+                                if !cur_folder.is_empty()
+                                    && design::service_action(
+                                        ui,
+                                        "Убрать из папки (в общий список)",
+                                        Icon::Close,
+                                        false,
+                                        p,
+                                    )
+                                    .clicked()
+                                {
+                                    pick_existing = Some(String::new());
+                                }
+                                for f in &folders {
+                                    let active = f.id == *cur_folder;
+                                    if design::service_action(
+                                        ui,
+                                        &f.name,
+                                        if active { Icon::Check } else { Icon::Folder },
+                                        active,
+                                        p,
+                                    )
+                                    .clicked()
+                                    {
+                                        pick_existing = Some(f.id.clone());
+                                    }
+                                }
+                            });
+                    }
+                    ui.add_space(14.);
+                    label(ui, "Или создай новую папку и перемести туда", 11.5, p.muted);
+                } else {
+                    ui.add_space(14.);
+                    label(ui, "Название папки", 12., p.muted);
+                }
+
+                ui.add_space(4.);
+                let field_resp = design::field(
+                    ui,
+                    &mut dialog.name,
+                    "Например, Продакшен или Фронтенд",
+                    false,
+                );
+                if !dialog.focused_once && dialog.move_session.is_none() {
+                    field_resp.request_focus();
+                    dialog.focused_once = true;
+                }
+                if field_resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    submit_name = true;
+                }
+                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    cancel = true;
+                }
+                if !dialog.error.is_empty() {
+                    ui.add_space(6.);
+                    label(ui, &dialog.error, 12., design::RED);
+                }
+                ui.add_space(18.);
+                ui.horizontal(|ui| {
+                    if design::button(ui, "Отмена", None, Kind::Secondary, p, Vec2::new(112., 34.))
+                        .clicked()
+                    {
+                        cancel = true;
+                    }
+                    let cta = if dialog.rename_folder_id.is_some() {
+                        "Сохранить"
+                    } else if dialog.move_session.is_some() {
+                        "Создать и переместить"
+                    } else {
+                        "Создать папку"
+                    };
+                    if design::button(
+                        ui,
+                        cta,
+                        Some(Icon::Folder),
+                        Kind::Primary,
+                        p,
+                        Vec2::new(ui.available_width(), 34.),
+                    )
+                    .clicked()
+                    {
+                        submit_name = true;
+                    }
+                });
+            });
+
+        if response.should_close() {
+            cancel = true;
+        }
+        let actor = self.settings.actor();
+        if let Some(target_folder) = pick_existing {
+            if let Some((sid, _, _)) = dialog.move_session {
+                self.controller.send(
+                    &dialog.server,
+                    json!({"op":"session_meta","sid":sid,"folder":target_folder,"actor":actor}),
+                );
+            }
+            return;
+        }
+        if submit_name {
+            let trimmed = dialog.name.trim().to_owned();
+            if trimmed.is_empty() {
+                dialog.error = "Введи непустое название папки.".into();
+                self.folder_dialog = Some(dialog);
+                return;
+            }
+            if let Some(fid) = dialog.rename_folder_id {
+                self.controller.send(
+                    &dialog.server,
+                    json!({"op":"session_folder","id":fid,"name":trimmed}),
+                );
+            } else {
+                let moving_sid = dialog.move_session.map(|(sid, _, _)| sid);
+                self.controller.send(
+                    &dialog.server,
+                    json!({"op":"session_folder","name":trimmed,"sid":moving_sid,"actor":actor}),
+                );
+            }
+            return;
+        }
+        if !cancel {
+            self.folder_dialog = Some(dialog);
         }
     }
 }

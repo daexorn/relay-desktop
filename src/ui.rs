@@ -567,32 +567,187 @@ pub fn phase_icon(phase: crate::model::ToolPhase) -> Icon {
     }
 }
 
-/// Paints an atmospheric next-gen horizon glow along the top of a workspace panel.
-pub fn ambient_horizon(painter: &egui::Painter, rect: Rect, color: Color32, light: bool) {
-    let max_alpha = if light { 0.055 } else { 0.095 };
-    let bands = 14;
-    let total_h = 160.0_f32.min(rect.height() * 0.35);
-    for i in 0..bands {
-        let t0 = i as f32 / bands as f32;
-        let t1 = (i + 1) as f32 / bands as f32;
-        let fade = (1.0 - t0) * (1.0 - t0);
-        let band = Rect::from_min_max(
-            Pos2::new(rect.left(), rect.top() + total_h * t0),
-            Pos2::new(rect.right(), rect.top() + total_h * t1 + 1.0),
-        );
-        painter.rect_filled(band, 0.0, color.gamma_multiply(max_alpha * fade));
+/// Top stripes intentionally removed for a clean, band-free matte header.
+pub fn ambient_horizon(_painter: &egui::Painter, _rect: Rect, _color: Color32, _light: bool) {}
+
+fn paint_pixel_grid(
+    painter: &egui::Painter,
+    rect: Rect,
+    cols: usize,
+    rows: usize,
+    grid: &[&str],
+    palette: &[(char, Color32)],
+) {
+    let cell = (rect.width() / cols as f32)
+        .min(rect.height() / rows as f32)
+        .max(1.0);
+    let ox = rect.center().x - (cols as f32 * cell) * 0.5;
+    let oy = rect.center().y - (rows as f32 * cell) * 0.5;
+    for (ry, row_s) in grid.iter().take(rows).enumerate() {
+        for (cx, ch) in row_s.chars().take(cols).enumerate() {
+            if ch == '.' || ch == ' ' {
+                continue;
+            }
+            if let Some(&(_, col)) = palette.iter().find(|&&(k, _)| k == ch) {
+                let px = Rect::from_min_size(
+                    Pos2::new(ox + cx as f32 * cell, oy + ry as f32 * cell),
+                    Vec2::splat((cell + 0.25).max(1.0)),
+                );
+                painter.rect_filled(px, 0.0, col);
+            }
+        }
     }
-    // Focused center flare along the top hairline
-    let flare_w = (rect.width() * 0.58).clamp(180.0, 620.0);
-    for (scale, alpha) in [(1.0_f32, 0.16_f32), (0.55, 0.30)] {
-        let w = flare_w * scale;
-        painter.line_segment(
-            [
-                Pos2::new(rect.center().x - w * 0.5, rect.top() + 0.5),
-                Pos2::new(rect.center().x + w * 0.5, rect.top() + 0.5),
-            ],
-            Stroke::new(1.2_f32, color.gamma_multiply(if light { alpha * 0.7 } else { alpha })),
-        );
+}
+
+/// Cute pixel-art Claude buddy ("клодёнок") — gently blinks idle and trots its legs when working!
+pub fn pixel_claude_mascot(ui: &egui::Ui, rect: Rect, busy: bool) {
+    let animated = ui
+        .ctx()
+        .data(|d| d.get_temp::<bool>(egui::Id::new("relay-animations")))
+        .unwrap_or(true);
+    let t = if animated {
+        if busy {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(120));
+        } else {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(600));
+        }
+        ui.input(|i| i.time)
+    } else {
+        0.0
+    };
+    let step = busy && ((t * 5.5) as i64 % 2 == 1);
+    let blink = !busy && animated && ((t * 1.4) as i64 % 9 == 0);
+    let bob = if step { -0.8 } else { 0.0 };
+    let shifted = rect.translate(Vec2::new(0.0, bob));
+    let body = Color32::from_rgb(232, 130, 90);
+    let hi = Color32::from_rgb(248, 168, 132);
+    let shade = Color32::from_rgb(196, 98, 62);
+    let eye = Color32::from_rgb(24, 18, 18);
+    let eyes_row = if blink { ".BBBBBBBBBB." } else { ".BBEEBBEEBB." };
+    let (legs_1, legs_2) = if step {
+        (".SS..SS..SS.", ".S........S.")
+    } else {
+        ("..SS.SS.SS..", "..SS....SS..")
+    };
+    let sprite = [
+        "..HHHHHHHH..",
+        ".HHBBBBBBHH.",
+        "BBBBBBBBBBBB",
+        eyes_row,
+        "BBBBBBBBBBBB",
+        ".BBBBBBBBBB.",
+        "..SSSSSSSS..",
+        legs_1,
+        legs_2,
+    ];
+    paint_pixel_grid(
+        ui.painter(),
+        shifted,
+        12,
+        9,
+        &sprite,
+        &[('B', body), ('H', hi), ('S', shade), ('E', eye)],
+    );
+}
+
+/// Crisp 11×11 pixel-art GPT / OpenAI knot icon.
+pub fn pixel_gpt_mascot(painter: &egui::Painter, rect: Rect) {
+    let main = Color32::from_rgb(62, 219, 168);
+    let hi = Color32::from_rgb(142, 248, 212);
+    let deep = Color32::from_rgb(32, 156, 118);
+    let sprite = [
+        "...HHHHH...",
+        "..HH...MM..",
+        ".HH.MMM.MM.",
+        "HH.MM.MM.MM",
+        "MM.M...M.DD",
+        "MM..M.M..DD",
+        "MM.MM.MM.DD",
+        ".DD.MMM.MM.",
+        "..DD...MM..",
+        "...DDDDD...",
+        "...........",
+    ];
+    paint_pixel_grid(
+        painter,
+        rect,
+        11,
+        11,
+        &sprite,
+        &[('H', hi), ('M', main), ('D', deep)],
+    );
+}
+
+/// Crisp 11×11 pixel-art Rainbow 4-Point Star (AGY / Antigravity).
+pub fn pixel_rainbow_star(painter: &egui::Painter, rect: Rect) {
+    let sprite = [
+        ".....C.....",
+        ".....C.....",
+        "....BCB....",
+        "....BWB....",
+        "..BBWWWVV..",
+        "CCWWWWWWWRR",
+        "..GGWWWRR..",
+        "....YWR....",
+        "....YYY....",
+        ".....Y.....",
+        ".....G.....",
+    ];
+    paint_pixel_grid(
+        painter,
+        rect,
+        11,
+        11,
+        &sprite,
+        &[
+            ('C', Color32::from_rgb(56, 232, 255)),
+            ('B', Color32::from_rgb(76, 140, 255)),
+            ('V', Color32::from_rgb(184, 128, 255)),
+            ('R', Color32::from_rgb(255, 108, 156)),
+            ('Y', Color32::from_rgb(255, 209, 102)),
+            ('G', Color32::from_rgb(94, 234, 180)),
+            ('W', Color32::from_rgb(250, 252, 255)),
+        ],
+    );
+}
+
+/// Crisp 11×11 pixel-art API microchip / bolt icon.
+pub fn pixel_api_mascot(painter: &egui::Painter, rect: Rect) {
+    let sky = Color32::from_rgb(92, 194, 242);
+    let hi = Color32::from_rgb(178, 232, 255);
+    let core = Color32::from_rgb(255, 216, 108);
+    let sprite = [
+        "..S..S..S..",
+        ".HHHHHHHHH.",
+        "SHSSSSSSSHS",
+        ".S..CCC..S.",
+        "SS.CCCCC.SS",
+        ".S..CCC..S.",
+        "SS..CCC..SS",
+        ".SSSSSSSSS.",
+        "..S..S..S..",
+        "...........",
+        "...........",
+    ];
+    paint_pixel_grid(
+        painter,
+        rect,
+        11,
+        11,
+        &sprite,
+        &[('S', sky), ('H', hi), ('C', core)],
+    );
+}
+
+/// Draws the signature pixel-art mascot for any backend (`claude`, `codex`, `agy`, `api`).
+pub fn engine_mascot(ui: &egui::Ui, rect: Rect, backend: &str, busy: bool) {
+    match backend {
+        "codex" => pixel_gpt_mascot(ui.painter(), rect),
+        "agy" => pixel_rainbow_star(ui.painter(), rect),
+        "api" => pixel_api_mascot(ui.painter(), rect),
+        _ => pixel_claude_mascot(ui, rect, busy),
     }
 }
 
@@ -848,11 +1003,13 @@ pub fn chip(ui: &mut egui::Ui, text: &str, which: Icon, p: Palette, active: bool
         icon_color,
     );
     if !text.is_empty() {
-        ui.painter().galley(
-            egui::pos2(rect.left() + 28., rect.center().y - galley.size().y / 2.),
-            galley,
-            if active { p.text } else { p.muted },
-        );
+        ui.painter()
+            .with_clip_rect(painted.shrink2(Vec2::new(6., 0.)))
+            .galley(
+                egui::pos2(rect.left() + 28., rect.center().y - galley.size().y / 2.),
+                galley,
+                if active { p.text } else { p.muted },
+            );
     }
     if response.has_focus() {
         ui.painter().rect_stroke(
@@ -1336,6 +1493,7 @@ pub fn column(ui: &mut egui::Ui, visible: f32, max_width: f32, add: impl FnOnce(
         ui.spacing_mut().item_spacing.x = 0.;
         ui.add_space(gap);
         ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.;
             ui.set_width(w);
             ui.set_max_width(w);
             let clip = ui.clip_rect().intersect(egui::Rect::from_min_size(

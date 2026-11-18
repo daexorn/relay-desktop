@@ -141,6 +141,49 @@ impl Chat {
     }
     pub fn reduce(&mut self, data: &Value) {
         self.revision += 1;
+        let b_backend = data["relay_backend"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&self.backend)
+            .to_owned();
+        let b_model = data["relay_model"]
+            .as_str()
+            .or_else(|| data["message"]["model"].as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&self.model)
+            .to_owned();
+        let b_mode = data["relay_mode"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&self.mode)
+            .to_owned();
+        let b_effort = data["relay_effort"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&self.effort)
+            .to_owned();
+        let b_actor = data["relay_actor"].as_str().unwrap_or("").to_owned();
+        let b_agent = data["relay_agent_name"].as_str().unwrap_or("").to_owned();
+        let stamp = |m: &mut Message| {
+            if m.backend.is_empty() {
+                m.backend = b_backend.clone();
+            }
+            if m.model.is_empty() {
+                m.model = b_model.clone();
+            }
+            if m.mode.is_empty() {
+                m.mode = b_mode.clone();
+            }
+            if m.effort.is_empty() {
+                m.effort = b_effort.clone();
+            }
+            if m.actor.is_empty() && !b_actor.is_empty() {
+                m.actor = b_actor.clone();
+            }
+            if m.agent_name.is_empty() && !b_agent.is_empty() {
+                m.agent_name = b_agent.clone();
+            }
+        };
         match data["type"].as_str().unwrap_or("") {
             "stream_event" => {
                 let e = &data["event"];
@@ -150,11 +193,13 @@ impl Chat {
                     "content_block_start" => {
                         if e["content_block"]["type"] == "text" {
                             self.blocks.insert(index, self.messages.len());
-                            self.messages.push(Message {
+                            let mut msg = Message {
                                 role: "assistant".into(),
                                 text: e["content_block"]["text"].as_str().unwrap_or("").into(),
                                 ..Default::default()
-                            });
+                            };
+                            stamp(&mut msg);
+                            self.messages.push(msg);
                         } else if e["content_block"]["type"] == "thinking" {
                             self.status = "Думает над ответом".into();
                         }
@@ -189,12 +234,15 @@ impl Chat {
                             {
                                 self.blocks.remove(&index);
                                 self.messages[at].text = text.into();
+                                stamp(&mut self.messages[at]);
                             } else if !text.is_empty() && text.trim() != "No response requested." {
-                                self.messages.push(Message {
+                                let mut msg = Message {
                                     role: "assistant".into(),
                                     text: text.into(),
                                     ..Default::default()
-                                });
+                                };
+                                stamp(&mut msg);
+                                self.messages.push(msg);
                             }
                         } else if b["type"] == "tool_use" {
                             let id = b["id"].as_str().unwrap_or("");
@@ -205,13 +253,15 @@ impl Chat {
                                 .take(30)
                                 .any(|m| m.role == "tool" && m.tool_id == id)
                             {
-                                self.messages.push(Message {
+                                let mut msg = Message {
                                     role: "tool".into(),
                                     tool: b["name"].as_str().unwrap_or("Действие").into(),
                                     input: b["input"].clone(),
                                     tool_id: id.into(),
                                     ..Default::default()
-                                });
+                                };
+                                stamp(&mut msg);
+                                self.messages.push(msg);
                             }
                             self.status =
                                 tool_name(b["name"].as_str().unwrap_or("Работает")).into();
@@ -571,20 +621,34 @@ pub fn render_transcript(
         }
     }
 
+    let attributions = relay_desktop::model::compute_attributions(messages, backend, busy);
     let mut i = 0usize;
     while i < messages.len() {
         let message = &messages[i];
+        let attr = &attributions[i];
         match message.role.as_str() {
             "user" => {
-                rows.extend(markdown::wrap(
-                    Line::from(vec![Span::styled(
-                        "› Вы",
-                        Style::default()
-                            .fg(theme.accent)
-                            .add_modifier(Modifier::BOLD),
-                    )]),
-                    width,
-                ));
+                let mut hdr_spans = vec![Span::styled(
+                    format!("› {}", if attr.who.is_empty() { "Вы" } else { &attr.who }),
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                )];
+                if !attr.to_whom.is_empty() {
+                    let (br, bg, bb) = relay_desktop::model::backend_rgb(&attr.backend, theme.light);
+                    hdr_spans.push(Span::styled(" → ", Style::default().fg(theme.muted)));
+                    hdr_spans.push(Span::styled(
+                        attr.to_whom.clone(),
+                        Style::default().fg(Color::Rgb(br, bg, bb)),
+                    ));
+                }
+                if !attr.how.is_empty() {
+                    hdr_spans.push(Span::styled(
+                        format!(" · {}", attr.how),
+                        Style::default().fg(theme.muted),
+                    ));
+                }
+                rows.extend(markdown::wrap(Line::from(hdr_spans), width));
                 rows.extend(markdown::render(
                     &message.text,
                     width,
@@ -597,16 +661,27 @@ pub fn render_transcript(
             }
             "assistant" => {
                 if !message.text.is_empty() {
-                    let (er, eg, eb) = relay_desktop::model::backend_rgb(backend, theme.light);
-                    rows.extend(markdown::wrap(
-                        Line::styled(
-                            assistant_header(backend).to_owned(),
-                            Style::default()
-                                .fg(Color::Rgb(er, eg, eb))
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        width,
-                    ));
+                    let (er, eg, eb) =
+                        relay_desktop::model::backend_rgb(&attr.backend, theme.light);
+                    let mut hdr_spans = vec![Span::styled(
+                        format!("{} · {}", assistant_header(&attr.backend), attr.who),
+                        Style::default()
+                            .fg(Color::Rgb(er, eg, eb))
+                            .add_modifier(Modifier::BOLD),
+                    )];
+                    if !attr.to_whom.is_empty() {
+                        hdr_spans.push(Span::styled(
+                            format!(" → {}", attr.to_whom),
+                            Style::default().fg(theme.muted),
+                        ));
+                    }
+                    if !attr.how.is_empty() {
+                        hdr_spans.push(Span::styled(
+                            format!(" · {}", attr.how),
+                            Style::default().fg(theme.muted),
+                        ));
+                    }
+                    rows.extend(markdown::wrap(Line::from(hdr_spans), width));
                     rows.extend(markdown::render(
                         &message.text,
                         width,

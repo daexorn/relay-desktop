@@ -207,6 +207,19 @@ fun slashMatches(draft: String, commands: List<CommandInfo>): List<CommandInfo> 
     return if (found.size == 1 && found[0].name == t) emptyList() else found
 }
 
+fun builtinSlashCommands(): List<CommandInfo> = listOf(
+    CommandInfo("usage", "Лимиты подписки Claude, сброс таймеров и расход токенов", ""),
+    CommandInfo("cost", "Статистика токенов и вызовов инструментов сессии", ""),
+    CommandInfo("status", "Состояние сервера, установленных CLI и текущей сессии", ""),
+    CommandInfo("clear", "Начать новую чистую сессию в этой папке", ""),
+    CommandInfo("compact", "Сжать историю длинного разговора (Claude Code)", ""),
+    CommandInfo("model", "Сменить модель агента", "<название>"),
+    CommandInfo("mode", "Режим подтверждений: auto, manual, edits, plan", "<режим>"),
+    CommandInfo("effort", "Глубина рассуждений: auto, low, medium, high, max", "<уровень>"),
+    CommandInfo("stop", "Остановить текущий ответ агента", ""),
+    CommandInfo("help", "Показать список всех быстрых команд Relay", ""),
+)
+
 data class Folder(val id: String, val name: String)
 
 data class Message(
@@ -219,7 +232,101 @@ data class Message(
     val images: Int = 0,
     /** Names of files sent with this message from the phone. */
     val files: List<String> = emptyList(),
+    var backend: String = "",
+    var model: String = "",
+    var actor: String = "",
+    var mode: String = "",
+    var effort: String = "",
+    var steer: Boolean = false,
+    var agentName: String = "",
 )
+
+data class MessageAttribution(
+    val who: String = "",
+    val toWhom: String = "",
+    val how: String = "",
+    val backend: String = "claude",
+)
+
+fun prettyModelTitle(raw: String): String {
+    val s = raw.trim()
+    if (s.isEmpty() || s == "default") return ""
+    val low = s.lowercase()
+    return when {
+        "sonnet-4-6" in low || "sonnet-4.6" in low -> "Sonnet 4.6"
+        "opus-4-6" in low || "opus-4.6" in low -> "Opus 4.6"
+        "haiku-4-5" in low || "haiku-4.5" in low -> "Haiku 4.5"
+        "gpt-5.4" in low && "mini" in low -> "GPT-5.4 Mini"
+        "gpt-5.4" in low -> "GPT-5.4"
+        "gpt-5.3" in low -> "GPT-5.3 Codex"
+        "gemini-3.1-pro" in low -> "Gemini 3.1 Pro"
+        "gemini-3-flash" in low -> "Gemini 3 Flash"
+        else -> s.removePrefix("claude-").replace('-', ' ').take(24)
+    }
+}
+
+fun computeAttributions(messages: List<Message>, fallbackBackend: String, busy: Boolean): List<MessageAttribution> {
+    val out = MutableList(messages.size) { MessageAttribution(backend = fallbackBackend) }
+    var lastUserIdx: Int? = null
+    var curBackend = fallbackBackend.ifBlank { "claude" }
+    var curModel = ""
+    var curMode = ""
+    var curEffort = ""
+    var curActor = ""
+    var curAgent = ""
+    var toolsSinceUser = 0
+
+    for ((idx, m) in messages.withIndex()) {
+        if (m.backend.isNotBlank()) curBackend = m.backend
+        if (m.model.isNotBlank()) curModel = m.model
+        if (m.mode.isNotBlank()) curMode = m.mode
+        if (m.effort.isNotBlank()) curEffort = m.effort
+        if (m.actor.isNotBlank()) curActor = m.actor
+        if (m.agentName.isNotBlank()) curAgent = m.agentName
+
+        when (m.role) {
+            "user" -> {
+                toolsSinceUser = 0
+                val who = curActor.ifBlank { "Вы" }
+                val target = curAgent.ifBlank { backendShortLabel(curBackend) }
+                val nextAssistant = ((idx + 1) until messages.size).firstOrNull { messages[it].role == "assistant" && messages[it].text.isNotBlank() }
+                val nextUserBefore = ((idx + 1) until messages.size).any { k ->
+                    messages[k].role == "user" && (nextAssistant == null || k < nextAssistant)
+                }
+                val howParts = mutableListOf<String>()
+                if (m.steer) howParts += "по ходу ответа"
+                prettyModelTitle(curModel).takeIf { it.isNotEmpty() }?.let { howParts += it }
+                when {
+                    nextUserBefore && !m.steer -> howParts += "без отдельного ответа"
+                    nextAssistant == null && busy && idx + 1 == messages.size -> howParts += "ждёт ответа…"
+                }
+                out[idx] = MessageAttribution(who = who, toWhom = target, how = howParts.joinToString(" · "), backend = curBackend)
+                lastUserIdx = idx
+            }
+            "tool" -> toolsSinceUser++
+            "assistant" -> {
+                val who = curAgent.ifBlank { backendLabel(curBackend) }
+                val toWhom = lastUserIdx?.let { uIdx ->
+                    val um = messages[uIdx]
+                    val uWho = um.actor.ifBlank { curActor.ifBlank { "Вам" } }
+                    val preview = um.text.lineSequence().firstOrNull { it.isNotBlank() && !it.trimStart().startsWith("<relay-") }?.trim()?.take(22).orEmpty()
+                    if (preview.isEmpty()) uWho else "$uWho · на «$preview»"
+                }.orEmpty()
+                val howParts = mutableListOf<String>()
+                prettyModelTitle(curModel).takeIf { it.isNotEmpty() }?.let { howParts += it }
+                when (curMode) {
+                    "auto" -> howParts += "Авто"
+                    "plan" -> howParts += "План"
+                    "acceptEdits" -> howParts += "Правки"
+                }
+                if (toolsSinceUser > 0) howParts += "через $toolsSinceUser ${stepsWord(toolsSinceUser)}"
+                else howParts += "прямой ответ"
+                out[idx] = MessageAttribution(who = who, toWhom = toWhom, how = howParts.joinToString(" · "), backend = curBackend)
+            }
+        }
+    }
+    return out
+}
 
 /** A photo or file picked on the phone, waiting to go with the next message. */
 class Picked(val name: String, val mime: String, val bytes: ByteArray, val preview: ImageBitmap?) {
@@ -299,6 +406,28 @@ class Transcript {
     var status = ""
     var error = ""
     var busy = false
+    var turnBackend = "claude"
+    var turnModel = ""
+    var turnMode = ""
+    var turnEffort = ""
+    var turnActor = ""
+
+    private fun stamp(m: Message, data: JSONObject) {
+        val b = data.optString("relay_backend").ifBlank { turnBackend }
+        if (m.backend.isBlank() && b.isNotBlank()) m.backend = b
+        val mdl = data.optString("relay_model")
+            .ifBlank { data.optJSONObject("message")?.optString("model").orEmpty() }
+            .ifBlank { turnModel }
+        if (m.model.isBlank() && mdl.isNotBlank()) m.model = mdl
+        val md = data.optString("relay_mode").ifBlank { turnMode }
+        if (m.mode.isBlank() && md.isNotBlank()) m.mode = md
+        val ef = data.optString("relay_effort").ifBlank { turnEffort }
+        if (m.effort.isBlank() && ef.isNotBlank()) m.effort = ef
+        val ac = data.optString("relay_actor").ifBlank { turnActor }
+        if (m.actor.isBlank() && ac.isNotBlank()) m.actor = ac
+        val ag = data.optString("relay_agent_name")
+        if (m.agentName.isBlank() && ag.isNotBlank()) m.agentName = ag
+    }
 
     fun reduce(data: JSONObject) {
         when (data.optString("type")) {
@@ -311,7 +440,9 @@ class Transcript {
                         val block = e.optJSONObject("content_block") ?: return
                         when (block.optString("type")) {
                             "text" -> {
-                                messages.add(Message("assistant", block.optString("text")))
+                                val msg = Message("assistant", block.optString("text"))
+                                stamp(msg, data)
+                                messages.add(msg)
                                 blocks[index] = messages.size - 1
                             }
                             "thinking" -> status = "Думает над ответом"
@@ -339,14 +470,19 @@ class Transcript {
                             if (streamed != null) {
                                 blocks.remove(streamed.key)
                                 messages[streamed.value].text = text
+                                stamp(messages[streamed.value], data)
                             } else if (text.isNotEmpty() && text.trim() != "No response requested.") {
-                                messages.add(Message("assistant", text))
+                                val msg = Message("assistant", text)
+                                stamp(msg, data)
+                                messages.add(msg)
                             }
                         }
                         "tool_use" -> {
                             val id = b.optString("id")
                             if (messages.takeLast(20).none { it.role == "tool" && it.toolId == id }) {
-                                messages.add(Message("tool", tool = b.optString("name", "Действие"), input = b.optJSONObject("input") ?: JSONObject(), toolId = id))
+                                val msg = Message("tool", tool = b.optString("name", "Действие"), input = b.optJSONObject("input") ?: JSONObject(), toolId = id)
+                                stamp(msg, data)
+                                messages.add(msg)
                             }
                             status = toolName(b.optString("name"))
                         }
@@ -369,7 +505,11 @@ class Transcript {
                     error = data.optJSONArray("errors")?.let { a -> (0 until a.length()).joinToString("\n") { a.optString(it) } }
                         ?: data.optString("result", "Агент не смог завершить задачу.")
                 } else if (messages.drop(userAt + 1).none { it.role == "assistant" && it.text.isNotEmpty() }) {
-                    data.optString("result").takeIf { it.isNotEmpty() }?.let { messages.add(Message("assistant", it)) }
+                    data.optString("result").takeIf { it.isNotEmpty() }?.let {
+                        val msg = Message("assistant", it)
+                        stamp(msg, data)
+                        messages.add(msg)
+                    }
                 }
             }
         }
@@ -389,6 +529,13 @@ class Transcript {
                     toolId = r.optString("tool_id"),
                     failed = r.optBoolean("failed"),
                     images = r.optJSONArray("images")?.length() ?: 0,
+                    backend = r.optString("backend"),
+                    model = r.optString("model"),
+                    actor = r.optString("actor"),
+                    mode = r.optString("mode"),
+                    effort = r.optString("effort"),
+                    steer = r.optBoolean("steer", false),
+                    agentName = r.optString("agent_name"),
                 )
             )
         }

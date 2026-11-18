@@ -28,6 +28,105 @@ impl RelayApp {
                 }
             }
         }
+        if args.iter().any(|a| a == "--demo-lock") {
+            if let (Some(srv), Some(k)) = (self.settings.selected.clone(), self.current_key()) {
+                let sid = self.chats[&k].sid.clone();
+                if let Some(c) = self.chats.get_mut(&k) {
+                    c.locked = true;
+                    c.unlocked = true;
+                }
+                self.open_lock_dialog(&srv, &sid);
+            }
+        }
+        if args.iter().any(|a| a == "--demo-folder") {
+            if let (Some(srv), Some(k)) = (self.settings.selected.clone(), self.current_key()) {
+                if let Some(r) = self.remote.get_mut(&srv) {
+                    if r.folders.is_empty() {
+                        r.folders = vec![
+                            crate::model::SessionFolder {
+                                id: "f1".into(),
+                                name: "Продакшн".into(),
+                            },
+                            crate::model::SessionFolder {
+                                id: "f2".into(),
+                                name: "Бэкенд & API".into(),
+                            },
+                        ];
+                    }
+                }
+                let sid = self.chats[&k].sid.clone();
+                let title = self.chats[&k].title.clone();
+                self.folder_dialog = Some(super::session_actions::FolderDialog {
+                    server: srv,
+                    name: String::new(),
+                    rename_folder_id: None,
+                    move_session: Some((sid, title, "f1".into())),
+                    focused_once: false,
+                    error: String::new(),
+                });
+            }
+        }
+        if args.iter().any(|a| a == "--demo-multiagent") {
+            if let Some(k) = self.current_key() {
+                let c = self.chats.get_mut(&k).unwrap();
+                c.messages = vec![
+                    Message {
+                        role: "user".into(),
+                        text: "ку! проверь архитектуру моста".into(),
+                        backend: "claude".into(),
+                        model: "claude-sonnet-4-6".into(),
+                        mode: "auto".into(),
+                        actor: "maisdev".into(),
+                        ..Default::default()
+                    },
+                    Message {
+                        role: "assistant".into(),
+                        text: "Проверил `relay_bridge.py`: шифрование **RVLT1** и команды `/usage`, `/cost`, `/status` работают штатно.".into(),
+                        backend: "claude".into(),
+                        model: "claude-sonnet-4-6".into(),
+                        mode: "auto".into(),
+                        actor: "maisdev".into(),
+                        ..Default::default()
+                    },
+                    Message {
+                        role: "user".into(),
+                        text: "а теперь прогони тесты rust".into(),
+                        backend: "codex".into(),
+                        model: "gpt-5.4".into(),
+                        mode: "auto".into(),
+                        effort: "high".into(),
+                        actor: "maisdev".into(),
+                        ..Default::default()
+                    },
+                    Message {
+                        role: "assistant".into(),
+                        text: "Все модульные тесты Rust и TUI зелёные, палитры из **40 тем** синхронизированы.".into(),
+                        backend: "codex".into(),
+                        model: "gpt-5.4".into(),
+                        mode: "auto".into(),
+                        effort: "high".into(),
+                        actor: "maisdev".into(),
+                        ..Default::default()
+                    },
+                    Message {
+                        role: "user".into(),
+                        text: "собери релиз".into(),
+                        backend: "agy".into(),
+                        model: "gemini-3.1-pro".into(),
+                        mode: "auto".into(),
+                        actor: "maisdev".into(),
+                        ..Default::default()
+                    },
+                ];
+                c.user_at = 4;
+                c.busy = true;
+                c.status = "Работает".into();
+                c.turn_backend = "agy".into();
+                c.turn_model = "gemini-3.1-pro".into();
+                c.turn_mode = "auto".into();
+                c.turn_actor = "maisdev".into();
+            }
+        }
         if args.iter().any(|a| a == "--demo-delete") {
             if let Some(session) = self
                 .remote
@@ -174,7 +273,7 @@ impl RelayApp {
                 egui::ScrollArea::vertical()
                     .max_height((ctx.screen_rect().height() - 200.).max(220.))
                     .show(ui, |ui| {
-                        label(ui, "Оформление · 24 темы", 14., p.text);
+                        label(ui, "Оформление · 40 тем", 14., p.text);
                         ui.add_space(8.);
                         let columns = if ui.available_width() < 480. { 3. } else { 4. };
                         let tile_width =

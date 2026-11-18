@@ -354,16 +354,16 @@ def _item_to_messages(item):
         txt = "\n".join(texts).strip()
         if not txt and not images:
             return []
-        msg = {"role": "user", "text": txt, "uuid": ident}
+        msg = {"role": "user", "text": txt, "uuid": ident, "backend": "codex"}
         if images:
             msg["images"] = images
         return [msg]
     if kind == "agentMessage":
         txt = str(item.get("text") or "").strip()
-        return [{"role": "assistant", "text": txt, "uuid": ident}] if txt else []
+        return [{"role": "assistant", "text": txt, "uuid": ident, "backend": "codex"}] if txt else []
     if kind == "plan":
         txt = str(item.get("text") or "").strip()
-        return [{"role": "assistant", "text": txt, "uuid": ident}] if txt else []
+        return [{"role": "assistant", "text": txt, "uuid": ident, "backend": "codex"}] if txt else []
     if kind == "commandExecution":
         cmd = str(item.get("command") or "")
         out = str(item.get("aggregatedOutput") or "")[:24000]
@@ -372,16 +372,16 @@ def _item_to_messages(item):
         if isinstance(code, int) and out and not out.startswith("Exit code:"):
             out = f"Exit code: {code}\n{out}"
         return [
-            {"role": "tool", "tool": "Bash", "input": {"command": cmd}, "tool_id": ident},
-            {"role": "tool_result", "text": out, "failed": failed, "tool_id": ident},
+            {"role": "tool", "tool": "Bash", "input": {"command": cmd}, "tool_id": ident, "backend": "codex"},
+            {"role": "tool_result", "text": out, "failed": failed, "tool_id": ident, "backend": "codex"},
         ]
     if kind == "fileChange":
         changes = item.get("changes") or []
         paths = [str(c.get("path") or "") for c in changes if isinstance(c, dict) and c.get("path")]
         label = ", ".join(paths[:4]) or "изменение файлов"
         return [
-            {"role": "tool", "tool": "Edit", "input": {"file_path": label}, "tool_id": ident},
-            {"role": "tool_result", "text": f"Обновлено файлов: {len(paths) or 1}", "failed": item.get("status") == "failed", "tool_id": ident},
+            {"role": "tool", "tool": "Edit", "input": {"file_path": label}, "tool_id": ident, "backend": "codex"},
+            {"role": "tool_result", "text": f"Обновлено файлов: {len(paths) or 1}", "failed": item.get("status") == "failed", "tool_id": ident, "backend": "codex"},
         ]
     if kind == "mcpToolCall":
         name = f"mcp__{item.get('server', 'mcp')}__{item.get('tool', 'call')}"
@@ -389,14 +389,14 @@ def _item_to_messages(item):
         err = item.get("error")
         out = json.dumps(err or res or {}, ensure_ascii=False)[:24000] if (err or res) else "Выполнено."
         return [
-            {"role": "tool", "tool": name, "input": item.get("arguments") or {}, "tool_id": ident},
-            {"role": "tool_result", "text": out, "failed": bool(err) or item.get("status") == "failed", "tool_id": ident},
+            {"role": "tool", "tool": name, "input": item.get("arguments") or {}, "tool_id": ident, "backend": "codex"},
+            {"role": "tool_result", "text": out, "failed": bool(err) or item.get("status") == "failed", "tool_id": ident, "backend": "codex"},
         ]
     if kind == "webSearch":
         q = str(item.get("query") or "")
         return [
-            {"role": "tool", "tool": "WebSearch", "input": {"query": q}, "tool_id": ident},
-            {"role": "tool_result", "text": q, "failed": False, "tool_id": ident},
+            {"role": "tool", "tool": "WebSearch", "input": {"query": q}, "tool_id": ident, "backend": "codex"},
+            {"role": "tool_result", "text": q, "failed": False, "tool_id": ident, "backend": "codex"},
         ]
     return []
 
@@ -614,6 +614,11 @@ class CodexRun:
             "isSidechain": False,
             "userType": "external",
             "relayBackend": "codex",
+            "relayModel": self.model,
+            "relayMode": self.mode,
+            "relayEffort": self.effort,
+            "relayActor": getattr(self.owner, "actor", ""),
+            "relayAgentName": (self.cluster_context or {}).get("name", ""),
             "message": message,
         }
         if self.thread_id:

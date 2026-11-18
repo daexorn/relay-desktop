@@ -146,7 +146,7 @@ class ApiRun:
         ident=str(uuid.uuid4())
         message={'role':role,'content':content}
         if role=='assistant':message.update(id='msg_api_'+uuid.uuid4().hex,type='message',model=self.model,stop_reason='end_turn',stop_sequence=None,usage={'input_tokens':0,'output_tokens':0})
-        row={'type':role,'uuid':ident,'parentUuid':self.parent,'sessionId':self.sid,'cwd':self.cwd,'timestamp':datetime.now(timezone.utc).isoformat().replace('+00:00','Z'),'isSidechain':False,'userType':'external','relayBackend':'api','message':message}
+        row={'type':role,'uuid':ident,'parentUuid':self.parent,'sessionId':self.sid,'cwd':self.cwd,'timestamp':datetime.now(timezone.utc).isoformat().replace('+00:00','Z'),'isSidechain':False,'userType':'external','relayBackend':'api','relayModel':self.model,'relayMode':self.mode,'relayEffort':self.effort,'relayActor':getattr(self.owner,'actor',''),'relayAgentName':(getattr(self,'cluster_context',None) or {}).get('name',''),'message':message}
         if partial:row['relayPartial']=True
         with self.path.open('a',encoding='utf-8') as f:
             import fcntl as lock_module

@@ -487,37 +487,141 @@ fun VectorGlyph(glyph: Glyph, tint: Color = LocalPalette.current.muted, size: Dp
     }
 }
 
-/** Atmospheric top horizon bloom + 1dp specular border catchlight helpers. */
+/** Top horizon removed per user request (zero horizontal gradient bands at top). */
 @Composable
 fun AtmosphericHorizon(glowColor: Color, modifier: Modifier = Modifier) {
-    val p = LocalPalette.current
-    val animatedGlow by animateColorAsState(glowColor, tween(220), label = "horizon")
-    Canvas(modifier.fillMaxWidth().height(210.dp)) {
-        val w = size.width
-        val h = size.height
-        drawRect(
-            brush = Brush.verticalGradient(
-                colors = listOf(
-                    animatedGlow.copy(alpha = if (p.light) 0.09f else 0.13f),
-                    animatedGlow.copy(alpha = if (p.light) 0.03f else 0.045f),
-                    Color.Transparent,
-                ),
-                startY = 0f,
-                endY = h,
-            )
-        )
-        drawCircle(
-            brush = Brush.radialGradient(
-                colors = listOf(
-                    animatedGlow.copy(alpha = if (p.light) 0.13f else 0.20f),
-                    Color.Transparent,
-                ),
-                center = Offset(w * 0.5f, -h * 0.12f),
-                radius = w * 0.75f,
-            ),
-            radius = w * 0.75f,
-            center = Offset(w * 0.5f, -h * 0.12f),
-        )
+    val _unused = glowColor
+    val _unusedMod = modifier
+}
+
+/** Crisp pixel-art mascots: Клодёнок ("claude"), Pixel GPT ("codex"), Rainbow Star ("agy"), Pixel API ("api"). */
+@Composable
+fun PixelMascot(backend: String, active: Boolean = false, size: Dp = 18.dp, modifier: Modifier = Modifier) {
+    Canvas(modifier.size(size)) {
+        fun drawGrid(rows: Array<String>, colorFor: (Char) -> Color?) {
+            val gh = rows.size.coerceAtLeast(1)
+            val gw = rows[0].length.coerceAtLeast(1)
+            val px = minOf(this.size.width / gw, this.size.height / gh)
+            val ox = (this.size.width - px * gw) * 0.5f
+            val oy = (this.size.height - px * gh) * 0.5f
+            for (y in rows.indices) {
+                val row = rows[y]
+                for (x in row.indices) {
+                    val col = colorFor(row[x]) ?: continue
+                    drawRect(
+                        color = col,
+                        topLeft = Offset(ox + x * px, oy + y * px),
+                        size = Size(px + 0.35f, px + 0.35f),
+                    )
+                }
+            }
+        }
+        when (backend) {
+            "codex" -> {
+                val main = Color(0xFF3ED6A8)
+                val hi = Color(0xFF9DF7DC)
+                val core = Color(0xFF102A22)
+                drawGrid(
+                    arrayOf(
+                        "..#####..",
+                        ".##...##.",
+                        "##.###.##",
+                        "#.#...#.#",
+                        "#.#.*.#.#",
+                        "#.#...#.#",
+                        "##.###.##",
+                        ".##...##.",
+                        "..#####..",
+                    )
+                ) { ch ->
+                    when (ch) {
+                        '#' -> main
+                        '*' -> hi
+                        '.' -> if (active) core.copy(alpha = 0.0f) else null
+                        else -> null
+                    }
+                }
+            }
+            "agy" -> {
+                drawGrid(
+                    arrayOf(
+                        "....1....",
+                        "....2....",
+                        "..3.2.4..",
+                        "...354...",
+                        "125***671",
+                        "...896...",
+                        "..8.9.7..",
+                        "....9....",
+                        "....1....",
+                    )
+                ) { ch ->
+                    when (ch) {
+                        '*' -> Color.White
+                        '1' -> Color(0xFFFF6B8B)
+                        '2' -> Color(0xFFFFA94D)
+                        '3' -> Color(0xFFFFE066)
+                        '4' -> Color(0xFF69DB7C)
+                        '5' -> Color(0xFF38D9A9)
+                        '6' -> Color(0xFF4DABF7)
+                        '7' -> Color(0xFF9775FA)
+                        '8' -> Color(0xFFDA77F2)
+                        '9' -> Color(0xFFF783AC)
+                        else -> null
+                    }
+                }
+            }
+            "api" -> {
+                val main = Color(0xFF5EA8FF)
+                val hi = Color(0xFFC7E2FF)
+                drawGrid(
+                    arrayOf(
+                        ".#.#.#.#.",
+                        "..#####..",
+                        "###***###",
+                        "..#*#*#..",
+                        "###***###",
+                        "..#####..",
+                        ".#.#.#.#.",
+                    )
+                ) { ch ->
+                    when (ch) {
+                        '#' -> main
+                        '*' -> hi
+                        else -> null
+                    }
+                }
+            }
+            else -> {
+                val body = Color(0xFFDF7C52)
+                val shade = Color(0xFFC15F38)
+                val hi = Color(0xFFF6A57F)
+                val eye = Color(0xFF161210)
+                val legsA = if (active) "..#..#.#..#." else "..#.#...#.#."
+                val legsB = if (active) ".#....#....#" else "..#.#...#.#."
+                drawGrid(
+                    arrayOf(
+                        "..########..",
+                        ".##########.",
+                        "###E####E###",
+                        "###E####E###",
+                        "############",
+                        ".##########.",
+                        "..########..",
+                        legsA,
+                        legsB,
+                    )
+                ) { ch ->
+                    when (ch) {
+                        '#' -> body
+                        'E' -> eye
+                        '+' -> hi
+                        '-' -> shade
+                        else -> null
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -617,7 +721,7 @@ fun BackendBadge(backend: String, compact: Boolean = false, showDot: Boolean = f
         horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         if (showDot) {
-            Box(Modifier.size(if (compact) 5.dp else 6.dp).clip(CircleShape).background(tone))
+            PixelMascot(backend, active = false, size = if (compact) 12.dp else 14.dp)
         }
         Label(label, if (compact) 10.5.sp else 11.5.sp, tone, FontWeight.SemiBold, maxLines = 1)
     }
@@ -798,7 +902,10 @@ fun TopBar(
             if (onBack != null) {
                 IconButton(Icons.AutoMirrored.Filled.ArrowBack, "Назад", p.text, onBack)
             } else {
-                Spacer(Modifier.width(10.dp))
+                Spacer(Modifier.width(8.dp))
+                PixelMascot("claude", size = 20.dp)
+                Spacer(Modifier.width(4.dp))
+                PixelMascot("agy", size = 15.dp)
             }
             Column(Modifier.weight(1f).padding(horizontal = 6.dp)) {
                 Label(title, 16.5.sp, p.text, FontWeight.SemiBold, maxLines = 1)
@@ -1901,22 +2008,33 @@ fun ChatScreen(vm: RelayViewModel) {
                         }
                     }
                     items(items, key = { when (it) { is Item.Text -> "m${it.index}"; is Item.Actions -> "a${it.start}" } }) { item ->
+                        val attributions = remember(version, activeBackend, busy) {
+                            computeAttributions(chat.transcript.messages, activeBackend, busy)
+                        }
                         Box(Modifier.animateItem()) {
                             when (item) {
                                 is Item.Text -> if (item.message.role == "user") {
-                                    UserBubble(item.message)
+                                    UserBubble(
+                                        m = item.message,
+                                        attr = attributions.getOrNull(item.index),
+                                    )
                                 } else {
+                                    val attr = attributions.getOrNull(item.index)
                                     AssistantText(
                                         m = item.message,
-                                        backend = activeBackend,
+                                        backend = attr?.backend?.ifBlank { activeBackend } ?: activeBackend,
+                                        attr = attr,
                                         streaming = busy && item.index == chat.transcript.messages.lastIndex,
                                     ) { path -> vm.download(path, chat.cwd) }
                                 }
-                                is Item.Actions -> ActionsGroup(
-                                    item = item,
-                                    running = busy && item.start + item.messages.size == chat.transcript.messages.size,
-                                    backend = activeBackend,
-                                )
+                                is Item.Actions -> {
+                                    val grpBackend = item.messages.firstOrNull { it.backend.isNotBlank() }?.backend ?: activeBackend
+                                    ActionsGroup(
+                                        item = item,
+                                        running = busy && item.start + item.messages.size == chat.transcript.messages.size,
+                                        backend = grpBackend,
+                                    )
+                                }
                             }
                         }
                     }
@@ -2200,10 +2318,28 @@ fun MissingCliBanner(vm: RelayViewModel, activeBackend: String) {
 }
 
 @Composable
-fun UserBubble(m: Message) {
+fun UserBubble(m: Message, attr: MessageAttribution? = null) {
     val p = LocalPalette.current
     val bubbleShape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp, bottomEnd = 6.dp, bottomStart = 20.dp)
-    Box(Modifier.fillMaxWidth().padding(vertical = 6.dp), contentAlignment = Alignment.CenterEnd) {
+    Column(Modifier.fillMaxWidth().padding(vertical = 6.dp), horizontalAlignment = Alignment.End) {
+        if (attr != null && (attr.who.isNotEmpty() || attr.toWhom.isNotEmpty())) {
+            val bTone = backendColor(p, attr.backend)
+            Row(
+                Modifier.padding(bottom = 3.dp, end = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Label(attr.who, 10.8.sp, p.muted, maxLines = 1)
+                if (attr.toWhom.isNotEmpty()) {
+                    Label("→", 10.5.sp, p.muted, maxLines = 1)
+                    PixelMascot(attr.backend, size = 12.dp)
+                    Label(attr.toWhom, 10.8.sp, bTone, FontWeight.SemiBold, maxLines = 1)
+                }
+                if (attr.how.isNotEmpty()) {
+                    Label("· ${attr.how}", 10.5.sp, p.muted.copy(alpha = 0.85f), maxLines = 1)
+                }
+            }
+        }
         Column(
             Modifier
                 .widthIn(max = 324.dp)
@@ -2237,28 +2373,35 @@ fun engineSignatureTitle(backend: String): String = when (backend) {
     else -> "Claude Code"
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun AssistantText(m: Message, backend: String = "claude", streaming: Boolean = false, onFile: ((String) -> Unit)? = null) {
+fun AssistantText(
+    m: Message,
+    backend: String = "claude",
+    attr: MessageAttribution? = null,
+    streaming: Boolean = false,
+    onFile: ((String) -> Unit)? = null,
+) {
     val p = LocalPalette.current
-    val engineTone = backendColor(p, backend)
+    val effectiveBackend = attr?.backend?.ifBlank { backend } ?: backend
+    val engineTone = backendColor(p, effectiveBackend)
+    val whoTitle = attr?.who?.ifBlank { engineSignatureTitle(effectiveBackend) } ?: engineSignatureTitle(effectiveBackend)
     Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
-        Row(
+        FlowRow(
             Modifier.padding(bottom = 5.dp),
-            verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
-            Box(Modifier.size(6.dp).clip(CircleShape).background(engineTone))
-            VectorGlyph(
-                glyph = when (backend) {
-                    "codex" -> Glyph.Bolt
-                    "agy" -> Glyph.Orbit
-                    "api" -> Glyph.Layers
-                    else -> Glyph.Spark
-                },
-                tint = engineTone,
-                size = 12.5.dp,
-            )
-            Label(engineSignatureTitle(backend), 11.5.sp, engineTone, FontWeight.SemiBold, maxLines = 1)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                PixelMascot(effectiveBackend, active = streaming, size = 14.dp)
+                Label(whoTitle, 11.5.sp, engineTone, FontWeight.SemiBold, maxLines = 1)
+            }
+            if (attr != null && attr.toWhom.isNotEmpty()) {
+                Label("→ ${attr.toWhom}", 11.sp, p.muted, maxLines = 1)
+            }
+            if (attr != null && attr.how.isNotEmpty()) {
+                Label("· ${attr.how}", 10.8.sp, p.muted.copy(alpha = 0.85f), maxLines = 1)
+            }
             if (streaming) {
                 NeuralWaveform(engineTone, active = true, width = 16.dp, height = 10.dp)
             }
@@ -2765,9 +2908,9 @@ fun AgentTelemetryPod(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            OrbitalEmblem(engineTone, active = true, size = 32.dp)
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            PixelMascot(backend, active = true, size = 28.dp)
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Label(engineSignatureTitle(backend), 11.sp, engineTone, FontWeight.Bold, maxLines = 1)
                     NeuralWaveform(engineTone, active = true, width = 20.dp, height = 11.dp)
                     if (telemetry.totalActions > 0) {
@@ -3130,6 +3273,19 @@ fun Composer(vm: RelayViewModel, chat: Chat, onOpenAgents: () -> Unit = {}) {
                 }
             }
 
+            // Persistent Little Claude ("Клодёнок") in Composer — tap to open `/` commands
+            Box(
+                Modifier
+                    .size(30.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable {
+                        if (chat.draft.isBlank()) chat.draft = "/"
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                PixelMascot("claude", active = busy, size = 21.dp)
+            }
+
             val ready = (chat.draft.isNotBlank() || chat.picked.isNotEmpty()) && (vm.canSend(chat) || chat.draft.trim().startsWith("/"))
             if (busy) {
                 Box(
@@ -3418,14 +3574,14 @@ fun SettingsScreen(vm: RelayViewModel) {
     var name by remember { mutableStateOf(vm.actor) }
 
     Column(Modifier.fillMaxSize()) {
-        TopBar("Настройки", "24 темы, профиль и агенты сервера", onBack = back)
+        TopBar("Настройки", "40 тем, профиль и агенты сервера", onBack = back)
         LazyColumn(
             contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            // Compact 3-column grid near the top so all 24 themes (including "Дракула") fit on 400x860dp without scrolling!
+            // Compact 3-column grid near the top so "Дракула" fits on 400x860dp without scrolling and all 40 themes scroll smoothly!
             item {
-                Label("Цветовая тема · 24 палитры", 14.sp, p.text, FontWeight.SemiBold)
+                Label("Цветовая тема · 40 палитр", 14.sp, p.text, FontWeight.SemiBold)
                 Spacer(Modifier.height(8.dp))
                 FlowRow(
                     Modifier.fillMaxWidth(),
@@ -3461,7 +3617,7 @@ fun SettingsScreen(vm: RelayViewModel) {
                     Label(vm.notice, 12.sp, p.accent)
                     Spacer(Modifier.height(6.dp))
                 }
-                Label("Relay для Android 0.5.0 · SSH и общие сессии с ПК", 12.sp, p.muted)
+                Label("Relay для Android 0.6.0 · SSH и общие сессии с ПК", 12.sp, p.muted)
                 Spacer(Modifier.height(8.dp))
             }
         }

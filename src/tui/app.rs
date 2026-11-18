@@ -23,6 +23,10 @@ use std::{
 };
 
 pub const COMMANDS: &[(&str, &str)] = &[
+    ("/usage", "Лимиты подписки, сброс таймеров и расход токенов"),
+    ("/cost", "Статистика токенов и вызовов инструментов сессии"),
+    ("/status", "Состояние сервера, установленных CLI и сессии"),
+    ("/clear", "Открыть новую чистую сессию в текущей папке"),
     ("/help", "Клавиши и команды"),
     ("/menu", "Открыть панель серверов, сессий, агентов и лимитов"),
     ("/radar", "Живой радар агентов и топология сессий (F6)"),
@@ -59,7 +63,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/pin", "Закрепить или открепить сессию"),
     ("/delete", "Удалить сессию с подтверждением"),
     ("/prompt", "Инструкции для этой сессии"),
-    ("/theme", "Выбрать тему оформления (24 темы)"),
+    ("/theme", "Выбрать тему оформления (40 тем)"),
     ("/refresh", "Обновить сессии и лимиты"),
     ("/login", "Как войти в Claude, Codex или AGY на сервере"),
     ("/quit", "Выйти из Relay TUI"),
@@ -2106,6 +2110,7 @@ impl App {
                     c.error = "Соединение потеряно; сообщение оставлено в очереди".into();
                     return;
                 }
+                let actor_name = self.settings.actor();
                 let c = self.chats.get_mut(key).unwrap();
                 c.user_at = c.messages.len();
                 c.revision += 1;
@@ -2129,6 +2134,11 @@ impl App {
                                 .join("\n")
                         )
                     },
+                    backend: c.backend.clone(),
+                    model: c.model.clone(),
+                    mode: c.mode.clone(),
+                    effort: c.effort.clone(),
+                    actor: actor_name,
                     ..Default::default()
                 });
                 c.inflight = Some(prompt);
@@ -2257,7 +2267,7 @@ impl App {
             "/add"=>self.ask_field(Field::Add{server:Server::default(),stage:0},String::new()),
             "/sessions"=>{self.refresh();self.popup=Some(Popup::Picker{kind:Picker::Sessions,search:Editor::new(arg.into()),index:0});},
             "/resume"=>if arg.is_empty(){self.ask_field(Field::Resume,String::new());}else if uuid::Uuid::parse_str(arg).is_err(){self.notice="Укажи UUID сессии".into();}else if let Some(session)=self.active.as_ref().and_then(|h|self.remote.get(h)).and_then(|r|r.sessions.iter().find(|s|s.id==arg)).cloned(){self.open_session(session);}else{self.notice="Сессия не найдена в списке. /refresh обновит список.".into();},
-            "/new"=>self.new_chat(),
+            "/new"|"/clear"=>self.new_chat(),
             "/cd"=>if arg.is_empty(){self.ask_field(Field::Cwd,self.chat().map(|c|c.cwd.clone()).unwrap_or_else(||"~".into()));}else{self.set_cwd(arg);},
             "/model"=>if arg.is_empty(){self.picker(Picker::Models);}else if arg.len()<=160&&!arg.chars().any(char::is_control){if let Some(c)=self.chat_mut(){c.model=arg.into();}self.control("model",arg);},
             "/mode"=>if arg.is_empty(){self.picker(Picker::Modes);}else if ["auto","manual","acceptEdits","plan"].contains(&arg){if let Some(c)=self.chat_mut(){c.mode=arg.into();}self.control("mode",arg);}else{self.notice="Режим: auto, manual, acceptEdits или plan".into();},
@@ -2463,7 +2473,7 @@ impl App {
                     self.notice = format!("Тема оформления: {label} ({arg})");
                 } else {
                     self.notice =
-                        "Неизвестная тема. Нажми F4 или введи /theme для выбора из 24 тем.".into();
+                        "Неизвестная тема. Нажми F4 или введи /theme для выбора из 40 тем.".into();
                 }
             }
             "/refresh"=>self.refresh(),
@@ -4002,10 +4012,11 @@ mod tests {
         let mut app = App::new(true).unwrap();
         app.demo();
         let items = app.items(Picker::Themes, "");
-        assert_eq!(items.len(), 24);
+        assert_eq!(items.len(), 40);
         assert!(items.iter().any(|i| i.id == "graphite" && i.detail.contains("Тёмная тема")));
+        assert!(items.iter().any(|i| i.id == "synthwave" && i.detail.contains("Тёмная тема")));
         assert!(items.iter().any(|i| i.id == "paper" && i.detail.contains("Светлая тема")));
-        assert!(items.iter().any(|i| i.id == "frost" && i.detail.contains("Светлая тема")));
+        assert!(items.iter().any(|i| i.id == "sky_day" && i.detail.contains("Светлая тема")));
         assert!(items.iter().any(|i| i.id == "oled" && i.detail.contains("Тёмная тема")));
 
         for &(id, _, _, _) in &relay_desktop::model::THEME_SPECS {
@@ -4013,7 +4024,7 @@ mod tests {
             assert_eq!(app.theme(), id);
         }
         app.command("/theme nonexistent-theme");
-        assert_eq!(app.theme(), "frost");
+        assert_eq!(app.theme(), "sky_day");
     }
 
     #[test]

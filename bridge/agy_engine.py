@@ -270,12 +270,12 @@ def native_history(sid):
                 pending_tool_ids.clear()
                 txt = _strip_tags(row.get("content", ""))
                 if txt:
-                    messages.append({"role": "user", "text": txt, "uuid": f"agy-u-{step_idx}"})
+                    messages.append({"role": "user", "text": txt, "uuid": f"agy-u-{step_idx}", "backend": "agy"})
             elif kind == "PLANNER_RESPONSE":
                 pending_tool_ids.clear()
                 txt = str(row.get("content") or "").strip()
                 if txt:
-                    messages.append({"role": "assistant", "text": txt, "uuid": f"agy-a-{step_idx}"})
+                    messages.append({"role": "assistant", "text": txt, "uuid": f"agy-a-{step_idx}", "backend": "agy"})
                 for idx, tc in enumerate(row.get("tool_calls") or []):
                     if not isinstance(tc, dict):
                         continue
@@ -286,6 +286,7 @@ def native_history(sid):
                         "tool": str(tc.get("name") or "Действие"),
                         "input": tc.get("args") if isinstance(tc.get("args"), dict) else {},
                         "tool_id": tid,
+                        "backend": "agy",
                     })
             elif kind == "GENERIC" and pending_tool_ids:
                 tid = pending_tool_ids.popleft()
@@ -295,6 +296,7 @@ def native_history(sid):
                     "text": out,
                     "failed": row.get("status") == "ERROR",
                     "tool_id": tid,
+                    "backend": "agy",
                 })
     return messages[-600:]
 
@@ -439,6 +441,11 @@ class AgyRun:
             "isSidechain": False,
             "userType": "external",
             "relayBackend": "agy",
+            "relayModel": self.model,
+            "relayMode": self.mode,
+            "relayEffort": self.effort,
+            "relayActor": getattr(self.owner, "actor", ""),
+            "relayAgentName": (self.cluster_context or {}).get("name", ""),
             "message": message,
         }
         if self.session_id:

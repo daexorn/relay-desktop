@@ -2603,7 +2603,7 @@ mod tests {
 
     #[test]
     fn all_24_shared_themes_render_cleanly_with_distinct_palettes() {
-        assert_eq!(relay_desktop::model::THEME_SPECS.len(), 24);
+        assert_eq!(relay_desktop::model::THEME_SPECS.len(), 40);
         let mut app = App::new(true).unwrap();
         app.demo();
         for &(id, _, is_light, spec_colors) in &relay_desktop::model::THEME_SPECS {

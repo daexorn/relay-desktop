@@ -27,16 +27,19 @@ class MultiAgentLockThemeTest {
     }
 
     @Test fun allTwentyFourThemesSyncWithDesktopSpecs() {
-        assertEquals(24, THEMES.size)
+        assertEquals(40, THEMES.size)
         val dark = THEMES.filter { !it.light }
         val light = THEMES.filter { it.light }
-        assertEquals(18, dark.size)
-        assertEquals(6, light.size)
+        assertEquals(30, dark.size)
+        assertEquals(10, light.size)
         val expectedIds = listOf(
             "graphite", "midnight", "obsidian", "tokyo", "catppuccin", "gruvbox",
             "kanagawa", "everforest", "cyber", "aurora", "forest", "plum",
             "ember", "ocean", "nord", "rose", "dracula", "oled",
+            "monokai", "ayu", "synthwave", "cobalt", "matrix", "vesper",
+            "poimandres", "horizon", "zenburn", "sakura_night", "arctic_void", "copper",
             "paper", "sand", "mint", "latte", "solarized", "frost",
+            "lavender", "peach", "sage", "sky_day",
         )
         assertEquals(expectedIds, THEMES.map { it.id })
         for (t in THEMES) {
@@ -48,6 +51,25 @@ class MultiAgentLockThemeTest {
             assertTrue(p.subtleAccent.alpha in 0.1f..0.2f)
             assertTrue(p.borderSubtle.alpha > 0.5f)
         }
+        val slash = builtinSlashCommands().map { it.name }
+        assertTrue(slash.containsAll(listOf("usage", "cost", "status", "clear", "help")))
+
+        val msgs = listOf(
+            Message(role = "user", text = "ку", backend = "claude", model = "claude-sonnet-4-6", mode = "auto", actor = "maisdev"),
+            Message(role = "assistant", text = "Привет!", backend = "claude", model = "claude-sonnet-4-6", mode = "auto", actor = "maisdev"),
+            Message(role = "user", text = "проверь тесты", backend = "agy", model = "gemini-3.1-pro", mode = "plan", actor = "maisdev"),
+            Message(role = "tool", tool = "run_command", backend = "agy"),
+            Message(role = "assistant", text = "Готово", backend = "agy", model = "gemini-3.1-pro", mode = "plan", actor = "maisdev"),
+        )
+        val attrs = computeAttributions(msgs, "codex", busy = false)
+        assertEquals("claude", attrs[1].backend)
+        assertEquals("Claude Code", attrs[1].who)
+        assertTrue(attrs[1].toWhom.contains("maisdev"))
+        assertTrue(attrs[1].how.contains("Sonnet 4.6"))
+        assertEquals("agy", attrs[4].backend)
+        assertEquals("Antigravity (agy)", attrs[4].who)
+        assertTrue(attrs[4].how.contains("Gemini 3.1 Pro"))
+        assertTrue(attrs[4].how.contains("через 1 шаг"))
     }
 
     @Test fun codexAndAgyBackendSwitchingAndCatalogs() {

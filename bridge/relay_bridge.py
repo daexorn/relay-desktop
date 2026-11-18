@@ -31,6 +31,7 @@ import hmac
 import stat
 import urllib.request
 import urllib.error
+import zlib
 
 MAX_REQUEST = 26 * 1024 * 1024
 MAX_HISTORY = 16 * 1024 * 1024
@@ -336,10 +337,14 @@ class Transcripts:
 
     def history(self, session):
         path = self.path(session)
+        return self.history_from_rows(records(path))
+
+    @staticmethod
+    def history_from_rows(rows_iter):
         # Follow the last primary branch, excluding abandoned assistant retries.
         nodes = collections.OrderedDict()
         parents = {}
-        for row in records(path):
+        for row in rows_iter:
             if row.get("uuid") and not row.get("isSidechain"):
                 parents[row["uuid"]] = row.get("parentUuid")
             if row.get("type") in ("user", "assistant") and not row.get("isSidechain"):
@@ -377,6 +382,14 @@ class Transcripts:
             if not isinstance(message,dict):continue
             role = message.get("role", row.get("type"))
             content = message.get("content", "")
+            rb = row.get("relayBackend")
+            if rb not in ("claude", "codex", "agy", "api"):
+                rb = "codex" if row.get("codexThreadId") else ("agy" if row.get("agySessionId") else "claude")
+            row_model = str(message.get("model") or row.get("relayModel") or "")
+            row_actor = str(row.get("relayActor") or "")
+            row_mode = str(row.get("relayMode") or "")
+            row_effort = str(row.get("relayEffort") or "")
+            row_agent = str(row.get("relayAgentName") or "")
             # Slash commands (/model, /context…) become one action: the command and what it printed.
             raw = plain(content).strip() if role == "user" else ""
             if raw.startswith("<command-name>"):
@@ -384,13 +397,13 @@ class Transcripts:
                 args = re.search(r"<command-args>(.*?)</command-args>", raw, re.S)
                 line = ((name.group(1).strip() if name else "") + " " + (args.group(1).strip() if args else "")).strip()
                 if line:
-                    command = {"role": "tool", "tool": "SlashCommand", "input": {"command": line}, "tool_id": "cmd-" + str(row.get("uuid", ""))}
+                    command = {"role": "tool", "tool": "SlashCommand", "input": {"command": line}, "tool_id": "cmd-" + str(row.get("uuid", "")), "backend": rb}
                     result.append(command)
                 continue
             if raw.startswith(("<local-command-stdout>", "<local-command-stderr>")):
                 output = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", re.sub(r"</?local-command-std(?:out|err)>", "", raw)).strip()
                 if command is not None:
-                    result.append({"role": "tool_result", "text": output[:24000], "failed": raw.startswith("<local-command-stderr>"), "tool_id": command["tool_id"]})
+                    result.append({"role": "tool_result", "text": output[:24000], "failed": raw.startswith("<local-command-stderr>"), "tool_id": command["tool_id"], "backend": rb})
                     command = None
                 continue
             text = visible_text(plain(content)) if role == "user" else plain(content)
@@ -406,7 +419,17 @@ class Transcripts:
                         images.append({"media_type": source.get("media_type", "image/png"),
                                        "data": source.get("data", "") if b.pop("_relay_keep", False) else ""})
             if text or images:
-                entry = {"role": role, "text": text, "uuid": row.get("uuid", "")}
+                entry = {"role": role, "text": text, "uuid": row.get("uuid", ""), "backend": rb}
+                if row_model:
+                    entry["model"] = row_model
+                if row_actor:
+                    entry["actor"] = row_actor
+                if row_mode:
+                    entry["mode"] = row_mode
+                if row_effort:
+                    entry["effort"] = row_effort
+                if row_agent:
+                    entry["agent_name"] = row_agent
                 if images:
                     entry["images"] = images
                 result.append(entry)
@@ -415,10 +438,13 @@ class Transcripts:
                     if not isinstance(b, dict):
                         continue
                     if b.get("type") == "tool_use":
-                        result.append({"role": "tool", "tool": b.get("name", "Действие"), "input": b.get("input", {}), "tool_id": b.get("id", "")})
+                        t_entry = {"role": "tool", "tool": b.get("name", "Действие"), "input": b.get("input", {}), "tool_id": b.get("id", ""), "backend": rb}
+                        if row_model:
+                            t_entry["model"] = row_model
+                        result.append(t_entry)
                     elif b.get("type") == "tool_result":
                         output = plain(b.get("content", ""))
-                        result.append({"role": "tool_result", "text": output[:24000], "failed": bool(b.get("is_error")), "tool_id": b.get("tool_use_id", "")})
+                        result.append({"role": "tool_result", "text": output[:24000], "failed": bool(b.get("is_error")), "tool_id": b.get("tool_use_id", ""), "backend": rb})
         return result[-600:]
 
 
@@ -549,9 +575,206 @@ class SessionMeta:
         self.update(change)
         return created[0] if created else ident
 
+    @property
+    def vault_dir(self):
+        return self.path.parent / "vault"
+
+    @property
+    def turns_dir(self):
+        return self.path.parent / "turns"
+
+    @staticmethod
+    def _derive_lock_keys(password, salt_bytes):
+        dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt_bytes, 200_000, dklen=96)
+        return dk[:32].hex(), dk[32:64], dk[64:96]
+
     @staticmethod
     def _hash_lock(password, salt_bytes):
         return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt_bytes, 200_000).hex()
+
+    @staticmethod
+    def _xor_keystream(data, enc_key, nonce):
+        out = bytearray(len(data))
+        block_idx = 0
+        for off in range(0, len(data), 32):
+            ks = hmac.digest(enc_key, nonce + block_idx.to_bytes(8, "big"), "sha256")
+            chunk = data[off : off + 32]
+            clen = len(chunk)
+            xored = int.from_bytes(chunk, "big") ^ int.from_bytes(ks[:clen], "big")
+            out[off : off + clen] = xored.to_bytes(clen, "big")
+            block_idx += 1
+        return bytes(out)
+
+    def seal_vault(self, sid, enc_key, mac_key, payload):
+        low = str(sid).lower()
+        vdir = self.vault_dir
+        vdir.mkdir(parents=True, mode=0o700, exist_ok=True)
+        try:
+            os.chmod(vdir, 0o700)
+        except OSError:
+            pass
+        nonce = os.urandom(16)
+        compressed = zlib.compress(json.dumps(payload, ensure_ascii=False).encode("utf-8"), level=6)
+        ciphertext = self._xor_keystream(compressed, enc_key, nonce)
+        tag = hmac.digest(mac_key, b"RVLT1" + nonce + ciphertext, "sha256")
+        blob = b"RVLT1" + nonce + tag + ciphertext
+        target = vdir / f"{low}.vault"
+        tmp = vdir / f".{low}.vault.tmp"
+        tmp.write_bytes(blob)
+        os.chmod(tmp, 0o600)
+        tmp.replace(target)
+        legacy = vdir / f"{low}.legacy"
+        if legacy.exists():
+            try:
+                legacy.unlink()
+            except OSError:
+                pass
+
+    def open_vault(self, sid, enc_key, mac_key):
+        low = str(sid).lower()
+        target = self.vault_dir / f"{low}.vault"
+        if not target.is_file():
+            legacy = self.vault_dir / f"{low}.legacy"
+            if legacy.is_file():
+                payload = json.loads(legacy.read_text(encoding="utf-8"))
+                self.seal_vault(sid, enc_key, mac_key, payload)
+                return payload
+            return None
+        blob = target.read_bytes()
+        if len(blob) < 53 or blob[:5] != b"RVLT1":
+            raise ValueError("Повреждён зашифрованный контейнер сессии.")
+        nonce, tag, ciphertext = blob[5:21], blob[21:53], blob[53:]
+        expected_tag = hmac.digest(mac_key, b"RVLT1" + nonce + ciphertext, "sha256")
+        if not hmac.compare_digest(tag, expected_tag):
+            raise ValueError("Неверный пароль сессии.")
+        plain = zlib.decompress(self._xor_keystream(ciphertext, enc_key, nonce))
+        return json.loads(plain.decode("utf-8"))
+
+    def write_legacy_quarantine(self, sid, payload):
+        low = str(sid).lower()
+        vdir = self.vault_dir
+        vdir.mkdir(parents=True, mode=0o700, exist_ok=True)
+        try:
+            os.chmod(vdir, 0o700)
+        except OSError:
+            pass
+        target = vdir / f"{low}.legacy"
+        tmp = vdir / f".{low}.legacy.tmp"
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        os.chmod(tmp, 0o600)
+        tmp.replace(target)
+
+    def has_vault(self, sid):
+        low = str(sid).lower()
+        return (self.vault_dir / f"{low}.vault").is_file() or (self.vault_dir / f"{low}.legacy").is_file()
+
+    def clear_vault(self, sid):
+        low = str(sid).lower()
+        for ext in (".vault", ".legacy"):
+            p = self.vault_dir / f"{low}{ext}"
+            if p.exists():
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+
+    def record_turn(self, sid, actor="", backend="claude", model="default", mode="manual", effort="default", steer=False, agent_name="", text_head=""):
+        low = str(sid).lower()
+        tdir = self.turns_dir
+        tdir.mkdir(parents=True, mode=0o700, exist_ok=True)
+        entry = {
+            "ts": time.time(),
+            "actor": str(actor or "")[:80],
+            "backend": str(backend or "claude"),
+            "model": str(model or "default")[:160],
+            "mode": str(mode or "manual")[:32],
+            "effort": str(effort or "default")[:32],
+            "steer": bool(steer),
+            "agent_name": str(agent_name or "")[:160],
+            "text_head": str(text_head or "").strip()[:120],
+        }
+        target = tdir / f"{low}.jsonl"
+        try:
+            with target.open("a", encoding="utf-8") as f:
+                fcntl.flock(f, fcntl.LOCK_EX)
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                f.flush()
+            os.chmod(target, 0o600)
+        except OSError:
+            pass
+
+    def enrich_turns(self, sid, messages):
+        low = str(sid).lower()
+        turns = []
+        target = self.turns_dir / f"{low}.jsonl"
+        if target.is_file():
+            try:
+                for line in target.read_text(encoding="utf-8", errors="replace").splitlines():
+                    if line.strip():
+                        turns.append(json.loads(line))
+            except (OSError, ValueError):
+                pass
+        turn_cursor = 0
+        user_indices = [idx for idx, m in enumerate(messages) if m.get("role") == "user"]
+        for pos, u_idx in enumerate(user_indices):
+            next_u = user_indices[pos + 1] if pos + 1 < len(user_indices) else len(messages)
+            umsg = messages[u_idx]
+            uhead = str(umsg.get("text") or "").strip()[:120]
+            matched = None
+            for cand in range(turn_cursor, len(turns)):
+                thead = str(turns[cand].get("text_head") or "").strip()
+                if thead and uhead and thead == uhead:
+                    matched = turns[cand]
+                    turn_cursor = cand + 1
+                    break
+            if matched is None and turn_cursor < len(turns) and len(turns) == len(user_indices):
+                matched = turns[turn_cursor]
+                turn_cursor += 1
+            # Infer backend from subsequent assistant/tool reply if native user row had default backend
+            reply_backend = next(
+                (
+                    messages[k].get("backend")
+                    for k in range(u_idx + 1, next_u)
+                    if messages[k].get("role") in ("assistant", "tool") and messages[k].get("backend") in ("claude", "codex", "agy", "api")
+                ),
+                None,
+            )
+            if matched:
+                if matched.get("actor") and not umsg.get("actor"):
+                    umsg["actor"] = matched["actor"]
+                if matched.get("backend") in ("claude", "codex", "agy", "api"):
+                    umsg["backend"] = matched["backend"]
+                if matched.get("model") and not umsg.get("model"):
+                    umsg["model"] = matched["model"]
+                if matched.get("mode") and not umsg.get("mode"):
+                    umsg["mode"] = matched["mode"]
+                if matched.get("effort") and not umsg.get("effort"):
+                    umsg["effort"] = matched["effort"]
+                if matched.get("steer"):
+                    umsg["steer"] = True
+                if matched.get("agent_name") and not umsg.get("agent_name"):
+                    umsg["agent_name"] = matched["agent_name"]
+            elif reply_backend and umsg.get("backend") in (None, "", "claude"):
+                umsg["backend"] = reply_backend
+
+            # Propagate turn context onto assistant/tool messages of this turn
+            t_backend = umsg.get("backend") if umsg.get("backend") in ("claude", "codex", "agy", "api") else (reply_backend or "claude")
+            for k in range(u_idx + 1, next_u):
+                child = messages[k]
+                if child.get("role") in ("assistant", "tool"):
+                    if child.get("backend") not in ("claude", "codex", "agy", "api"):
+                        child["backend"] = t_backend
+                    if not child.get("actor") and umsg.get("actor"):
+                        child["actor"] = umsg["actor"]
+                    if not child.get("mode") and umsg.get("mode"):
+                        child["mode"] = umsg["mode"]
+                    if not child.get("effort") and umsg.get("effort"):
+                        child["effort"] = umsg["effort"]
+                    if not child.get("model") and umsg.get("model") and umsg.get("model") != "default":
+                        child["model"] = umsg["model"]
+                    if not child.get("agent_name") and umsg.get("agent_name"):
+                        child["agent_name"] = umsg["agent_name"]
+        return messages
 
     @staticmethod
     def _validate_password(password):
@@ -565,6 +788,25 @@ class SessionMeta:
         lock = meta.get("lock")
         return bool(isinstance(lock, dict) and lock.get("salt") and lock.get("verifier"))
 
+    def unlock_keys(self, sid, password):
+        low = str(sid or "").lower()
+        sessions = self.read().get("sessions", {})
+        meta = sessions.get(sid) or sessions.get(low) or {}
+        lock = meta.get("lock")
+        if not (isinstance(lock, dict) and lock.get("salt") and lock.get("verifier")):
+            return None
+        if not isinstance(password, str) or not password or len(password) > 256:
+            return None
+        try:
+            salt = bytes.fromhex(lock["salt"])
+            expected = str(lock["verifier"])
+        except ValueError:
+            return None
+        verifier, enc_key, mac_key = self._derive_lock_keys(password, salt)
+        if not hmac.compare_digest(verifier, expected):
+            return None
+        return (enc_key, mac_key)
+
     def verify_lock(self, sid, password):
         low = str(sid or "").lower()
         sessions = self.read().get("sessions", {})
@@ -572,32 +814,31 @@ class SessionMeta:
         lock = meta.get("lock")
         if not (isinstance(lock, dict) and lock.get("salt") and lock.get("verifier")):
             return True
-        if not isinstance(password, str) or not password or len(password) > 256:
-            return False
-        try:
-            salt = bytes.fromhex(lock["salt"])
-            expected = str(lock["verifier"])
-        except ValueError:
-            return False
-        computed = self._hash_lock(password, salt)
-        return hmac.compare_digest(computed, expected)
+        return self.unlock_keys(sid, password) is not None
 
-    def set_lock(self, sid, password=None, current_password=None, remove=False, actor=""):
+    def set_lock(self, sid, password=None, current_password=None, remove=False, actor="", stub=None, redact_stored_title=False):
         sid = valid_id(sid)
+        prev_keys = None
         if self.is_locked(sid):
-            if not self.verify_lock(sid, current_password):
+            prev_keys = self.unlock_keys(sid, current_password)
+            if prev_keys is None:
                 raise ValueError("Неверный текущий пароль сессии.")
         elif remove:
-            return
+            return None, None
+        new_keys = None
         if not remove:
             self._validate_password(password)
             salt = os.urandom(16)
+            verifier, enc_key, mac_key = self._derive_lock_keys(password, salt)
+            new_keys = (enc_key, mac_key)
             lock_record = {
                 "salt": salt.hex(),
-                "verifier": self._hash_lock(password, salt),
+                "verifier": verifier,
                 "locked_at": time.time(),
                 "locked_by": str(actor)[:80],
             }
+            if stub:
+                lock_record["stub"] = stub
         else:
             lock_record = None
 
@@ -606,28 +847,68 @@ class SessionMeta:
             if remove:
                 meta.pop("lock", None)
             else:
+                if stub is None and isinstance(meta.get("lock"), dict) and meta["lock"].get("stub"):
+                    lock_record["stub"] = meta["lock"]["stub"]
                 meta["lock"] = lock_record
+                if redact_stored_title:
+                    meta.pop("title", None)
             meta["changed_by"] = str(actor)[:80]
             if set(meta) <= {"changed_by"}:
                 data["sessions"].pop(sid, None)
 
         self.update(change)
+        return prev_keys, new_keys
 
-    def apply(self, sessions, unlocked_ids=None):
+    def update_lock_stub(self, sid, stub, redact_stored_title=True):
+        low = str(sid).lower()
+        def change(data):
+            meta = data["sessions"].get(sid) or data["sessions"].get(low)
+            if isinstance(meta, dict) and isinstance(meta.get("lock"), dict):
+                meta["lock"]["stub"] = stub
+                if redact_stored_title:
+                    meta.pop("title", None)
+        self.update(change)
+
+    def apply(self, sessions, unlocked_ids=None, unlocked_titles=None):
         """Adds shared names, pins, folders, and password-lock redaction to the transcript list."""
         data = self.read()
         folders = sorted(data["folders"], key=lambda f: f.get("order", 0))
         known = {f["id"] for f in folders}
         unlocked = {str(x).lower() for x in (unlocked_ids or set())}
+        extra_titles = unlocked_titles or {}
+        seen_low = {str(r["id"]).lower() for r in sessions}
+        merged_sessions = list(sessions)
+        for sid_key, meta in data.get("sessions", {}).items():
+            low = str(sid_key).lower()
+            if low in seen_low or not isinstance(meta, dict):
+                continue
+            lock = meta.get("lock")
+            stub = lock.get("stub") if isinstance(lock, dict) else None
+            if isinstance(lock, dict) and lock.get("salt") and lock.get("verifier") and isinstance(stub, dict):
+                seen_low.add(low)
+                merged_sessions.append({
+                    "id": sid_key,
+                    "native_id": stub.get("native_id", sid_key),
+                    "title": "Защищённая сессия",
+                    "cwd": stub.get("cwd", str(Path.home())),
+                    "modified": float(stub.get("modified") or lock.get("locked_at") or 0.0),
+                    "messages": 0,
+                    "backend": stub.get("backend", "claude"),
+                })
+        merged_sessions.sort(key=lambda r: float(r.get("modified") or 0.0), reverse=True)
         rows = []
-        for row in sessions:
+        for row in merged_sessions:
             sid = str(row["id"])
             low = sid.lower()
             meta = data["sessions"].get(sid) or data["sessions"].get(low) or {}
             row = dict(row)
-            if meta.get("title"):
+            dec_info = extra_titles.get(low) or {}
+            if dec_info.get("auto_title") and row.get("title") == "Защищённая сессия":
+                row["title"] = dec_info["auto_title"]
+            custom_t = dec_info.get("custom_title") or meta.get("title")
+            if custom_t:
                 row["auto_title"] = row["title"]
-                row["title"] = meta["title"]
+                row["title"] = custom_t
             row["pinned"] = float(meta.get("pinned") or 0)
             row["folder"] = meta.get("folder") if meta.get("folder") in known else ""
             lock = meta.get("lock")
@@ -643,6 +924,13 @@ class SessionMeta:
 
     def forget(self, sid):
         low = str(sid or "").lower()
+        self.clear_vault(sid)
+        tfile = self.turns_dir / f"{low}.jsonl"
+        if tfile.exists():
+            try:
+                tfile.unlink()
+            except OSError:
+                pass
         self.update(lambda data: (data["sessions"].pop(sid, None), data["sessions"].pop(low, None)))
 
 
@@ -1001,7 +1289,8 @@ class FileTransfers:
 
 class Bridge:
     def __init__(self, send=emit, transcripts=None, binary=None):
-        self.send = send
+        self._raw_send = send
+        self.send = self._send_enriched
         self._custom_transcripts = transcripts is not None
         self.transcripts = transcripts or Transcripts()
         self._explicit_binary = binary
@@ -1041,8 +1330,10 @@ class Bridge:
         self.desktop_context = ""
         self.actor = ""
         self.board, self.board_file = load_board()
-        self.meta = SessionMeta()
+        self.meta = SessionMeta(self.transcripts.root.parent / "sessions-meta.json" if self._custom_transcripts else None)
         self._local_unlocked = set()
+        self._local_unlocked_keys = {}
+        self._active_vault_keys = {}
         self.host_ref = None
         self.catalog = None
         self.catalog_probe = False
@@ -1102,11 +1393,275 @@ class Bridge:
             self.backend_catalogs[agent] = None
             self.probe_backend_catalog(agent)
 
+    def _send_enriched(self, event):
+        if isinstance(event, dict) and event.get("type") == "claude":
+            sid = event.get("sid")
+            data = event.get("data")
+            run = self.runs.get(sid) if isinstance(sid, str) else None
+            if isinstance(data, dict) and run is not None:
+                data.setdefault("relay_backend", getattr(run, "backend", "claude"))
+                data.setdefault("relay_model", getattr(run, "model", ""))
+                data.setdefault("relay_mode", getattr(run, "mode", ""))
+                data.setdefault("relay_effort", getattr(run, "effort", ""))
+                data.setdefault("relay_actor", getattr(run, "actor", "") or self.actor)
+                cc = getattr(run, "cluster_context", None) or {}
+                if cc.get("name"):
+                    data.setdefault("relay_agent_name", cc["name"])
+                if data.get("type") == "result" and isinstance(sid, str):
+                    self._sync_materialized_vault(sid, keep_file=bool(getattr(run, "busy", False)))
+        self._raw_send(event)
+
     def _caller_unlocked(self, explicit_client=None):
         client = explicit_client if explicit_client is not None else getattr(CLIENT, "value", None)
         if client is not None and hasattr(client, "unlocked"):
             return client.unlocked
         return self._local_unlocked
+
+    def _caller_keys(self, explicit_client=None):
+        client = explicit_client if explicit_client is not None else getattr(CLIENT, "value", None)
+        if client is not None and hasattr(client, "unlocked_keys"):
+            return client.unlocked_keys
+        return self._local_unlocked_keys
+
+    def _find_unlocked_keys(self, sid):
+        low = str(sid).lower()
+        keys = self._caller_keys().get(low)
+        if keys:
+            return keys
+        if low in self._active_vault_keys:
+            return self._active_vault_keys[low]
+        if self.host_ref is not None:
+            with self.host_ref.lock:
+                for c in self.host_ref.clients:
+                    if c.alive and low in getattr(c, "unlocked_keys", {}):
+                        return c.unlocked_keys[low]
+        return None
+
+    def _collect_session_payload(self, sid, custom_title_override=None):
+        low = sid.lower()
+        meta_all = self.meta.read().get("sessions", {})
+        cur_meta = meta_all.get(sid) or meta_all.get(low) or {}
+        custom_title = custom_title_override if custom_title_override is not None else cur_meta.get("title", "")
+        found = self.transcripts.find(sid)
+        if found is not None and found.is_file():
+            info = self.transcripts.metadata(found)
+            try:
+                rel = str(found.relative_to(self.transcripts.root))
+            except ValueError:
+                rel = found.name
+            payload = {
+                "sid": sid,
+                "kind": "jsonl",
+                "rel_path": rel,
+                "jsonl": found.read_text(encoding="utf-8", errors="replace"),
+                "auto_title": info["title"],
+                "custom_title": custom_title,
+                "cwd": info["cwd"],
+                "modified": info["modified"],
+                "backend": info.get("backend", "claude"),
+                "native_id": info.get("native_id", sid),
+            }
+            return payload, found
+        if self._scan_agy_native() and self.agy["has_native_session"](sid):
+            agy_dir = self.agy["agy_data_dir"]() / "brain" / low
+            tpath = agy_dir / ".system_generated/logs/transcript.jsonl"
+            ncwd = self.agy["native_cwd"](sid) or str(Path.home())
+            mtime = tpath.stat().st_mtime if tpath.is_file() else time.time()
+            raw_t = tpath.read_text(encoding="utf-8", errors="replace") if tpath.is_file() else ""
+            msgs = self.agy["native_history"](sid)
+            auto_t = next((m["text"][:80] for m in msgs if m.get("role") == "user" and m.get("text")), "Разговор AGY")
+            payload = {
+                "sid": sid,
+                "kind": "agy",
+                "jsonl": raw_t,
+                "auto_title": auto_t,
+                "custom_title": custom_title,
+                "cwd": ncwd,
+                "modified": mtime,
+                "backend": "agy",
+                "native_id": low,
+            }
+            return payload, agy_dir
+        if self._scan_codex_native() and self.codex["has_native_session"](sid):
+            ncwd = self.codex["native_cwd"](sid) or str(Path.home())
+            msgs = self.codex["native_history"](sid)
+            auto_t = next((m["text"][:80] for m in msgs if m.get("role") == "user" and m.get("text")), "Разговор Codex")
+            payload = {
+                "sid": sid,
+                "kind": "codex",
+                "messages": msgs,
+                "auto_title": auto_t,
+                "custom_title": custom_title,
+                "cwd": ncwd,
+                "modified": time.time(),
+                "backend": "codex",
+                "native_id": low,
+            }
+            return payload, None
+        return None, None
+
+    def _remove_plaintext_artifact(self, sid, kind, path_obj):
+        low = sid.lower()
+        if kind == "jsonl" and path_obj is not None and path_obj.is_file():
+            try:
+                path_obj.unlink()
+            except OSError:
+                pass
+            self.transcripts.cache.pop(str(path_obj), None)
+        elif kind == "agy" and path_obj is not None and path_obj.is_dir():
+            shutil.rmtree(path_obj, ignore_errors=True)
+        elif kind == "codex":
+            # Add tombstone so old <=0.17 Relay versions hide it in native_sessions
+            self.codex["add_tombstone"](low)
+
+    def _seal_session_to_vault(self, sid, keys, prev_keys=None):
+        enc_key, mac_key = keys
+        existing_payload = None
+        if prev_keys is not None:
+            try:
+                existing_payload = self.meta.open_vault(sid, prev_keys[0], prev_keys[1])
+            except Exception:
+                existing_payload = None
+        payload, path_obj = self._collect_session_payload(
+            sid,
+            custom_title_override=(existing_payload or {}).get("custom_title") if existing_payload else None,
+        )
+        if payload is None and existing_payload is not None:
+            payload = existing_payload
+        if payload is None:
+            return None
+        stub = {
+            "cwd": payload.get("cwd", str(Path.home())),
+            "modified": payload.get("modified", time.time()),
+            "backend": payload.get("backend", "claude"),
+            "native_id": payload.get("native_id", sid),
+            "vaulted": True,
+        }
+        self.meta.seal_vault(sid, enc_key, mac_key, payload)
+        self.meta.update_lock_stub(sid, stub, redact_stored_title=True)
+        run = self.runs.get(sid)
+        if not (run and run.busy):
+            self._remove_plaintext_artifact(sid, payload.get("kind", "jsonl"), path_obj)
+        return stub
+
+    def _restore_session_from_vault(self, sid, keys, keep_vault=False):
+        if keys is None:
+            return None
+        payload = self.meta.open_vault(sid, keys[0], keys[1])
+        if payload is None:
+            return None
+        kind = payload.get("kind", "jsonl")
+        low = sid.lower()
+        if kind == "jsonl":
+            rel = payload.get("rel_path") or f"-restored/{sid}.jsonl"
+            dest = self.transcripts.root / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            tmp = dest.with_suffix(".jsonl.tmp")
+            tmp.write_text(payload.get("jsonl", ""), encoding="utf-8")
+            os.chmod(tmp, 0o600)
+            tmp.replace(dest)
+            self.transcripts.cache.pop(str(dest), None)
+        elif kind == "agy":
+            tpath = self.agy["agy_data_dir"]() / "brain" / low / ".system_generated/logs/transcript.jsonl"
+            tpath.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+            tpath.write_text(payload.get("jsonl", ""), encoding="utf-8")
+        elif kind == "codex":
+            # Remove from codex tombstones when unlocked/unvaulted
+            tfile = Path.home() / ".config/relay-desktop/codex-deleted.json"
+            if tfile.is_file():
+                try:
+                    cur = json.loads(tfile.read_text(encoding="utf-8"))
+                    if isinstance(cur, list) and low in cur:
+                        cur = [x for x in cur if x != low]
+                        tfile.write_text(json.dumps(cur), encoding="utf-8")
+                except (OSError, ValueError):
+                    pass
+        if not keep_vault:
+            if payload.get("custom_title"):
+                self.meta.session(sid, title=payload["custom_title"])
+            self.meta.clear_vault(sid)
+        return payload
+
+    def _sync_materialized_vault(self, sid, keep_file=False):
+        if not self.meta.is_locked(sid):
+            return
+        keys = self._find_unlocked_keys(sid)
+        if keys is None:
+            return
+        try:
+            prev = self.meta.open_vault(sid, keys[0], keys[1]) or {}
+        except Exception:
+            prev = {}
+        found = self.transcripts.find(sid)
+        if found is not None and found.is_file():
+            info = self.transcripts.metadata(found)
+            try:
+                rel = str(found.relative_to(self.transcripts.root))
+            except ValueError:
+                rel = found.name
+            prev.update({
+                "sid": sid,
+                "kind": "jsonl",
+                "rel_path": rel,
+                "jsonl": found.read_text(encoding="utf-8", errors="replace"),
+                "auto_title": info["title"],
+                "cwd": info["cwd"],
+                "modified": info["modified"],
+                "backend": info.get("backend", prev.get("backend", "claude")),
+                "native_id": info.get("native_id", sid),
+            })
+            self.meta.seal_vault(sid, keys[0], keys[1], prev)
+            self.meta.update_lock_stub(sid, {
+                "cwd": info["cwd"],
+                "modified": info["modified"],
+                "backend": info.get("backend", "claude"),
+                "native_id": info.get("native_id", sid),
+                "vaulted": True,
+            }, redact_stored_title=True)
+            if not keep_file:
+                self._remove_plaintext_artifact(sid, "jsonl", found)
+                self._active_vault_keys.pop(sid.lower(), None)
+
+    def _quarantine_legacy_locked(self):
+        """Immediately hides any pre-0.18 locked plaintext transcripts from old Relay clients."""
+        sessions_meta = self.meta.read().get("sessions", {})
+        for sid_key, meta in list(sessions_meta.items()):
+            if not isinstance(meta, dict):
+                continue
+            lock = meta.get("lock")
+            if not (isinstance(lock, dict) and lock.get("salt") and lock.get("verifier")):
+                continue
+            if self.meta.has_vault(sid_key):
+                continue
+            run = self.runs.get(sid_key)
+            if run and run.busy:
+                continue
+            payload, path_obj = self._collect_session_payload(sid_key)
+            if payload is not None:
+                stub = {
+                    "cwd": payload.get("cwd", str(Path.home())),
+                    "modified": payload.get("modified", time.time()),
+                    "backend": payload.get("backend", "claude"),
+                    "native_id": payload.get("native_id", sid_key),
+                    "vaulted": True,
+                }
+                self.meta.write_legacy_quarantine(sid_key, payload)
+                self.meta.update_lock_stub(sid_key, stub, redact_stored_title=True)
+                self._remove_plaintext_artifact(sid_key, payload.get("kind", "jsonl"), path_obj)
+
+    def _unlocked_titles_for(self, keys_map):
+        out = {}
+        for low, keys in list((keys_map or {}).items()):
+            try:
+                payload = self.meta.open_vault(low, keys[0], keys[1])
+                if payload:
+                    out[low] = {
+                        "auto_title": payload.get("auto_title", ""),
+                        "custom_title": payload.get("custom_title", ""),
+                    }
+            except Exception:
+                pass
+        return out
 
     def is_locked_for_caller(self, sid, explicit_client=None):
         if not isinstance(sid, str) or not sid:
@@ -1275,12 +1830,46 @@ class Bridge:
         finally:
             self.updating = False
 
+    def _session_token_stats(self, sid):
+        in_tok = out_tok = cache_r = cache_w = turns = tools = 0
+        rows_src = []
+        found = self.transcripts.find(sid)
+        if found is not None and found.is_file():
+            rows_src = list(records(found))
+        elif self.meta.is_locked(sid) and self.meta.has_vault(sid):
+            keys = self._find_unlocked_keys(sid)
+            if keys is not None:
+                try:
+                    p = self.meta.open_vault(sid, keys[0], keys[1]) or {}
+                    for ln in str(p.get("jsonl") or "").splitlines():
+                        if ln.strip():
+                            rows_src.append(json.loads(ln))
+                except Exception:
+                    pass
+        for r in rows_src:
+            if r.get("isSidechain"):
+                continue
+            msg = r.get("message") if isinstance(r.get("message"), dict) else {}
+            if msg.get("role", r.get("type")) == "user" and not r.get("isMeta"):
+                turns += 1
+            if msg.get("role", r.get("type")) == "assistant":
+                u = msg.get("usage") if isinstance(msg.get("usage"), dict) else {}
+                in_tok += int(u.get("input_tokens") or 0)
+                out_tok += int(u.get("output_tokens") or 0)
+                cache_r += int(u.get("cache_read_input_tokens") or 0)
+                cache_w += int(u.get("cache_creation_input_tokens") or 0)
+                cnt = msg.get("content")
+                if isinstance(cnt, list):
+                    tools += sum(1 for b in cnt if isinstance(b, dict) and b.get("type") == "tool_use")
+        return {"turns": turns, "tools": tools, "in": in_tok, "out": out_tok, "cache_read": cache_r, "cache_write": cache_w}
+
     def quick_command(self, sid, text, backend="claude"):
-        """`/model x` and `/mode x` switch at once, whichever app sent them, and answer right away."""
-        match = re.fullmatch(r"\s*/(model|mode)(?:\s+(\S+))?\s*", text)
+        """Slash commands (`/usage`, `/cost`, `/status`, `/help`, `/model`, `/mode`, `/effort`) answer right away."""
+        match = re.fullmatch(r"\s*/(model|mode|effort|usage|limits|quota|cost|tokens|status|info|help|commands)(?:\s+(\S.*))?\s*", text)
         if not match:
             return False
-        kind, value = match.groups()
+        kind = match.group(1).lower()
+        value = (match.group(2) or "").strip()
         run = self.runs.get(sid)
         cat = self.catalog if backend == "claude" else self.backend_catalogs.get(backend)
         models = (cat or {}).get("models") or []
@@ -1299,9 +1888,9 @@ class Bridge:
                         run.control("set_model", model=None if chosen == "default" else chosen); run.model = chosen
                     self.send({"type": "model_changed", "sid": sid, "model": chosen, "backend": backend})
                     reply = "Модель: " + ((found or {}).get("displayName") or chosen) + (" — со следующего ответа." if run and run.busy else ".")
-        else:
+        elif kind == "mode":
             modes = {"auto": "auto", "авто": "auto", "plan": "plan", "план": "plan", "edits": "acceptEdits", "acceptedits": "acceptEdits", "manual": "manual", "ручной": "manual"}
-            mode = modes.get((value or "").lower())
+            mode = modes.get(value.lower())
             if not mode:
                 reply = "Режимы: `/mode auto`, `/mode manual`, `/mode edits`, `/mode plan`."
             else:
@@ -1309,10 +1898,83 @@ class Bridge:
                     run.control("set_permission_mode", mode=mode); run.mode = mode
                 self.send({"type": "mode_changed", "sid": sid, "mode": mode})
                 reply = "Режим: " + {"auto": "авто", "plan": "план", "acceptEdits": "правки файлов", "manual": "с подтверждением"}[mode] + "."
-        # The app has marked the chat busy for this message: answer it like Claude would.
+        elif kind == "effort":
+            eff_map = {"auto": "default", "default": "default", "авто": "default", "low": "low", "быстро": "low", "medium": "medium", "средне": "medium", "high": "high", "глубоко": "high", "max": "max", "макс": "max"}
+            eff = eff_map.get(value.lower())
+            if not eff:
+                reply = "Глубина рассуждений: `/effort auto`, `/effort low`, `/effort medium`, `/effort high`, `/effort max`."
+            else:
+                if run and not run.closed:
+                    run.effort = eff
+                reply = "Глубина рассуждений: `" + eff + "` (применится со следующего хода)."
+        elif kind in ("usage", "limits", "quota"):
+            if time.time() - (self.usage.updated_at or 0) > 25:
+                self.usage.fetch_oauth()
+            snap = self.usage.snapshot()
+            self.send(snap)
+            stats = self._session_token_stats(sid)
+            b_status = self.installer.status()
+            lines = ["### Лимиты и расход (`" + os.uname().nodename + "`)"]
+            if snap.get("windows"):
+                lines.append("")
+                lines.append("| Окно лимита | Использовано | Сброс |")
+                lines.append("| :--- | :--- | :--- |")
+                now_ts = time.time()
+                for w in snap["windows"]:
+                    pct = w.get("utilization")
+                    pct_s = f"**{pct:.0f}%**" if isinstance(pct, (int, float)) else "—"
+                    rst = w.get("resets_at")
+                    if isinstance(rst, (int, float)) and rst > now_ts:
+                        rem = int(rst - now_ts)
+                        rst_s = f"через {rem // 3600} ч {(rem % 3600) // 60} мин" if rem >= 3600 else f"через {max(1, rem // 60)} мин"
+                    else:
+                        rst_s = "—"
+                    lines.append(f"| {w.get('label') or w.get('id')} | {pct_s} | {rst_s} |")
+            else:
+                lines.append(f"- **Подписка Claude**: {snap.get('message') or 'данные обновятся после следующего ответа.'}")
+            lines.append("")
+            lines.append(
+                f"- **Токены текущей сессии**: вход `{stats['in']:,}` · выход `{stats['out']:,}` · кэш чтения `{stats['cache_read']:,}` · шагов инструментов `{stats['tools']}`"
+            )
+            cli_parts = [f"**{k}**: `{v['version']}`" if v.get("installed") else f"**{k}**: не установлен" for k, v in b_status.items()]
+            lines.append("- **CLI на сервере**: " + " · ".join(cli_parts))
+            reply = "\n".join(lines)
+        elif kind in ("cost", "tokens"):
+            stats = self._session_token_stats(sid)
+            reply = (
+                f"### Статистика сессии\n"
+                f"- **Запросов**: `{stats['turns']}` · **Вызовов инструментов**: `{stats['tools']}`\n"
+                f"- **Входные токены**: `{stats['in']:,}` · **Выходные токены**: `{stats['out']:,}`\n"
+                f"- **Чтение кэша**: `{stats['cache_read']:,}` · **Запись кэша**: `{stats['cache_write']:,}`"
+            )
+        elif kind in ("status", "info"):
+            b_status = self.installer.status()
+            locked_flag = "защищена паролем 🔒" if self.meta.is_locked(sid) else "открыта"
+            active_cnt = len(self.running())
+            cur_model = getattr(run, "model", None) or "default"
+            cur_mode = getattr(run, "mode", None) or "auto"
+            cli_parts = [f"`{k}` ({v['version']})" for k, v in b_status.items() if v.get("installed")]
+            reply = (
+                f"### Статус Relay · `{os.uname().nodename}`\n"
+                f"- **Активный агент**: `{backend}` · **Модель**: `{cur_model}` · **Режим**: `{cur_mode}`\n"
+                f"- **Сессия**: `{sid[:8]}…` ({locked_flag}) · **Активных потоков на сервере**: `{active_cnt}`\n"
+                f"- **Установленные CLI**: {', '.join(cli_parts) if cli_parts else 'нет'}"
+            )
+        else:
+            reply = (
+                "### Быстрые команды Relay\n"
+                "- `/usage` (`/limits`) — лимиты подписки Claude, сброс таймеров и расход токенов\n"
+                "- `/cost` (`/tokens`) — статистика токенов и инструментов текущей сессии\n"
+                "- `/status` — состояние сервера, установленных CLI и текущей сессии\n"
+                "- `/clear` (`/new`) — начать новую чистую сессию в этой папке\n"
+                "- `/compact` — сжать длинный контекст разговора (Claude Code)\n"
+                "- `/backend claude|codex|agy|api` — переключить агента\n"
+                "- `/model <имя>` · `/mode auto|manual|edits|plan` · `/effort auto|low|medium|high|max`\n"
+                "- `/lock` — управление паролем сессии · `/folder` — папки · `/radar` — радар агентов · `/theme` — 40 тем"
+            )
         if not (run and run.busy):
-            self.send({"type": "claude", "sid": sid, "data": {"type": "assistant", "message": {"content": [{"type": "text", "text": reply}]}}})
-            self.send({"type": "claude", "sid": sid, "data": {"type": "result", "is_error": False, "result": reply}})
+            self.send({"type": "claude", "sid": sid, "data": {"type": "assistant", "relay_backend": backend, "message": {"content": [{"type": "text", "text": reply}]}}})
+            self.send({"type": "claude", "sid": sid, "data": {"type": "result", "relay_backend": backend, "is_error": False, "result": reply}})
         else:
             self.send({"type": "notice", "sid": sid, "message": reply})
         return True
@@ -1334,8 +1996,13 @@ class Bridge:
                 if not run.cluster_context and not run.busy and not run.background and not run.pending and now - run.last_activity >= IDLE_CLAUDE_SECONDS:
                     run.close()
                     self.runs.pop(sid, None)
+                    self._sync_materialized_vault(sid, keep_file=False)
 
     def _raw_sessions_list(self):
+        try:
+            self._quarantine_legacy_locked()
+        except Exception:
+            pass
         sessions = list(self.transcripts.sessions())
         excluded = {s["id"].lower() for s in sessions}
         for linked in self.transcripts.linked_ids.values():
@@ -1355,9 +2022,10 @@ class Bridge:
         sessions.sort(key=lambda r: r["modified"], reverse=True)
         return sessions[:2000]
 
-    def _format_sessions_for(self, raw_sessions, unlocked_ids):
+    def _format_sessions_for(self, raw_sessions, unlocked_ids, unlocked_keys=None):
         try:
-            sessions, folders = self.meta.apply(raw_sessions, unlocked_ids=unlocked_ids)
+            titles = self._unlocked_titles_for(unlocked_keys)
+            sessions, folders = self.meta.apply(raw_sessions, unlocked_ids=unlocked_ids, unlocked_titles=titles)
         except OSError:
             sessions = [dict(r) for r in raw_sessions]
             folders = []
@@ -1371,17 +2039,17 @@ class Bridge:
         caller = getattr(CLIENT, "value", None)
         if only_caller:
             if caller is not None and hasattr(caller, "send"):
-                caller.send(self._format_sessions_for(raw, caller.unlocked))
+                caller.send(self._format_sessions_for(raw, caller.unlocked, getattr(caller, "unlocked_keys", None)))
             else:
-                self.send(self._format_sessions_for(raw, self._local_unlocked))
+                self.send(self._format_sessions_for(raw, self._local_unlocked, self._local_unlocked_keys))
             return
         if self.host_ref is not None:
             with self.host_ref.lock:
                 clients = [c for c in self.host_ref.clients if c.alive]
             for client in clients:
-                client.send(self._format_sessions_for(raw, client.unlocked))
+                client.send(self._format_sessions_for(raw, client.unlocked, getattr(client, "unlocked_keys", None)))
             return
-        self.send(self._format_sessions_for(raw, self._local_unlocked))
+        self.send(self._format_sessions_for(raw, self._local_unlocked, self._local_unlocked_keys))
 
     def hello(self):
         version = self.claude_version()
@@ -1437,7 +2105,16 @@ class Bridge:
             elif op == "session_meta":
                 sid = valid_id(req.get("sid"))
                 self._require_unlocked(sid)
-                self.meta.session(sid, title=req.get("title"), pinned=req.get("pinned"),
+                req_title = req.get("title")
+                if req_title is not None and self.meta.is_locked(sid) and self.meta.has_vault(sid):
+                    keys = self._find_unlocked_keys(sid)
+                    if keys:
+                        payload = self.meta.open_vault(sid, keys[0], keys[1])
+                        if payload is not None:
+                            payload["custom_title"] = " ".join(str(req_title).split())[:120]
+                            self.meta.seal_vault(sid, keys[0], keys[1], payload)
+                            req_title = None
+                self.meta.session(sid, title=req_title, pinned=req.get("pinned"),
                                   folder=req.get("folder"), actor=req.get("actor") or "")
                 self.send_sessions()
             elif op == "session_folder":
@@ -1452,39 +2129,75 @@ class Bridge:
             elif op == "session_lock":
                 sid = valid_id(req.get("sid"))
                 remove = bool(req.get("remove"))
-                self.meta.set_lock(
-                    sid,
-                    password=req.get("password"),
-                    current_password=req.get("current_password"),
-                    remove=remove,
-                    actor=req.get("actor") or "",
-                )
                 low = sid.lower()
+                with self.run_lock:
+                    idle_run = self.runs.get(sid)
+                    if idle_run and not idle_run.busy:
+                        idle_run.close()
+                        self.runs.pop(sid, None)
+                    prev_keys, new_keys = self.meta.set_lock(
+                        sid,
+                        password=req.get("password"),
+                        current_password=req.get("current_password"),
+                        remove=remove,
+                        actor=req.get("actor") or "",
+                    )
+                    if remove:
+                        if prev_keys:
+                            self._restore_session_from_vault(sid, prev_keys, keep_vault=False)
+                        else:
+                            self.meta.clear_vault(sid)
+                        self._active_vault_keys.pop(low, None)
+                    elif new_keys:
+                        self._seal_session_to_vault(sid, new_keys, prev_keys=prev_keys)
                 caller = getattr(CLIENT, "value", None)
                 if self.host_ref is not None:
                     with self.host_ref.lock:
                         other_clients = [c for c in self.host_ref.clients if c.alive and c is not caller]
                     for other in other_clients:
                         other.unlocked.discard(low)
+                        getattr(other, "unlocked_keys", {}).pop(low, None)
                         other.send({"type": "session_lock_changed", "sid": sid, "locked": not remove, "unlocked": remove})
                 unlocked_set = self._caller_unlocked()
+                caller_keys = self._caller_keys()
                 if remove:
                     unlocked_set.discard(low)
+                    caller_keys.pop(low, None)
                 else:
                     unlocked_set.add(low)
+                    if new_keys:
+                        caller_keys[low] = new_keys
                 self.send({"type": "session_lock_changed", "sid": sid, "locked": not remove, "unlocked": True})
                 self.send_sessions()
             elif op == "session_unlock":
                 sid = valid_id(req.get("sid"))
-                if self.meta.verify_lock(sid, req.get("password")):
-                    self._caller_unlocked().add(sid.lower())
+                low = sid.lower()
+                keys = self.meta.unlock_keys(sid, req.get("password"))
+                if keys is not None or not self.meta.is_locked(sid):
+                    if keys is not None:
+                        # Ensure any legacy quarantine is upgraded to encrypted vault right away
+                        try:
+                            self.meta.open_vault(sid, keys[0], keys[1])
+                        except ValueError:
+                            self.send({"type": "session_unlock_result", "sid": sid, "ok": False, "message": "Неверный пароль сессии."})
+                            return
+                        self._caller_keys()[low] = keys
+                    self._caller_unlocked().add(low)
                     self.send({"type": "session_unlock_result", "sid": sid, "ok": True})
                     self.send_sessions(only_caller=True)
                 else:
                     self.send({"type": "session_unlock_result", "sid": sid, "ok": False, "message": "Неверный пароль сессии."})
             elif op == "session_relock":
                 sid = valid_id(req.get("sid"))
-                self._caller_unlocked().discard(sid.lower())
+                low = sid.lower()
+                with self.run_lock:
+                    idle_run = self.runs.get(sid)
+                    if idle_run and not idle_run.busy:
+                        idle_run.close()
+                        self.runs.pop(sid, None)
+                    self._sync_materialized_vault(sid, keep_file=False)
+                self._caller_unlocked().discard(low)
+                self._caller_keys().pop(low, None)
                 locked_now = self.meta.is_locked(sid)
                 self.send({"type": "session_lock_changed", "sid": sid, "locked": locked_now, "unlocked": not locked_now})
                 self.send_sessions(only_caller=True)
@@ -1548,14 +2261,68 @@ class Bridge:
                 if self.is_locked_for_caller(sid):
                     self.send({"type": "session_locked", "sid": sid, "message": "Сессия защищена паролем. Введи пароль, чтобы открыть историю."})
                     return
+                messages = None
                 if self.transcripts.find(sid) is not None:
                     messages = self.transcripts.history(sid)
-                elif self._scan_codex_native() and self.codex["has_native_session"](sid):
-                    messages = self.codex["native_history"](sid)
-                elif self._scan_agy_native() and self.agy["has_native_session"](sid):
-                    messages = self.agy["native_history"](sid)
-                else:
-                    messages = self.transcripts.history(sid)
+                elif self.meta.is_locked(sid) and self.meta.has_vault(sid):
+                    keys = self._find_unlocked_keys(sid)
+                    if keys is not None:
+                        payload = self.meta.open_vault(sid, keys[0], keys[1])
+                        if payload is not None:
+                            if payload.get("kind") == "codex" and isinstance(payload.get("messages"), list):
+                                messages = list(payload["messages"])
+                            elif payload.get("kind") == "agy":
+                                # Parse AGY JSONL lines in memory
+                                agy_rows = []
+                                for line in str(payload.get("jsonl") or "").splitlines():
+                                    try:
+                                        r = json.loads(line)
+                                        if isinstance(r, dict):
+                                            agy_rows.append(r)
+                                    except ValueError:
+                                        pass
+                                messages = []
+                                pending_tids = collections.deque()
+                                for r in agy_rows:
+                                    k_type = r.get("type")
+                                    s_idx = r.get("step_index", len(messages))
+                                    if k_type == "USER_INPUT":
+                                        pending_tids.clear()
+                                        t_txt = self.agy["_strip_tags"](r.get("content", ""))
+                                        if t_txt:
+                                            messages.append({"role": "user", "text": t_txt, "uuid": f"agy-u-{s_idx}", "backend": "agy"})
+                                    elif k_type == "PLANNER_RESPONSE":
+                                        pending_tids.clear()
+                                        t_txt = str(r.get("content") or "").strip()
+                                        if t_txt:
+                                            messages.append({"role": "assistant", "text": t_txt, "uuid": f"agy-a-{s_idx}", "backend": "agy"})
+                                        for idx, tc in enumerate(r.get("tool_calls") or []):
+                                            if isinstance(tc, dict):
+                                                tid = f"agy-t-{s_idx}-{idx}"
+                                                pending_tids.append(tid)
+                                                messages.append({"role": "tool", "tool": str(tc.get("name") or "Действие"), "input": tc.get("args") if isinstance(tc.get("args"), dict) else {}, "tool_id": tid, "backend": "agy"})
+                                    elif k_type == "GENERIC" and pending_tids:
+                                        tid = pending_tids.popleft()
+                                        messages.append({"role": "tool_result", "text": str(r.get("content") or "")[:24000], "failed": r.get("status") == "ERROR", "tool_id": tid, "backend": "agy"})
+                                messages = messages[-600:]
+                            else:
+                                parsed_rows = []
+                                for line in str(payload.get("jsonl") or "").splitlines():
+                                    try:
+                                        r = json.loads(line)
+                                        if isinstance(r, dict):
+                                            parsed_rows.append(r)
+                                    except ValueError:
+                                        pass
+                                messages = self.transcripts.history_from_rows(parsed_rows)
+                if messages is None:
+                    if self._scan_codex_native() and self.codex["has_native_session"](sid):
+                        messages = self.codex["native_history"](sid)
+                    elif self._scan_agy_native() and self.agy["has_native_session"](sid):
+                        messages = self.agy["native_history"](sid)
+                    else:
+                        messages = self.transcripts.history(sid)
+                messages = self.meta.enrich_turns(sid, messages)
                 self.send({"type": "history", "sid": sid, "messages": messages})
             elif op == "folders":
                 path = directory(req.get("path"))
@@ -1573,17 +2340,17 @@ class Bridge:
                 self._require_unlocked(sid)
                 backend=req.get('backend','claude')
                 if backend not in ('claude','codex','agy','api'):raise ValueError('Неизвестный источник модели.')
-                api=self.api['configuration'](req.get('api')) if backend=='api' else None
-                if backend=='claude' and not self.binary:raise ValueError('На сервере нет Claude Code. Выбери другой агент или установи Claude Code.')
-                if backend=='codex' and not self.codex['codex_binary']():raise ValueError('На сервере не установлен Codex CLI (`codex`). Установи его или выбери другой агент.')
-                if backend=='agy' and not self.agy['agy_binary']():raise ValueError('На сервере не установлен Antigravity CLI (`agy`). Установи его или выбери другой агент.')
                 text = req.get("text")
                 images = req.get("images", [])
                 files = req.get("files", [])
                 if not isinstance(text, str) or (not text.strip() and not images and not files) or len(text.encode("utf-8")) > 1024 * 1024:
                     raise ValueError("Сообщение пустое или слишком длинное.")
-                if backend in ('claude','codex','agy') and not images and not files and self.quick_command(sid, text, backend=backend):
+                if not images and not files and self.quick_command(sid, text, backend=backend):
                     return
+                api=self.api['configuration'](req.get('api')) if backend=='api' else None
+                if backend=='claude' and not self.binary:raise ValueError('На сервере нет Claude Code. Выбери другой агент или установи Claude Code.')
+                if backend=='codex' and not self.codex['codex_binary']():raise ValueError('На сервере не установлен Codex CLI (`codex`). Установи его или выбери другой агент.')
+                if backend=='agy' and not self.agy['agy_binary']():raise ValueError('На сервере не установлен Antigravity CLI (`agy`). Установи его или выбери другой агент.')
                 validate_images(images)
                 if not isinstance(files, list) or any(not isinstance(f, dict) or f.get('type') not in ('file', 'uploaded_file') for f in files):
                     raise ValueError('Некорректное вложение.')
@@ -1654,6 +2421,11 @@ class Bridge:
                         self.runs.pop(sid, None)
                         run = None
                     if run is None:
+                        if self.meta.is_locked(sid) and self.meta.has_vault(sid) and self.transcripts.find(sid) is None:
+                            keys = self._find_unlocked_keys(sid)
+                            if keys is not None:
+                                self._active_vault_keys[sid.lower()] = keys
+                                self._restore_session_from_vault(sid, keys, keep_vault=True)
                         if len(self.runs) >= 24:
                             idle = next((key for key, value in self.runs.items() if not value.busy), None)
                             if idle:
@@ -1684,8 +2456,20 @@ class Bridge:
                             run = Run(self, sid, cwd, model, mode, bool(existing), effort)
                         self.runs[sid] = run
                     self.last_backend=backend
+                    run.actor = self.actor
                     claimed = not steer and not run.busy
                     run.last_activity = time.monotonic()
+                self.meta.record_turn(
+                    sid,
+                    actor=self.actor,
+                    backend=backend,
+                    model=model,
+                    mode=mode,
+                    effort=effort,
+                    steer=steer,
+                    agent_name=cluster_context.get("name", ""),
+                    text_head=visible_text(text) if isinstance(text, str) else "",
+                )
                 if decoded or uploaded:
                     saved = store_files(sid, decoded) if decoded else []
                     saved.extend(uploaded)
@@ -1766,8 +2550,12 @@ class Bridge:
 
     def close(self):
         self.auth.cancel(closing=True)
-        for run in list(self.runs.values()):
+        for sid, run in list(self.runs.items()):
             run.close()
+            try:
+                self._sync_materialized_vault(sid, keep_file=False)
+            except Exception:
+                pass
         if self.cluster:self.cluster.close()
         if self.desktop:self.desktop.close()
         self.files.close()
@@ -1848,6 +2636,7 @@ class HostClient:
         self.ready = threading.Condition()
         self.alive = True
         self.unlocked = set()
+        self.unlocked_keys = {}
         threading.Thread(target=self.writer, daemon=True).start()
 
     def send(self, event):

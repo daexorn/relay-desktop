@@ -176,11 +176,20 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         else -> models.ifEmpty { defaultBackendModels("claude") }
     }
 
-    fun commandsFor(backend: String): List<CommandInfo> = when (backend) {
-        "codex" -> codexCommands
-        "agy" -> agyCommands
-        "api" -> emptyList()
-        else -> commands
+    fun commandsFor(backend: String): List<CommandInfo> {
+        val base = when (backend) {
+            "codex" -> codexCommands
+            "agy" -> agyCommands
+            "api" -> emptyList()
+            else -> commands
+        }
+        val merged = base.toMutableList()
+        for (b in builtinSlashCommands()) {
+            if (merged.none { it.name.equals(b.name, ignoreCase = true) }) {
+                merged += b
+            }
+        }
+        return merged
     }
 
     fun setBackend(chat: Chat, target: String) {
@@ -880,6 +889,22 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         val name = text.substringBefore(' ')
         val arg = text.substringAfter(' ', "").trim()
         when {
+            name == "/clear" || name == "/new" -> {
+                c.draft = ""
+                newChat()
+                notice = "Открыта новая чистая сессия."
+                return true
+            }
+            name == "/effort" && arg.isNotEmpty() -> {
+                c.effort = when (arg.lowercase()) {
+                    "low", "быстро" -> "low"
+                    "medium", "средне" -> "medium"
+                    "high", "глубоко" -> "high"
+                    "max", "макс" -> "max"
+                    else -> "default"
+                }
+                notice = "Глубина: ${c.effort}"
+            }
             name == "/model" && arg.isNotEmpty() -> {
                 val active = c.activeBackend()
                 val catalog = when (active) {
@@ -958,14 +983,17 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         val profile = current ?: return
         if (c.isLockedGate()) return
         val activeBackend = c.activeBackend()
-        if (activeBackend == "api") {
+        val text = c.draft.trim()
+        val quickSlash = c.picked.isEmpty() && text.substringBefore(' ') in setOf(
+            "/usage", "/limits", "/quota", "/cost", "/tokens", "/status", "/info", "/help", "/commands"
+        )
+        if (activeBackend == "api" && !quickSlash) {
             profile.api.copy(model = c.apiModel.ifBlank { profile.api.model }).error()?.let {
                 c.transcript.error = it
                 c.changed()
                 return
             }
         }
-        val text = c.draft.trim()
         if ((text.isEmpty() && c.picked.isEmpty()) || link != Link.Online) return
         if (c.picked.isEmpty() && localCommand(c, text)) return
         if (!canSend(c)) return
@@ -977,7 +1005,27 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         val b64 = Base64.getEncoder()
         val images = JSONArray(attached.filter { it.image }.map { JSONObject().put("type", "base64").put("media_type", it.mime).put("data", b64.encodeToString(it.bytes)) })
         val files = JSONArray(attached.filter { !it.image }.map { JSONObject().put("type", "file").put("name", it.name).put("data", b64.encodeToString(it.bytes)) })
-        c.transcript.messages.add(Message("user", text, images = images.length(), files = attached.filter { !it.image }.map { it.name }))
+        val selectedModel = c.selectedModel(profile)
+        val actorStr = actor.ifBlank { "Relay Android" }
+        c.transcript.turnBackend = activeBackend
+        c.transcript.turnModel = selectedModel
+        c.transcript.turnMode = c.mode
+        c.transcript.turnEffort = c.effort
+        c.transcript.turnActor = actorStr
+        c.transcript.messages.add(
+            Message(
+                "user",
+                text,
+                images = images.length(),
+                files = attached.filter { !it.image }.map { it.name },
+                backend = activeBackend,
+                model = selectedModel,
+                actor = actorStr,
+                mode = c.mode,
+                effort = c.effort,
+                steer = steering,
+            )
+        )
         if (!steering) {
             c.transcript.busy = true
             c.transcript.status = "Отправляем"
@@ -985,7 +1033,6 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         if (c.title == "Новая сессия") c.title = text.ifEmpty { attached.firstOrNull()?.name.orEmpty() }.take(60)
         c.draft = ""
         c.changed()
-        val selectedModel = c.selectedModel(profile)
         val request = JSONObject()
             .put("op", "prompt")
             .put("sid", c.sid)

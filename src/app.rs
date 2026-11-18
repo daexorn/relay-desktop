@@ -88,6 +88,12 @@ struct Chat {
     sent_images: HashMap<usize, Vec<Attachment>>,
     queue: std::collections::VecDeque<QueuedPrompt>,
     queue_paused: bool,
+    turn_backend: String,
+    turn_model: String,
+    turn_mode: String,
+    turn_effort: String,
+    turn_actor: String,
+    turn_agent_name: String,
 }
 struct QueuedPrompt {
     text: String,
@@ -160,6 +166,12 @@ impl Chat {
             sent_images: HashMap::new(),
             queue: Default::default(),
             queue_paused: false,
+            turn_backend: String::new(),
+            turn_model: String::new(),
+            turn_mode: String::new(),
+            turn_effort: String::new(),
+            turn_actor: String::new(),
+            turn_agent_name: String::new(),
         }
     }
 }
@@ -194,9 +206,7 @@ pub struct RelayApp {
     deleted_sessions: std::collections::HashSet<String>,
     /// Session being renamed in the sidebar, with the text typed so far.
     renaming: Option<(String, String)>,
-    folder_renaming: Option<(String, String)>,
-    /// New folder being named; Some(sid) moves that session into it once created.
-    folder_creating: Option<(String, Option<String>)>,
+    folder_dialog: Option<session_actions::FolderDialog>,
     search: String,
     editor: Option<Editor>,
     api_editor: Option<api_settings::Editor>,
@@ -271,8 +281,7 @@ impl RelayApp {
             radar_open: None,
             deleted_sessions: Default::default(),
             renaming: None,
-            folder_renaming: None,
-            folder_creating: None,
+            folder_dialog: None,
             search: String::new(),
             editor: None,
             api_editor: None,
@@ -1578,6 +1587,86 @@ impl RelayApp {
             }
             return true;
         }
+        if matches!(draft_trimmed.as_str(), "/clear" | "/new") {
+            if let Some(c) = self.chats.get_mut(k) {
+                c.draft.clear();
+            }
+            self.new_chat();
+            self.notice = "Открыта новая чистая сессия.".into();
+            return true;
+        }
+        if draft_trimmed == "/folder" || draft_trimmed.starts_with("/folder ") {
+            let arg = draft_trimmed.strip_prefix("/folder").unwrap_or("").trim().to_owned();
+            let move_session = self.chats.get(k).map(|c| {
+                let cur_f = self
+                    .remote
+                    .get(&server.id)
+                    .and_then(|r| r.sessions.iter().find(|s| s.id == c.sid))
+                    .map(|s| s.folder.clone())
+                    .unwrap_or_default();
+                (c.sid.clone(), c.title.clone(), cur_f)
+            });
+            self.folder_dialog = Some(session_actions::FolderDialog {
+                server: server.id.clone(),
+                name: arg,
+                rename_folder_id: None,
+                move_session,
+                focused_once: false,
+                error: String::new(),
+            });
+            if let Some(c) = self.chats.get_mut(k) {
+                c.draft.clear();
+            }
+            return true;
+        }
+        if draft_trimmed == "/theme" || draft_trimmed.starts_with("/theme ") {
+            let arg = draft_trimmed.strip_prefix("/theme").unwrap_or("").trim().to_lowercase();
+            if arg.is_empty() {
+                self.settings_open = true;
+            } else if let Some(&(id, title, is_light, _)) = crate::model::THEME_SPECS
+                .iter()
+                .find(|&&(id, lbl, _, _)| id == arg || lbl.to_lowercase() == arg)
+            {
+                self.settings.appearance.theme = id.into();
+                self.settings.light = is_light;
+                self.notice = format!("Тема: {title}");
+                self.save();
+            } else {
+                self.settings_open = true;
+            }
+            if let Some(c) = self.chats.get_mut(k) {
+                c.draft.clear();
+            }
+            return true;
+        }
+        if let Some(new_title) = draft_trimmed.strip_prefix("/rename ") {
+            let trimmed_title = new_title.trim().to_owned();
+            if !trimmed_title.is_empty() {
+                if let Some(sid) = self.chats.get(k).map(|c| c.sid.clone()) {
+                    self.controller.send(
+                        &server.id,
+                        json!({"op":"session_meta","sid":sid,"title":trimmed_title,"actor":self.settings.actor()}),
+                    );
+                }
+                if let Some(c) = self.chats.get_mut(k) {
+                    c.title = trimmed_title;
+                    c.draft.clear();
+                }
+                return true;
+            }
+        }
+        if draft_trimmed == "/backend" {
+            let order = ["claude", "codex", "agy", "api"];
+            let pos = order.iter().position(|&x| x == backend).unwrap_or(0);
+            let next_b = order[(pos + 1) % order.len()];
+            self.settings.set_session_backend(k.to_owned(), next_b);
+            if let Some(c) = self.chats.get_mut(k) {
+                c.draft.clear();
+            }
+            self.notice = format!("Агент: {}", crate::model::backend_label(next_b));
+            self.save();
+            return true;
+        }
         if draft_trimmed == "/install" || draft_trimmed.starts_with("/install ") {
             let arg = draft_trimmed.strip_prefix("/install").unwrap_or("").trim();
             if arg.is_empty() {
@@ -1700,10 +1789,31 @@ impl RelayApp {
                 self.controller.send(&server.id, json!({"op":"control","sid":c.sid,"action":"mode","value":mode}));
                 true
             }
+            "/effort" if !arg.is_empty() => {
+                let eff = match arg.to_lowercase().as_str() {
+                    "low" | "быстро" => "low",
+                    "medium" | "средне" => "medium",
+                    "high" | "глубоко" => "high",
+                    "max" | "макс" => "max",
+                    _ => "default",
+                };
+                c.effort = eff.into();
+                self.notice = format!("Глубина: {eff}");
+                true
+            }
             "/stop" => {
                 self.controller.send(&server.id, json!({"op":"stop","sid":c.sid}));
                 c.status = "Останавливаем…".into();
                 c.queue_paused = true;
+                true
+            }
+            "/usage" | "/limits" | "/quota" | "/cost" | "/tokens" | "/status" | "/info" | "/help" | "/commands"
+                if c.busy && c.images.is_empty() =>
+            {
+                self.controller.send(
+                    &server.id,
+                    json!({"op":"prompt","backend":backend,"sid":c.sid,"cwd":c.cwd,"text":text}),
+                );
                 true
             }
             _ => false,
@@ -1733,8 +1843,23 @@ impl RelayApp {
             return;
         }
         let backend = self.backend_for_chat(&server, &k);
+        let is_quick_slash = self.chats.get(&k).is_some_and(|c| {
+            c.images.is_empty()
+                && matches!(
+                    c.draft.split_whitespace().next().unwrap_or(""),
+                    "/usage"
+                        | "/limits"
+                        | "/quota"
+                        | "/cost"
+                        | "/tokens"
+                        | "/status"
+                        | "/info"
+                        | "/help"
+                        | "/commands"
+                )
+        });
         server.api.enabled = backend == "api";
-        if server.api.enabled {
+        if server.api.enabled && !is_quick_slash {
             let mut profile = server.api.clone();
             if let Err(error) = profile.validate() {
                 if let Some(chat) = self.chats.get_mut(&k) { chat.error = error.to_string();chat.queue_paused = true; }
@@ -1777,12 +1902,18 @@ impl RelayApp {
             json!({"op":"_desktop_workspace","path":if server.local_control {server.local_workspace.clone()}else{None}}),
         );
         self.controller.send(&server.id,json!({"op":"_desktop_policy","sid":c.sid,"auto":server.local_control && c.mode=="auto"}));
-        let mut request = json!({"op":"prompt","backend":backend,"sid":c.sid,"cwd":c.cwd,"text":text,"images":images,"files":files,"model":c.model,"mode":c.mode,"effort":c.effort,"agent_role":c.agent_role,"custom_prompt":c.custom_prompt,"cluster_context":c.cluster_context,"actor":self.settings.actor(),"desktop_enabled":!worker && ((server.local_control && server.local_workspace.is_some()) || server.tests!="off"),"desktop_context":{"os":std::env::consts::OS,"workspace":server.local_workspace,"downloads":dirs::download_dir(),"auto":c.mode=="auto","local":server.local_control && server.local_workspace.is_some(),"tests":server.tests}});
+        let actor_str = self.settings.actor();
+        let mut request = json!({"op":"prompt","backend":backend,"sid":c.sid,"cwd":c.cwd,"text":text,"images":images,"files":files,"model":c.model,"mode":c.mode,"effort":c.effort,"agent_role":c.agent_role,"custom_prompt":c.custom_prompt,"cluster_context":c.cluster_context,"actor":actor_str,"desktop_enabled":!worker && ((server.local_control && server.local_workspace.is_some()) || server.tests!="off"),"desktop_context":{"os":std::env::consts::OS,"workspace":server.local_workspace,"downloads":dirs::download_dir(),"auto":c.mode=="auto","local":server.local_control && server.local_workspace.is_some(),"tests":server.tests}});
         if server.api.enabled {
             request["backend"] = json!("api");
             request["model"] = api_request["model"].take();
             request["api"] = api_request["api"].take();
         }
+        let sent_backend = request["backend"].as_str().unwrap_or(&backend).to_owned();
+        let sent_model = request["model"].as_str().unwrap_or(&c.model).to_owned();
+        let sent_mode = c.mode.clone();
+        let sent_effort = c.effort.clone();
+        let sent_agent_name = c.cluster_context["name"].as_str().unwrap_or("").to_owned();
         if self.demo {
             c.error = "Это предпросмотр интерфейса. Добавь свой сервер для работы.".into();
             return;
@@ -1792,10 +1923,23 @@ impl RelayApp {
             c.error = "Подключись к серверу перед отправкой.".into();
             return;
         }
+        c.turn_backend = sent_backend.clone();
+        c.turn_model = sent_model.clone();
+        c.turn_mode = sent_mode.clone();
+        c.turn_effort = sent_effort.clone();
+        c.turn_actor = actor_str.clone();
+        c.turn_agent_name = sent_agent_name.clone();
         c.user_at = c.messages.len();
         c.messages.push(Message {
             role: "user".into(),
             text,
+            backend: sent_backend,
+            model: sent_model,
+            actor: actor_str,
+            mode: sent_mode,
+            effort: sent_effort,
+            steer: steering,
+            agent_name: sent_agent_name,
             ..Default::default()
         });
         if !c.images.is_empty() {
@@ -2035,16 +2179,26 @@ impl RelayApp {
             )
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing.y = 7.;
-                // Perfectly vertically centered 30px brand & quick-tools row
+                // Perfectly vertically centered 30px brand, persistent little Claude buddy & quick-tools row
+                let any_busy = self.chats.values().any(|c| c.busy)
+                    || self.remote.values().any(|r| !r.running.is_empty());
                 ui.allocate_ui_with_layout(
                     Vec2::new(ui.available_width(), 30.),
                     Layout::left_to_right(Align::Center),
                     |ui| {
-                        ui.spacing_mut().item_spacing.x = 7.;
-                        let (brand_orb, _) =
-                            ui.allocate_exact_size(Vec2::splat(19.), egui::Sense::hover());
-                        design::icon(ui.painter(), brand_orb, Icon::Orbit, accent());
+                        ui.spacing_mut().item_spacing.x = 6.;
+                        let (mascot_r, mascot_resp) =
+                            ui.allocate_exact_size(Vec2::new(22., 18.), egui::Sense::hover());
+                        design::pixel_claude_mascot(ui, mascot_r, any_busy);
+                        mascot_resp.on_hover_text(if any_busy {
+                            "Клодёнок сейчас трудится над задачей!"
+                        } else {
+                            "Клодёнок на связи и готов помочь"
+                        });
                         ui.label(RichText::new("Relay").size(18.5).color(p.text).strong());
+                        let (star_r, _) =
+                            ui.allocate_exact_size(Vec2::splat(14.), egui::Sense::hover());
+                        design::pixel_rainbow_star(ui.painter(), star_r);
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             ui.spacing_mut().item_spacing.x = 5.;
                             if design::button(
@@ -2499,10 +2653,17 @@ impl RelayApp {
                             }
                             if connected
                                 && design::button(ui, "+ Папка", None, Kind::Ghost, p, Vec2::new(0., 24.))
-                                    .on_hover_text("Новая папка для сессий — её увидят все, кто подключается к серверу")
+                                    .on_hover_text("Открыть окно создания общей папки для сессий")
                                     .clicked()
                             {
-                                self.folder_creating = Some((String::new(), None));
+                                self.folder_dialog = Some(session_actions::FolderDialog {
+                                    server: server.id.clone(),
+                                    name: String::new(),
+                                    rename_folder_id: None,
+                                    move_session: None,
+                                    focused_once: false,
+                                    error: String::new(),
+                                });
                             }
                         });
                     },
@@ -2526,19 +2687,6 @@ impl RelayApp {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         ui.spacing_mut().item_spacing.y = 1.;
-                        if let Some((name, moving)) = self.folder_creating.clone() {
-                            let mut name = name;
-                            ui.add_space(6.);
-                            let submit = folder_name_field(ui, &mut name, "Название папки · Enter", p);
-                            match submit {
-                                Some(true) if !name.trim().is_empty() => {
-                                    self.controller.send(&server.id, json!({"op":"session_folder","name":name.trim(),"sid":moving,"actor":self.settings.actor()}));
-                                    self.folder_creating = None;
-                                }
-                                Some(_) => self.folder_creating = None,
-                                None => self.folder_creating = Some((name, moving)),
-                            }
-                        }
                         let mut shown = 0;
                         if !pinned.is_empty() {
                             section_heading(ui, Some("📌"), "Закреплённые", pinned.len(), None, p);
@@ -2558,45 +2706,46 @@ impl RelayApp {
                                 continue;
                             }
                             let collapsed = self.settings.collapsed_folders.contains(&folder.id) && query.is_empty();
-                            if let Some((id, text)) = self.folder_renaming.clone().filter(|(id, _)| *id == folder.id) {
-                                let mut text = text;
-                                ui.add_space(10.);
-                                match folder_name_field(ui, &mut text, "Новое название · Enter", p) {
-                                    Some(true) if !text.trim().is_empty() => {
-                                        self.controller.send(&server.id, json!({"op":"session_folder","id":id,"name":text.trim()}));
-                                        self.folder_renaming = None;
-                                    }
-                                    Some(_) => self.folder_renaming = None,
-                                    None => self.folder_renaming = Some((id, text)),
+                            let header = section_heading(ui, Some(if collapsed { "📁" } else { "📂" }), &folder.name, inside.len(), Some(collapsed), p);
+                            if header.clicked() {
+                                if collapsed {
+                                    self.settings.collapsed_folders.retain(|f| f != &folder.id);
+                                } else {
+                                    self.settings.collapsed_folders.push(folder.id.clone());
                                 }
-                            } else {
-                                let header = section_heading(ui, Some(if collapsed { "📁" } else { "📂" }), &folder.name, inside.len(), Some(collapsed), p);
-                                if header.clicked() {
-                                    if collapsed {
-                                        self.settings.collapsed_folders.retain(|f| f != &folder.id);
-                                    } else {
-                                        self.settings.collapsed_folders.push(folder.id.clone());
-                                    }
-                                    self.save();
-                                }
-                                if header.double_clicked() {
-                                    self.folder_renaming = Some((folder.id.clone(), folder.name.clone()));
-                                }
-                                header.context_menu(|ui| {
-                                    if ui.button("Переименовать папку").clicked() {
-                                        self.folder_renaming = Some((folder.id.clone(), folder.name.clone()));
-                                        ui.close_menu();
-                                    }
-                                    if ui
-                                        .button(RichText::new("Удалить папку").color(design::RED))
-                                        .on_hover_text("Сессии останутся, просто без папки")
-                                        .clicked()
-                                    {
-                                        self.controller.send(&server.id, json!({"op":"session_folder","id":folder.id,"delete":true}));
-                                        ui.close_menu();
-                                    }
+                                self.save();
+                            }
+                            if header.double_clicked() {
+                                self.folder_dialog = Some(session_actions::FolderDialog {
+                                    server: server.id.clone(),
+                                    name: folder.name.clone(),
+                                    rename_folder_id: Some(folder.id.clone()),
+                                    move_session: None,
+                                    focused_once: false,
+                                    error: String::new(),
                                 });
                             }
+                            header.context_menu(|ui| {
+                                if ui.button("Переименовать папку…").clicked() {
+                                    self.folder_dialog = Some(session_actions::FolderDialog {
+                                        server: server.id.clone(),
+                                        name: folder.name.clone(),
+                                        rename_folder_id: Some(folder.id.clone()),
+                                        move_session: None,
+                                        focused_once: false,
+                                        error: String::new(),
+                                    });
+                                    ui.close_menu();
+                                }
+                                if ui
+                                    .button(RichText::new("Удалить папку").color(design::RED))
+                                    .on_hover_text("Сессии останутся, просто без папки")
+                                    .clicked()
+                                {
+                                    self.controller.send(&server.id, json!({"op":"session_folder","id":folder.id,"delete":true}));
+                                    ui.close_menu();
+                                }
+                            });
                             if collapsed {
                                 continue;
                             }
@@ -2866,10 +3015,20 @@ impl RelayApp {
             RowAction::Rename(title) => {
                 self.controller.send(server, json!({"op":"session_meta","sid":session.id,"title":title,"actor":actor}));
             }
-            RowAction::Folder(folder) => {
-                self.controller.send(server, json!({"op":"session_meta","sid":session.id,"folder":folder,"actor":actor}));
+            RowAction::MoveToFolder => {
+                self.folder_dialog = Some(session_actions::FolderDialog {
+                    server: server.to_owned(),
+                    name: String::new(),
+                    rename_folder_id: None,
+                    move_session: Some((
+                        session.id.clone(),
+                        session.title.clone(),
+                        session.folder.clone(),
+                    )),
+                    focused_once: false,
+                    error: String::new(),
+                });
             }
-            RowAction::NewFolder => self.folder_creating = Some((String::new(), Some(session.id.clone()))),
         }
     }
     fn main_panel(&mut self, ctx: &egui::Context) {
@@ -2982,18 +3141,28 @@ impl RelayApp {
                         let chat_unlocked=chat.is_none_or(|c|c.unlocked);
                         let active_badge=self.server().zip(self.current_key()).map(|(srv, k)| crate::model::backend_short_label(&self.backend_for_chat(&srv, &k)));
                         ui.horizontal(|ui|{
-                            let right_reserve = if sid_opt.is_some() { 202. } else { 156. };
-                            let available=(ui.available_width()-right_reserve).max(100.);
+                            let compact_hdr = ui.available_width() < 540.;
+                            let right_reserve = if compact_hdr {
+                                if sid_opt.is_some() { 126. } else { 88. }
+                            } else if sid_opt.is_some() {
+                                216.
+                            } else {
+                                176.
+                            };
+                            let available=(ui.available_width()-right_reserve).max(90.);
                             ui.allocate_ui_with_layout(Vec2::new(available,44.),Layout::top_down(Align::Min),|ui|{
                                 ui.set_width(available);
                                 ui.horizontal(|ui|{
                                     ui.spacing_mut().item_spacing.x = 6.;
                                     if chat_busy {
-                                        let (orb,_)=ui.allocate_exact_size(Vec2::splat(16.),egui::Sense::hover());
-                                        design::orbital_core(ui, orb, active_engine_col, true);
+                                        let (orb,_)=ui.allocate_exact_size(Vec2::new(18., 15.),egui::Sense::hover());
+                                        design::engine_mascot(ui, orb, &active_backend_id, true);
                                     } else if chat_locked {
                                         let (lr,_)=ui.allocate_exact_size(Vec2::splat(14.),egui::Sense::hover());
                                         design::icon(ui.painter(),lr,if chat_unlocked{Icon::Unlock}else{Icon::Lock},if chat_unlocked{GREEN}else{accent()});
+                                    } else {
+                                        let (mr,_)=ui.allocate_exact_size(Vec2::new(16., 14.),egui::Sense::hover());
+                                        design::engine_mascot(ui, mr, &active_backend_id, false);
                                     }
                                     ui.add(egui::Label::new(RichText::new(title).size(15.).color(p.text)).truncate());
                                 });
@@ -3016,7 +3185,9 @@ impl RelayApp {
                             if let Some(server)=self.server(){
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                     ui.spacing_mut().item_spacing.x = 6.;
-                                    if design::button(ui,"Браузер",Some(Icon::Browser),Kind::Secondary,p,Vec2::new(106.,32.)).on_hover_text("Браузер выбранного сервера").clicked(){self.start_browser(&server);}
+                                    let browser_label = if compact_hdr { "" } else { "Браузер" };
+                                    let browser_size = if compact_hdr { Vec2::splat(32.) } else { Vec2::new(106., 32.) };
+                                    if design::button(ui,browser_label,Some(Icon::Browser),Kind::Secondary,p,browser_size).on_hover_text("Браузер выбранного сервера").clicked(){self.start_browser(&server);}
                                     if let Some(sid)=sid_opt {
                                         let lock_icon = if chat_locked && chat_unlocked { Icon::Unlock } else { Icon::Lock };
                                         let lock_tip = if chat_locked && !chat_unlocked {
@@ -3232,11 +3403,11 @@ impl RelayApp {
                             design::content(ui, width, |ui| {
                                 ui.horizontal(|ui| {
                                     let (orb, _) = ui.allocate_exact_size(
-                                        Vec2::splat(42.),
+                                        Vec2::new(42., 34.),
                                         egui::Sense::hover(),
                                     );
-                                    design::orbital_core(ui, orb, active_engine_col, false);
-                                    ui.add_space(4.);
+                                    design::engine_mascot(ui, orb, &active_backend_id, false);
+                                    ui.add_space(6.);
                                     ui.vertical(|ui| {
                                         label(
                                             ui,
@@ -3254,7 +3425,7 @@ impl RelayApp {
                                 });
                                 ui.add_space(16.);
 
-                                // Clickable Engine Signature Strip
+                                // Clickable Engine Signature Strip with pixel-art mascots
                                 ui.horizontal_wrapped(|ui| {
                                     ui.spacing_mut().item_spacing = Vec2::new(7., 7.);
                                     for (bid, btitle) in [
@@ -3271,7 +3442,7 @@ impl RelayApp {
                                             if selected_b { p.text } else { p.muted },
                                         );
                                         let (pr, presp) = ui.allocate_exact_size(
-                                            Vec2::new(g.size().x + 34., 30.),
+                                            Vec2::new(g.size().x + 38., 30.),
                                             egui::Sense::click(),
                                         );
                                         let h = ui.ctx().animate_bool_with_time(
@@ -3301,18 +3472,18 @@ impl RelayApp {
                                             ),
                                             egui::StrokeKind::Inside,
                                         );
-                                        design::icon(
-                                            ui.painter(),
+                                        design::engine_mascot(
+                                            ui,
                                             egui::Rect::from_center_size(
-                                                egui::pos2(pr.left() + 14., pr.center().y),
-                                                Vec2::splat(14.),
+                                                egui::pos2(pr.left() + 15., pr.center().y),
+                                                Vec2::new(16., 14.),
                                             ),
-                                            design::backend_icon(bid),
-                                            bcol,
+                                            bid,
+                                            false,
                                         );
                                         ui.painter().galley(
                                             egui::pos2(
-                                                pr.left() + 25.,
+                                                pr.left() + 28.,
                                                 pr.center().y - g.size().y * 0.5,
                                             ),
                                             g,
@@ -3433,6 +3604,11 @@ impl RelayApp {
                                     label(ui, "Открываем разговор", 13., p.muted);
                                 });
                             }
+                            let attributions = crate::model::compute_attributions(
+                                &chat.messages,
+                                &active_backend_id,
+                                chat.busy,
+                            );
                             let timeline = crate::timeline::items(&chat.messages);
                             let grouped_busy = chat.busy
                                 && matches!(
@@ -3468,6 +3644,7 @@ impl RelayApp {
                                     crate::timeline::Item::Message(index) => index,
                                 };
                                 let message = &chat.messages[index];
+                                let attr = &attributions[index];
                                 // Each message fades in once, when it first appears.
                                 let appear = ui.ctx().animate_bool_with_time_and_easing(
                                     egui::Id::new(("message-in", &k, index)),
@@ -3496,6 +3673,7 @@ impl RelayApp {
                                                 &mut self.markdown,
                                             );
                                         } else {
+                                            user_turn_caption(ui, attr, light, p);
                                             user_message_bubble(
                                                 ui,
                                                 &message.text,
@@ -3510,27 +3688,34 @@ impl RelayApp {
                                     }
                                     _ => {
                                         let top = ui.cursor().top();
-                                        // Subtle Engine Signature Header above assistant turns
-                                        ui.horizontal(|ui| {
-                                            ui.spacing_mut().item_spacing.x = 5.;
+                                        let msg_col = design::backend_color(&attr.backend, light);
+                                        // Per-message attribution: Кто → Кому · Как отвечал
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.spacing_mut().item_spacing = Vec2::new(5.5, 2.);
                                             let (er, _) = ui.allocate_exact_size(
-                                                Vec2::splat(13.),
+                                                Vec2::new(16., 14.),
                                                 egui::Sense::hover(),
                                             );
-                                            design::icon(
-                                                ui.painter(),
-                                                er,
-                                                design::backend_icon(&active_backend_id),
-                                                active_engine_col,
-                                            );
-                                            label(
-                                                ui,
-                                                crate::model::backend_label(&active_backend_id),
-                                                11.0,
-                                                active_engine_col,
-                                            );
+                                            design::engine_mascot(ui, er, &attr.backend, false);
+                                            label(ui, &attr.who, 11.4, msg_col);
+                                            if !attr.to_whom.is_empty() {
+                                                label(
+                                                    ui,
+                                                    format!("→ {}", attr.to_whom),
+                                                    10.9,
+                                                    p.muted,
+                                                );
+                                            }
+                                            if !attr.how.is_empty() {
+                                                label(
+                                                    ui,
+                                                    format!("· {}", attr.how),
+                                                    10.7,
+                                                    p.muted.gamma_multiply(0.84),
+                                                );
+                                            }
                                         });
-                                        ui.add_space(2.);
+                                        ui.add_space(3.);
                                         let file_links = crate::artifacts::links(&message.text);
                                         for (destination, _) in &file_links {
                                             self.markdown.add_link_hook(destination.clone());
@@ -3623,10 +3808,16 @@ impl RelayApp {
                                 );
                                 if !grouped_busy || !tel.subagents.is_empty() {
                                     ui.add_space(6.);
+                                    let turn_bid = if chat.turn_backend.is_empty() {
+                                        active_backend_id.as_str()
+                                    } else {
+                                        chat.turn_backend.as_str()
+                                    };
+                                    let turn_engine_col = design::backend_color(turn_bid, light);
                                     let pod_tint = tel
                                         .active_phase
                                         .map(|ph| design::phase_color(ph, light))
-                                        .unwrap_or(active_engine_col);
+                                        .unwrap_or(turn_engine_col);
                                     let pod_resp = egui::Frame::new()
                                         .fill(design::mix(
                                             p.side,
@@ -3642,14 +3833,16 @@ impl RelayApp {
                                         .show(ui, |ui| {
                                             ui.set_width((ui.available_width() - 28.).max(80.));
                                             ui.horizontal(|ui| {
+                                                ui.spacing_mut().item_spacing.x = 8.;
                                                 let (orb, _) = ui.allocate_exact_size(
-                                                    Vec2::splat(24.),
+                                                    Vec2::new(24., 20.),
                                                     egui::Sense::hover(),
                                                 );
-                                                design::orbital_core(ui, orb, pod_tint, true);
-                                                ui.add_space(4.);
+                                                design::engine_mascot(ui, orb, turn_bid, true);
+                                                ui.add_space(3.);
                                                 ui.vertical(|ui| {
                                                     ui.horizontal_wrapped(|ui| {
+                                                        ui.spacing_mut().item_spacing = Vec2::new(9., 4.);
                                                         label(
                                                             ui,
                                                             &tel.active_headline,
@@ -3800,7 +3993,7 @@ impl RelayApp {
             .map(str::to_owned);
         let models = self.models_for_backend(&server, &backend);
         self.game_test_cards(ui, &server.id, p);
-        let (commands, live) = self
+        let (mut commands, live) = self
             .remote
             .get(&server.id)
             .map(|r| {
@@ -3812,6 +4005,14 @@ impl RelayApp {
                 (cmds, r.protocol >= 4)
             })
             .unwrap_or_default();
+        for builtin in crate::model::builtin_slash_commands() {
+            if !commands
+                .iter()
+                .any(|c| c.name.eq_ignore_ascii_case(&builtin.name))
+            {
+                commands.push(builtin);
+            }
+        }
         let chat = self.chats.get_mut(k).unwrap();
         if let Some((sent, total)) = chat.upload_progress {
             let progress = sent as f32 / total.max(1) as f32;
@@ -4158,6 +4359,21 @@ impl RelayApp {
                                 .send(&server.id, json!({"op":"stop","sid":chat.sid}));
                             chat.status = "Останавливаем…".into();
                             chat.queue_paused = true;
+                        }
+                        let (pet_rect, pet_resp) = ui.allocate_exact_size(
+                            Vec2::new(22., 18.),
+                            egui::Sense::click(),
+                        );
+                        design::pixel_claude_mascot(ui, pet_rect, chat.busy);
+                        if pet_resp
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .on_hover_text("Клодёнок на связи · Нажми для меню команд (/usage, /cost, /status, /help)")
+                            .clicked()
+                        {
+                            if chat.draft.trim().is_empty() {
+                                chat.draft = "/".into();
+                            }
+                            ui.memory_mut(|m| m.request_focus(egui::Id::new("prompt-field")));
                         }
                     });
                 });
@@ -4785,6 +5001,7 @@ impl RelayApp {
         let visible = self.editor.is_some()
             || self.trust.is_some()
             || self.folder_open
+            || self.folder_dialog.is_some()
             || self.close_confirm
             || self.delete_chat.is_some()
             || self.lock_dialog.is_some()
@@ -4798,6 +5015,7 @@ impl RelayApp {
         );
         self.deletion_dialog(ctx, p, modal_t);
         self.lock_dialog(ctx, p, modal_t);
+        self.folder_modal(ctx, p, modal_t);
         self.agents_dialog(ctx, p, modal_t);
         self.radar_dialog(ctx, p, modal_t);
         if let Some(mut editor) = self.editor.take() {
@@ -5796,14 +6014,13 @@ enum RowAction {
     Pin(bool),
     StartRename,
     Rename(String),
-    Folder(String),
-    NewFolder,
+    MoveToFolder,
 }
 
 fn session_menu(
     ui: &mut egui::Ui,
     session: &Session,
-    folders: &[crate::model::SessionFolder],
+    _folders: &[crate::model::SessionFolder],
     connected: bool,
     blocked: Option<&str>,
     p: Palette,
@@ -5843,25 +6060,18 @@ fn session_menu(
                 ui.ctx().copy_text(resume_command_for(&session.cwd, &session.id, &session.native_id, &session.backend));
                 ui.close_menu();
             }
-            ui.menu_button("Переместить в папку", |ui| {
-                ui.set_min_width(180.);
-                for folder in folders {
-                    let here = session.folder == folder.id;
-                    if ui.add_enabled(!here, egui::Button::new(&folder.name)).clicked() {
-                        action = Some(RowAction::Folder(folder.id.clone()));
-                        ui.close_menu();
-                    }
-                }
-                if !session.folder.is_empty() && ui.button("Без папки").clicked() {
-                    action = Some(RowAction::Folder(String::new()));
-                    ui.close_menu();
-                }
-                ui.separator();
-                if ui.button("Новая папка…").clicked() {
-                    action = Some(RowAction::NewFolder);
-                    ui.close_menu();
-                }
-            });
+            if ui
+                .button(if session.folder.is_empty() {
+                    "Переместить в папку…"
+                } else {
+                    "Сменить / убрать папку…"
+                })
+                .on_hover_text("Открыть окно выбора или создания папки для сессии")
+                .clicked()
+            {
+                action = Some(RowAction::MoveToFolder);
+                ui.close_menu();
+            }
         }
     });
     ui.separator();
@@ -5945,6 +6155,40 @@ fn folder_name_field(ui: &mut egui::Ui, text: &mut String, hint: &str, p: Palett
     result
 }
 
+/// Right-aligned caption above a user message bubble: `кто → кому · как`.
+fn user_turn_caption(
+    ui: &mut egui::Ui,
+    attr: &crate::model::MessageAttribution,
+    light: bool,
+    p: Palette,
+) {
+    let bcol = design::backend_color(&attr.backend, light);
+    let row_w = ui.available_width().max(40.);
+    ui.allocate_ui_with_layout(
+        Vec2::new(row_w, 16.),
+        Layout::right_to_left(Align::Center),
+        |ui| {
+            ui.spacing_mut().item_spacing.x = 5.;
+            if !attr.how.is_empty() {
+                label(
+                    ui,
+                    format!("· {}", attr.how),
+                    10.5,
+                    p.muted.gamma_multiply(0.84),
+                );
+            }
+            if !attr.to_whom.is_empty() {
+                label(ui, &attr.to_whom, 10.9, bcol);
+                let (mr, _) = ui.allocate_exact_size(Vec2::new(14., 12.), egui::Sense::hover());
+                design::engine_mascot(ui, mr, &attr.backend, false);
+                label(ui, "→", 10.6, p.muted);
+            }
+            label(ui, &attr.who, 10.9, p.muted);
+        },
+    );
+    ui.add_space(2.);
+}
+
 fn day_group(time: f64) -> &'static str {
     let now = chrono::Local::now();
     let midnight = now
@@ -6006,6 +6250,51 @@ fn tool_name(name: &str) -> &str {
     }
 }
 fn reduce(c: &mut Chat, data: &Value) {
+    let stamp = |m: &mut Message, c: &Chat, data: &Value| {
+        let b = data["relay_backend"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&c.turn_backend);
+        if m.backend.is_empty() && !b.is_empty() {
+            m.backend = b.to_owned();
+        }
+        let mdl = data["relay_model"]
+            .as_str()
+            .or_else(|| data["message"]["model"].as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&c.turn_model);
+        if m.model.is_empty() && !mdl.is_empty() {
+            m.model = mdl.to_owned();
+        }
+        let md = data["relay_mode"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&c.turn_mode);
+        if m.mode.is_empty() && !md.is_empty() {
+            m.mode = md.to_owned();
+        }
+        let ef = data["relay_effort"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&c.turn_effort);
+        if m.effort.is_empty() && !ef.is_empty() {
+            m.effort = ef.to_owned();
+        }
+        let ac = data["relay_actor"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&c.turn_actor);
+        if m.actor.is_empty() && !ac.is_empty() {
+            m.actor = ac.to_owned();
+        }
+        let ag = data["relay_agent_name"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&c.turn_agent_name);
+        if m.agent_name.is_empty() && !ag.is_empty() {
+            m.agent_name = ag.to_owned();
+        }
+    };
     match data["type"].as_str().unwrap_or("") {
         "stream_event" => {
             let e = &data["event"];
@@ -6018,11 +6307,13 @@ fn reduce(c: &mut Chat, data: &Value) {
                     let block = &e["content_block"];
                     if block["type"] == "text" {
                         let at = c.messages.len();
-                        c.messages.push(Message {
+                        let mut msg = Message {
                             role: "assistant".into(),
                             text: block["text"].as_str().unwrap_or("").into(),
                             ..Default::default()
-                        });
+                        };
+                        stamp(&mut msg, c, data);
+                        c.messages.push(msg);
                         c.blocks.insert(index, at);
                     } else if block["type"] == "thinking" {
                         c.status = "Думает над ответом".into();
@@ -6055,12 +6346,17 @@ fn reduce(c: &mut Chat, data: &Value) {
                         if let Some((index, at)) = streamed {
                             c.blocks.remove(&index);
                             c.messages[at].text = text.into();
+                            let mut clone_msg = c.messages[at].clone();
+                            stamp(&mut clone_msg, c, data);
+                            c.messages[at] = clone_msg;
                         } else if !text.is_empty() && text.trim() != "No response requested." {
-                            c.messages.push(Message {
+                            let mut msg = Message {
                                 role: "assistant".into(),
                                 text: text.into(),
                                 ..Default::default()
-                            });
+                            };
+                            stamp(&mut msg, c, data);
+                            c.messages.push(msg);
                         }
                     } else if b["type"] == "tool_use" {
                         let id = b["id"].as_str().unwrap_or("");
@@ -6071,13 +6367,15 @@ fn reduce(c: &mut Chat, data: &Value) {
                             .take(20)
                             .any(|m| m.role == "tool" && m.tool_id == id)
                         {
-                            c.messages.push(Message {
+                            let mut msg = Message {
                                 role: "tool".into(),
                                 tool: b["name"].as_str().unwrap_or("Действие").into(),
                                 input: b["input"].clone(),
                                 tool_id: id.into(),
                                 ..Default::default()
-                            });
+                            };
+                            stamp(&mut msg, c, data);
+                            c.messages.push(msg);
                         }
                         c.status = tool_name(b["name"].as_str().unwrap_or("Работает")).into();
                     }
@@ -6139,11 +6437,13 @@ fn reduce(c: &mut Chat, data: &Value) {
                 .any(|m| m.role == "assistant" && !m.text.is_empty())
             {
                 if let Some(text) = data["result"].as_str() {
-                    c.messages.push(Message {
+                    let mut msg = Message {
                         role: "assistant".into(),
                         text: text.into(),
                         ..Default::default()
-                    });
+                    };
+                    stamp(&mut msg, c, data);
+                    c.messages.push(msg);
                 }
             }
         }

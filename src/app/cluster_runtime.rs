@@ -777,8 +777,7 @@ mod tests {
             radar_open: None,
             deleted_sessions: Default::default(),
             renaming: None,
-            folder_renaming: None,
-            folder_creating: None,
+            folder_dialog: None,
             search: String::new(),
             editor: None,
             api_editor: None,
@@ -1358,8 +1357,8 @@ mod tests {
 
     #[test]
     fn agent_installer_and_24_themes_work_in_desktop_state() {
-        assert_eq!(crate::model::THEME_SPECS.len(), 24);
-        assert_eq!(design::THEMES.len(), 24);
+        assert_eq!(crate::model::THEME_SPECS.len(), 40);
+        assert_eq!(design::THEMES.len(), 40);
         for (id, _) in design::THEMES {
             assert!(crate::model::valid_theme(id));
         }

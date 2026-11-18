@@ -270,6 +270,133 @@ class PrivateSessionsAndInstallerTest(unittest.TestCase):
                 finally:
                     b.close()
 
+    def test_locked_session_is_vaulted_and_invisible_to_old_relay_versions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            sid = str(uuid.uuid4())
+            projects = home / ".claude/projects"
+            tpath = make_transcript(projects, sid, "Супер-секретный заголовок", "Тайный текст переписки")
+            events = []
+            with mock.patch.dict(os.environ, {"HOME": str(home), "RELAY_BOARD_DIR": str(home / "no-shared")}):
+                b = bridge.Bridge(send=events.append, transcripts=bridge.Transcripts(projects))
+                try:
+                    b.dispatch({"op": "session_lock", "sid": sid, "password": "vault-password-99"})
+                    # Plaintext .jsonl MUST NOT exist in ~/.claude/projects anymore!
+                    self.assertFalse(tpath.exists())
+                    vault_file = b.meta.vault_dir / f"{sid.lower()}.vault"
+                    self.assertTrue(vault_file.is_file())
+                    raw_vault = vault_file.read_bytes()
+                    self.assertTrue(raw_vault.startswith(b"RVLT1"))
+                    self.assertNotIn("Тайный текст".encode("utf-8"), raw_vault)
+                    self.assertNotIn("Супер-секретный".encode("utf-8"), raw_vault)
+
+                    # Simulate an OLD <=0.15 Relay scanning ~/.claude/projects directly:
+                    old_scanner = bridge.Transcripts(projects)
+                    self.assertEqual(old_scanner.sessions(), [])
+                    with self.assertRaises(ValueError):
+                        old_scanner.history(sid)
+
+                    # Meanwhile, unlocked 0.18 client reads history decrypted in memory without writing .jsonl to disk!
+                    events.clear()
+                    b.dispatch({"op": "history", "sid": sid})
+                    hist = next(e for e in events if e.get("type") == "history")
+                    self.assertEqual(hist["messages"][1]["text"], "Тайный текст переписки")
+                    self.assertFalse(tpath.exists())
+
+                    # Removing lock with password restores .jsonl cleanly
+                    b.dispatch({
+                        "op": "session_lock",
+                        "sid": sid,
+                        "remove": True,
+                        "current_password": "vault-password-99",
+                    })
+                    self.assertTrue(tpath.is_file())
+                    self.assertFalse(vault_file.exists())
+                finally:
+                    b.close()
+
+    def test_legacy_016_locked_session_auto_quarantined_and_upgraded_on_unlock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            sid = str(uuid.uuid4())
+            projects = home / ".claude/projects"
+            tpath = make_transcript(projects, sid, "Старый заголовок 0.16", "Старый секрет 0.16")
+            events = []
+            with mock.patch.dict(os.environ, {"HOME": str(home), "RELAY_BOARD_DIR": str(home / "no-shared")}):
+                # Simulate pre-0.18 lock metadata while .jsonl was still in projects
+                meta = bridge.SessionMeta(projects.parent / "sessions-meta.json")
+                meta.set_lock(sid, password="legacy-password")
+                self.assertTrue(tpath.is_file())
+
+                b = bridge.Bridge(send=events.append, transcripts=bridge.Transcripts(projects))
+                try:
+                    b.dispatch({"op": "sessions"})
+                    # Immediately quarantined out of ~/.claude/projects so old Relay cannot open it!
+                    self.assertFalse(tpath.exists())
+                    self.assertEqual(bridge.Transcripts(projects).sessions(), [])
+
+                    # Unlocking upgrades legacy quarantine into encrypted RVLT1 vault
+                    events.clear()
+                    b.dispatch({"op": "session_unlock", "sid": sid, "password": "legacy-password"})
+                    self.assertTrue(any(e.get("type") == "session_unlock_result" and e.get("ok") is True for e in events))
+                    self.assertTrue((b.meta.vault_dir / f"{sid.lower()}.vault").is_file())
+                    self.assertFalse((b.meta.vault_dir / f"{sid.lower()}.legacy").exists())
+                finally:
+                    b.close()
+
+    def test_multi_agent_turn_attribution_preserves_who_to_whom_and_how(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            sid = str(uuid.uuid4())
+            projects = home / ".claude/projects"
+            proj = projects / "-tmp-proj"
+            proj.mkdir(parents=True, exist_ok=True)
+            rows = [
+                {"type": "user", "uuid": "u1", "parentUuid": None, "cwd": str(home), "message": {"role": "user", "content": "ку"}},
+                {"type": "assistant", "uuid": "a1", "parentUuid": "u1", "cwd": str(home), "message": {"role": "assistant", "model": "claude-sonnet-4-6", "content": [{"type": "text", "text": "Привет от Claude!"}]}},
+                {"type": "user", "uuid": "u2", "parentUuid": "a1", "cwd": str(home), "relayBackend": "codex", "relayActor": "maisdev", "relayMode": "auto", "relayModel": "gpt-5.4", "message": {"role": "user", "content": "привет кодекс"}},
+                {"type": "assistant", "uuid": "a2", "parentUuid": "u2", "cwd": str(home), "relayBackend": "codex", "relayMode": "auto", "message": {"role": "assistant", "model": "gpt-5.4", "content": [{"type": "text", "text": "Привет от Codex!"}]}},
+                {"type": "user", "uuid": "u3", "parentUuid": "a2", "cwd": str(home), "relayBackend": "agy", "relayActor": "maisdev", "relayMode": "plan", "message": {"role": "user", "content": "привет agy"}},
+                {"type": "assistant", "uuid": "a3", "parentUuid": "u3", "cwd": str(home), "relayBackend": "agy", "relayMode": "plan", "message": {"role": "assistant", "model": "gemini-3.1-pro-preview", "content": [{"type": "text", "text": "Привет от AGY!"}]}},
+            ]
+            (proj / f"{sid}.jsonl").write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n", encoding="utf-8")
+            events = []
+            with mock.patch.dict(os.environ, {"HOME": str(home), "RELAY_BOARD_DIR": str(home / "no-shared")}):
+                b = bridge.Bridge(send=events.append, transcripts=bridge.Transcripts(projects))
+                try:
+                    b.dispatch({"op": "history", "sid": sid})
+                    msgs = next(e for e in events if e.get("type") == "history")["messages"]
+                    self.assertEqual([m["backend"] for m in msgs], ["claude", "claude", "codex", "codex", "agy", "agy"])
+                    self.assertEqual(msgs[1]["model"], "claude-sonnet-4-6")
+                    self.assertEqual(msgs[3]["model"], "gpt-5.4")
+                    self.assertEqual(msgs[3]["actor"], "maisdev")
+                    self.assertEqual(msgs[5]["model"], "gemini-3.1-pro-preview")
+                    self.assertEqual(msgs[5]["mode"], "plan")
+                finally:
+                    b.close()
+
+    def test_slash_commands_usage_cost_status_help_work_across_all_backends(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            sid = str(uuid.uuid4())
+            projects = home / ".claude/projects"
+            make_transcript(projects, sid, "тест команд", "ответ")
+            events = []
+            with mock.patch.dict(os.environ, {"HOME": str(home), "RELAY_BOARD_DIR": str(home / "no-shared")}):
+                b = bridge.Bridge(send=events.append, transcripts=bridge.Transcripts(projects))
+                try:
+                    for cmd, bk, expected in (
+                        ("/usage", "claude", "Лимиты и расход"),
+                        ("/cost", "codex", "Статистика сессии"),
+                        ("/status", "agy", "Статус Relay"),
+                        ("/help", "api", "Быстрые команды Relay"),
+                    ):
+                        events.clear()
+                        self.assertTrue(b.quick_command(sid, cmd, backend=bk))
+                        self.assertTrue(any(e.get("type") == "claude" and expected in json.dumps(e, ensure_ascii=False) for e in events))
+                finally:
+                    b.close()
+
 
 if __name__ == "__main__":
     unittest.main()
