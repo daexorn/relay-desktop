@@ -1,11 +1,19 @@
-use super::editor::Editor;
-use relay_desktop::model::{Message, Permission};
+use super::{
+    editor::Editor,
+    markdown::{self, clean},
+};
+use ratatui::{
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+};
+use relay_desktop::model::{classify_tool, tool_target_preview, Message, Permission, ToolPhase};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, VecDeque},
     path::PathBuf,
 };
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Prompt {
@@ -359,15 +367,564 @@ impl Chat {
 }
 pub fn tool_name(name: &str) -> &str {
     match name {
-        "Bash" => "Команда на сервере",
-        "Read" => "Чтение файла",
-        "Write" => "Создание файла",
-        "Edit" => "Изменение файла",
-        "Grep" | "Glob" => "Поиск в проекте",
-        "WebSearch" | "WebFetch" => "Поиск в интернете",
+        "Bash" | "run_command" | "commandExecution" => "Команда на сервере",
+        "Read" | "read_file" => "Чтение файла",
+        "Write" | "write_file" => "Создание файла",
+        "Edit" | "MultiEdit" | "edit_file" | "apply_patch" => "Изменение файла",
+        "Grep" | "Glob" | "grep_search" | "find_by_name" => "Поиск в проекте",
+        "WebSearch" | "WebFetch" | "search_web" => "Поиск в интернете",
+        "Task" | "Agent" | "invoke_subagent" | "spawn_agent" | "swarm" => "Делегирование субагенту",
         "ExitPlanMode" => "План готов",
         _ => name,
     }
+}
+
+#[derive(Clone, Copy)]
+pub struct TranscriptTheme {
+    pub light: bool,
+    pub border: Color,
+    pub text: Color,
+    pub muted: Color,
+    pub accent: Color,
+    pub red: Color,
+    pub green: Color,
+}
+
+pub fn engine_badge(backend: &str) -> &'static str {
+    match backend {
+        "codex" => "◈ Codex",
+        "agy" => "◈ AGY",
+        "api" => "◈ API",
+        _ => "◈ Claude",
+    }
+}
+
+pub fn assistant_header(backend: &str) -> &'static str {
+    match backend {
+        "codex" => "◈ Codex",
+        "agy" => "◈ Antigravity",
+        "api" => "◈ API",
+        _ => "◈ Claude Code",
+    }
+}
+
+pub fn steps_word(n: usize) -> &'static str {
+    if n % 10 == 1 && n % 100 != 11 {
+        "шаг"
+    } else if (2..=4).contains(&(n % 10)) && !(12..=14).contains(&(n % 100)) {
+        "шага"
+    } else {
+        "шагов"
+    }
+}
+
+fn phase_color(phase: ToolPhase, light: bool) -> Color {
+    let (r, g, b) = phase.rgb(light);
+    Color::Rgb(r, g, b)
+}
+
+pub fn subagent_delegation_summary(m: &Message) -> (String, String) {
+    let i = &m.input;
+    let role = i["Role"]
+        .as_str()
+        .or_else(|| i["worker"].as_str())
+        .or_else(|| i["subagent_type"].as_str())
+        .or_else(|| i["agent_type"].as_str())
+        .or_else(|| i["TypeName"].as_str())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("Субагент");
+    let task = i["description"]
+        .as_str()
+        .or_else(|| i["title"].as_str())
+        .or_else(|| i["task"].as_str())
+        .or_else(|| i["Prompt"].as_str())
+        .or_else(|| i["prompt"].as_str())
+        .or_else(|| i["message"].as_str())
+        .unwrap_or("")
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+    (
+        relay_desktop::model::shorten(&clean(role.trim()), 36),
+        relay_desktop::model::shorten(&clean(task), 76),
+    )
+}
+
+fn collect_pair_diff(old_s: &str, new_s: &str, out: &mut Vec<(bool, String)>) {
+    let old_lines: Vec<&str> = old_s.lines().collect();
+    let new_lines: Vec<&str> = new_s.lines().collect();
+    let mut prefix = 0usize;
+    while prefix < old_lines.len()
+        && prefix < new_lines.len()
+        && old_lines[prefix] == new_lines[prefix]
+    {
+        prefix += 1;
+    }
+    let mut old_end = old_lines.len();
+    let mut new_end = new_lines.len();
+    while old_end > prefix
+        && new_end > prefix
+        && old_lines[old_end - 1] == new_lines[new_end - 1]
+    {
+        old_end -= 1;
+        new_end -= 1;
+    }
+    for &line in &old_lines[prefix..old_end] {
+        out.push((false, clean(line)));
+    }
+    for &line in &new_lines[prefix..new_end] {
+        out.push((true, clean(line)));
+    }
+}
+
+pub fn extract_edit_diff(m: &Message) -> Vec<(bool, String)> {
+    let i = &m.input;
+    let mut out = Vec::new();
+    if let Some(edits) = i["edits"].as_array() {
+        for item in edits {
+            let old_s = item["old_string"]
+                .as_str()
+                .or_else(|| item["Target"].as_str())
+                .unwrap_or("");
+            let new_s = item["new_string"]
+                .as_str()
+                .or_else(|| item["Replacement"].as_str())
+                .unwrap_or("");
+            if !old_s.is_empty() || !new_s.is_empty() {
+                collect_pair_diff(old_s, new_s, &mut out);
+            }
+        }
+    } else {
+        let old_s = i["old_string"].as_str().or_else(|| i["Target"].as_str());
+        let new_s = i["new_string"]
+            .as_str()
+            .or_else(|| i["Replacement"].as_str());
+        if old_s.is_some() || new_s.is_some() {
+            collect_pair_diff(old_s.unwrap_or(""), new_s.unwrap_or(""), &mut out);
+        } else if let Some(patch) = i["patch"].as_str().or_else(|| i["diff"].as_str()) {
+            for line in patch.lines() {
+                if let Some(rest) = line.strip_prefix('+').filter(|_| !line.starts_with("+++")) {
+                    out.push((true, clean(rest)));
+                } else if let Some(rest) =
+                    line.strip_prefix('-').filter(|_| !line.starts_with("---"))
+                {
+                    out.push((false, clean(rest)));
+                }
+            }
+        }
+    }
+    out
+}
+
+fn wrap_prefixed(
+    first_prefix: &str,
+    cont_prefix: &str,
+    prefix_style: Style,
+    body: Line<'static>,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    let pfx_w = first_prefix.width().max(cont_prefix.width());
+    if width <= pfx_w + 3 {
+        let mut combined = vec![Span::styled(first_prefix.to_owned(), prefix_style)];
+        combined.extend(body.spans);
+        return markdown::wrap(Line::from(combined), width);
+    }
+    let body_width = width.saturating_sub(pfx_w).max(1);
+    markdown::wrap(body, body_width)
+        .into_iter()
+        .enumerate()
+        .map(|(idx, part)| {
+            let pfx = if idx == 0 { first_prefix } else { cont_prefix };
+            let mut spans = vec![Span::styled(pfx.to_owned(), prefix_style)];
+            spans.extend(part.spans);
+            Line::from(spans)
+        })
+        .collect()
+}
+
+pub fn render_transcript(
+    messages: &[Message],
+    backend: &str,
+    busy: bool,
+    expanded: bool,
+    width: usize,
+    theme: TranscriptTheme,
+) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    let mut rows = vec![];
+    let mut by_id: BTreeMap<&str, &Message> = BTreeMap::new();
+    let mut positional: BTreeMap<usize, &Message> = BTreeMap::new();
+    let mut open_tools: Vec<usize> = Vec::new();
+    for (idx, m) in messages.iter().enumerate() {
+        if m.role == "tool" {
+            if m.tool_id.is_empty() {
+                open_tools.push(idx);
+            }
+        } else if m.role == "tool_result" {
+            if !m.tool_id.is_empty() {
+                by_id.insert(m.tool_id.as_str(), m);
+            } else if let Some(owner) = open_tools.pop() {
+                positional.insert(owner, m);
+            }
+        }
+    }
+
+    let mut i = 0usize;
+    while i < messages.len() {
+        let message = &messages[i];
+        match message.role.as_str() {
+            "user" => {
+                rows.extend(markdown::wrap(
+                    Line::from(vec![Span::styled(
+                        "› Вы",
+                        Style::default()
+                            .fg(theme.accent)
+                            .add_modifier(Modifier::BOLD),
+                    )]),
+                    width,
+                ));
+                rows.extend(markdown::render(
+                    &message.text,
+                    width,
+                    theme.text,
+                    theme.accent,
+                    theme.muted,
+                ));
+                rows.push(Line::default());
+                i += 1;
+            }
+            "assistant" => {
+                if !message.text.is_empty() {
+                    let (er, eg, eb) = relay_desktop::model::backend_rgb(backend, theme.light);
+                    rows.extend(markdown::wrap(
+                        Line::styled(
+                            assistant_header(backend).to_owned(),
+                            Style::default()
+                                .fg(Color::Rgb(er, eg, eb))
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        width,
+                    ));
+                    rows.extend(markdown::render(
+                        &message.text,
+                        width,
+                        theme.text,
+                        theme.accent,
+                        theme.muted,
+                    ));
+                    rows.push(Line::default());
+                }
+                i += 1;
+            }
+            "tool" => {
+                let mut group = vec![(i, message)];
+                let mut j = i + 1;
+                while j < messages.len() {
+                    let next = &messages[j];
+                    if next.role == "tool" {
+                        group.push((j, next));
+                        j += 1;
+                    } else if next.role == "tool_result"
+                        || (next.role == "assistant" && next.text.trim().is_empty())
+                    {
+                        j += 1;
+                    } else {
+                        break;
+                    }
+                }
+                rows.extend(render_pipeline_group(
+                    &group,
+                    &by_id,
+                    &positional,
+                    busy,
+                    expanded,
+                    width,
+                    theme,
+                ));
+                rows.push(Line::default());
+                i = j;
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+    rows
+}
+
+fn render_pipeline_group(
+    group: &[(usize, &Message)],
+    by_id: &BTreeMap<&str, &Message>,
+    positional: &BTreeMap<usize, &Message>,
+    busy: bool,
+    expanded: bool,
+    width: usize,
+    theme: TranscriptTheme,
+) -> Vec<Line<'static>> {
+    let mut rows = Vec::new();
+    let n = group.len();
+    let mut reads = 0usize;
+    let mut edits = 0usize;
+    let mut commands = 0usize;
+    let mut delegations = 0usize;
+    for &(_, m) in group {
+        match classify_tool(&m.tool) {
+            ToolPhase::Research => reads += 1,
+            ToolPhase::Edit => edits += 1,
+            ToolPhase::Terminal | ToolPhase::Desktop => commands += 1,
+            ToolPhase::Subagent => delegations += 1,
+            ToolPhase::Other => {}
+        }
+    }
+
+    let mut head_spans = vec![
+        Span::styled("╭─ ", Style::default().fg(theme.border)),
+        Span::styled(
+            "◈ Конвейер агента",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(" · {} {}", n, steps_word(n)),
+            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+        ),
+    ];
+    let counters: &[(usize, &str, ToolPhase)] = &[
+        (reads, "🔍", ToolPhase::Research),
+        (edits, "✎", ToolPhase::Edit),
+        (commands, "$_", ToolPhase::Terminal),
+        (delegations, "◈", ToolPhase::Subagent),
+    ];
+    let mut any_tag = false;
+    for &(count, icon, ph) in counters {
+        if count > 0 {
+            head_spans.push(Span::styled(
+                if any_tag { "  " } else { "   " },
+                Style::default().fg(theme.muted),
+            ));
+            head_spans.push(Span::styled(
+                format!("{icon}{count}"),
+                Style::default()
+                    .fg(phase_color(ph, theme.light))
+                    .add_modifier(Modifier::BOLD),
+            ));
+            any_tag = true;
+        }
+    }
+    head_spans.push(Span::styled(
+        if expanded {
+            "   [Ctrl+O свернуть]"
+        } else {
+            "   [Ctrl+O подробно]"
+        },
+        Style::default().fg(theme.muted),
+    ));
+    rows.extend(markdown::wrap(Line::from(head_spans), width));
+
+    let border_style = Style::default().fg(theme.border);
+    for (step_idx, &(msg_idx, tool_msg)) in group.iter().enumerate() {
+        let is_last = step_idx + 1 == n;
+        let result = if !tool_msg.tool_id.is_empty() {
+            by_id.get(tool_msg.tool_id.as_str()).copied()
+        } else {
+            positional.get(&msg_idx).copied()
+        };
+        let failed = result.is_some_and(|r| r.failed);
+        let running = result.is_none();
+        let phase = classify_tool(&tool_msg.tool);
+        let p_color = phase_color(phase, theme.light);
+
+        let (glyph, glyph_color) = if running {
+            (if busy { "◉ " } else { "⚙ " }, p_color)
+        } else if failed {
+            ("✕ ", theme.red)
+        } else {
+            ("✓ ", theme.green)
+        };
+
+        let mut step_spans = vec![
+            Span::styled(
+                glyph,
+                Style::default()
+                    .fg(glyph_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("[{}] ", phase.label()),
+                Style::default().fg(p_color).add_modifier(Modifier::BOLD),
+            ),
+        ];
+
+        if phase == ToolPhase::Subagent {
+            let (role, task) = subagent_delegation_summary(tool_msg);
+            step_spans.push(Span::styled(
+                format!("◈ Субагент · {role}"),
+                Style::default().fg(p_color).add_modifier(Modifier::BOLD),
+            ));
+            if !task.is_empty() {
+                step_spans.push(Span::styled(" -> ", Style::default().fg(theme.muted)));
+                step_spans.push(Span::styled(task, Style::default().fg(theme.text)));
+            }
+        } else {
+            let preview = clean(&tool_target_preview(tool_msg, 120));
+            let target_str = match tool_msg.tool.as_str() {
+                "Grep" | "grep_search" if !preview.is_empty() => format!("Grep {preview}"),
+                "Glob" | "find_by_name" if !preview.is_empty() => format!("Glob {preview}"),
+                _ if !preview.is_empty() => preview,
+                _ => clean(tool_name(&tool_msg.tool)),
+            };
+            step_spans.push(Span::styled(
+                target_str,
+                Style::default().fg(if failed { theme.red } else { theme.text }),
+            ));
+            if let Some(desc) = tool_msg.input["description"]
+                .as_str()
+                .map(clean)
+                .filter(|d| !d.trim().is_empty())
+            {
+                step_spans.push(Span::styled(
+                    format!("  · {}", desc.trim()),
+                    Style::default().fg(theme.muted),
+                ));
+            }
+        }
+
+        let (branch, cont_branch) = if is_last {
+            ("│  ╰─ ", "│     ")
+        } else {
+            ("│  ├─ ", "│  │  ")
+        };
+        rows.extend(wrap_prefixed(
+            branch,
+            cont_branch,
+            border_style,
+            Line::from(step_spans),
+            width,
+        ));
+
+        let sub_spine = if is_last { "│       " } else { "│  │    " };
+        let diffs = if phase == ToolPhase::Edit {
+            extract_edit_diff(tool_msg)
+        } else {
+            Vec::new()
+        };
+        if !diffs.is_empty() {
+            let limit = if expanded { 48 } else { 6 };
+            for &(added, ref dline) in diffs.iter().take(limit) {
+                let sign = if added { "+" } else { "-" };
+                let d_color = if added { theme.green } else { theme.red };
+                rows.extend(wrap_prefixed(
+                    sub_spine,
+                    sub_spine,
+                    border_style,
+                    Line::styled(format!("{sign} {dline}"), Style::default().fg(d_color)),
+                    width,
+                ));
+            }
+            if diffs.len() > limit {
+                rows.extend(wrap_prefixed(
+                    sub_spine,
+                    sub_spine,
+                    border_style,
+                    Line::styled(
+                        format!(
+                            "… ещё {} строк правок · Ctrl+O подробно",
+                            diffs.len() - limit
+                        ),
+                        Style::default().fg(theme.muted),
+                    ),
+                    width,
+                ));
+            }
+        }
+
+        if expanded && phase != ToolPhase::Edit {
+            if let Some(full_cmd) = tool_msg.input["command"]
+                .as_str()
+                .or_else(|| tool_msg.input["CommandLine"].as_str())
+                .filter(|c| c.lines().count() > 1)
+            {
+                for cmd_line in clean(full_cmd).lines().skip(1) {
+                    rows.extend(wrap_prefixed(
+                        sub_spine,
+                        sub_spine,
+                        border_style,
+                        Line::styled(cmd_line.to_owned(), Style::default().fg(theme.text)),
+                        width,
+                    ));
+                }
+            }
+        }
+
+        let show_output = if let Some(res) = result {
+            !res.text.trim().is_empty()
+                && (expanded
+                    || failed
+                    || matches!(
+                        phase,
+                        ToolPhase::Terminal | ToolPhase::Desktop | ToolPhase::Other
+                    )
+                    || (phase == ToolPhase::Edit && diffs.is_empty()))
+        } else {
+            false
+        };
+
+        if show_output {
+            let res = result.unwrap();
+            let cleaned = clean(&res.text);
+            let out_lines: Vec<&str> = cleaned
+                .lines()
+                .filter(|l| expanded || !l.trim().is_empty())
+                .collect();
+            let count = if expanded {
+                out_lines.len()
+            } else {
+                out_lines.len().min(4)
+            };
+            if count < out_lines.len() {
+                rows.extend(wrap_prefixed(
+                    sub_spine,
+                    sub_spine,
+                    border_style,
+                    Line::styled(
+                        format!(
+                            "… ещё {} строк · Ctrl+O развернуть",
+                            out_lines.len() - count
+                        ),
+                        Style::default().fg(theme.muted),
+                    ),
+                    width,
+                ));
+            }
+            for &line in out_lines.iter().skip(out_lines.len() - count) {
+                let line_color = if failed {
+                    theme.red
+                } else if line.starts_with('+') && !line.starts_with("+++") {
+                    theme.green
+                } else if line.starts_with('-') && !line.starts_with("---") {
+                    theme.red
+                } else {
+                    theme.muted
+                };
+                rows.extend(wrap_prefixed(
+                    sub_spine,
+                    sub_spine,
+                    border_style,
+                    Line::styled(line.to_owned(), Style::default().fg(line_color)),
+                    width,
+                ));
+            }
+        }
+    }
+
+    rows.extend(markdown::wrap(
+        Line::styled("╰────", Style::default().fg(theme.border)),
+        width,
+    ));
+    rows
 }
 
 #[cfg(test)]
@@ -460,5 +1017,113 @@ mod tests {
         let raw = serde_json::to_string(&c.saved()).unwrap();
         assert!(!raw.contains("locked"));
         assert!(!raw.contains("unlocked"));
+    }
+
+    #[test]
+    fn connected_pipeline_renders_spine_phases_subagents_diffs_and_engine_headers() {
+        let theme = TranscriptTheme {
+            light: false,
+            border: Color::DarkGray,
+            text: Color::White,
+            muted: Color::Gray,
+            accent: Color::Cyan,
+            red: Color::Red,
+            green: Color::Green,
+        };
+        let messages = vec![
+            Message {
+                role: "user".into(),
+                text: "Обнови рендер".into(),
+                ..Default::default()
+            },
+            Message {
+                role: "assistant".into(),
+                text: "Запускаю конвейер проверки.".into(),
+                ..Default::default()
+            },
+            Message {
+                role: "tool".into(),
+                tool: "Grep".into(),
+                tool_id: "t1".into(),
+                input: json!({"pattern": "AtlasCoordinates"}),
+                ..Default::default()
+            },
+            Message {
+                role: "tool_result".into(),
+                tool_id: "t1".into(),
+                text: "src/AtlasRenderer.java:42".into(),
+                ..Default::default()
+            },
+            Message {
+                role: "tool".into(),
+                tool: "invoke_subagent".into(),
+                tool_id: "t2".into(),
+                input: json!({"Role": "Coastline Verifier", "Prompt": "Проверь береговую линию"}),
+                ..Default::default()
+            },
+            Message {
+                role: "tool_result".into(),
+                tool_id: "t2".into(),
+                text: "Границы совпадают".into(),
+                ..Default::default()
+            },
+            Message {
+                role: "tool".into(),
+                tool: "Edit".into(),
+                tool_id: "t3".into(),
+                input: json!({
+                    "file_path": "/opt/project/AtlasRenderer.java",
+                    "old_string": "int offset = rawMargin();\nrender();",
+                    "new_string": "int offset = pixelAlignedMargin();\nrender();"
+                }),
+                ..Default::default()
+            },
+            Message {
+                role: "tool_result".into(),
+                tool_id: "t3".into(),
+                text: "Updated".into(),
+                ..Default::default()
+            },
+            Message {
+                role: "tool".into(),
+                tool: "Bash".into(),
+                tool_id: "t4".into(),
+                input: json!({"command": "cargo test --locked"}),
+                ..Default::default()
+            },
+        ];
+
+        for (backend, expected_head) in [
+            ("claude", "◈ Claude Code"),
+            ("codex", "◈ Codex"),
+            ("agy", "◈ Antigravity"),
+            ("api", "◈ API"),
+        ] {
+            let lines = render_transcript(&messages, backend, true, false, 110, theme);
+            assert!(lines.iter().all(|l| l.width() <= 110));
+            let text = lines
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(text.contains(expected_head));
+            assert!(text.contains("╭─ ◈ Конвейер агента · 4 шага"));
+            assert!(text.contains("🔍1"));
+            assert!(text.contains("✎1"));
+            assert!(text.contains("$_1"));
+            assert!(text.contains("◈1"));
+            assert!(text.contains("[Ctrl+O подробно]"));
+            assert!(text.contains("│  ├─ ✓ [ПОИСК]"));
+            assert!(text.contains("│  ├─ ✓ [СУБАГЕНТ] ◈ Субагент · Coastline Verifier -> Проверь береговую линию"));
+            assert!(text.contains("│  ├─ ✓ [ПРАВКА] AtlasRenderer.java"));
+            assert!(text.contains("- int offset = rawMargin();"));
+            assert!(text.contains("+ int offset = pixelAlignedMargin();"));
+            assert!(text.contains("│  ╰─ ◉ [КОМАНДА] $ cargo test --locked"));
+            assert!(text.contains("╰────"));
+        }
+
+        // Also ensure narrow widths (e.g. 28 cols on a 32x10 terminal) never overflow or panic
+        let narrow = render_transcript(&messages, "claude", true, true, 28, theme);
+        assert!(narrow.iter().all(|l| l.width() <= 28));
     }
 }

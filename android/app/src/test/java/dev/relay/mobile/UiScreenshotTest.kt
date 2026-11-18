@@ -27,17 +27,21 @@ class UiScreenshotTest {
     private val out = File("build/screens").apply { mkdirs() }
 
     private fun shot(name: String) {
-        // Infinite animations (typing dots) never let Compose go idle: drive the clock by hand.
+        // Drive the clock deterministically for crisp frame capture, then restore autoAdvance for clean teardown.
         rule.mainClock.autoAdvance = false
-        repeat(8) {
-            ShadowLooper.idleMainLooper()
-            rule.mainClock.advanceTimeBy(400)
-            Thread.sleep(120)
+        try {
+            repeat(8) {
+                ShadowLooper.idleMainLooper()
+                rule.mainClock.advanceTimeBy(400)
+                Thread.sleep(120)
+            }
+            val view = rule.activity.window.decorView.rootView
+            val bitmap = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
+            view.draw(Canvas(bitmap))
+            File(out, "$name.png").outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        } finally {
+            rule.mainClock.autoAdvance = true
         }
-        val view = rule.activity.window.decorView.rootView
-        val bitmap = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
-        view.draw(Canvas(bitmap))
-        File(out, "$name.png").outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
     }
 
     private fun connected(theme: String = "graphite"): RelayViewModel {
@@ -57,16 +61,16 @@ class UiScreenshotTest {
                 JSONObject().put("name", "context").put("description", "Чем занят контекст"),
                 JSONObject().put("name", "code-review").put("description", "Проверить изменения")))))
         val now = System.currentTimeMillis() / 1000.0
-        fun s(id: String, title: String, ago: Double, pinned: Double = 0.0, folder: String = "") = JSONObject()
-            .put("id", id).put("title", title).put("cwd", "/opt/sbrp-client").put("modified", now - ago).put("pinned", pinned).put("folder", folder)
+        fun s(id: String, title: String, ago: Double, pinned: Double = 0.0, folder: String = "", backend: String = "claude") = JSONObject()
+            .put("id", id).put("title", title).put("cwd", "/opt/sbrp-client").put("modified", now - ago).put("pinned", pinned).put("folder", folder).put("backend", backend)
         vm.handle(
             JSONObject().put("type", "sessions")
                 .put("sessions", JSONArray(listOf(
-                    s("a", "Формулы для расчёта урона", 60.0, pinned = now),
-                    s("b", "Якорь и цепь у штурвала", 3000.0, folder = "f1"),
-                    s("c", "Паруса и ветер", 90000.0, folder = "f1"),
-                    s("d", "Новая кузня: печь на домне", 7000.0).put("running", true),
-                    s("e", "Проверка обновления сервера", 100000.0),
+                    s("a", "Формулы для расчёта урона", 60.0, pinned = now, backend = "claude"),
+                    s("b", "Якорь и цепь у штурвала", 3000.0, folder = "f1", backend = "codex"),
+                    s("c", "Паруса и ветер", 90000.0, folder = "f1", backend = "agy"),
+                    s("d", "Новая кузня: печь на домне", 7000.0, backend = "codex").put("running", true),
+                    s("e", "Проверка обновления сервера", 100000.0, backend = "api"),
                 )))
                 .put("folders", JSONArray(listOf(JSONObject().put("id", "f1").put("name", "Корабли"))))
         )
@@ -89,13 +93,15 @@ class UiScreenshotTest {
         vm.open(vm.sessions.first { it.id == "a" })
         val messages = JSONArray(listOf(
             JSONObject().put("role", "user").put("text", "Посчитай средний урон и покажи формулы 🙂"),
-            JSONObject().put("role", "assistant").put("text", "Сначала посмотрю, как сейчас считается урон."),
-            JSONObject().put("role", "tool").put("tool", "Bash").put("tool_id", "t1").put("input", JSONObject().put("command", "grep -rn damage src/ | head")),
+            JSONObject().put("role", "assistant").put("text", "Сначала посмотрю расчёт урона и подключу субагента для проверки краевых случаев."),
+            JSONObject().put("role", "tool").put("tool", "Grep").put("tool_id", "t1").put("input", JSONObject().put("pattern", "damage").put("path", "src/")),
             JSONObject().put("role", "tool_result").put("tool_id", "t1").put("text", "src/Combat.kt:12: val damage = base * crit\nsrc/Combat.kt:40: damage -= armor"),
-            JSONObject().put("role", "tool").put("tool", "Edit").put("tool_id", "t2").put("input", JSONObject().put("file_path", "/opt/sbrp-client/src/Combat.kt").put("old_string", "damage -= armor").put("new_string", "damage = maxOf(0f, damage - armor)")),
-            JSONObject().put("role", "tool_result").put("tool_id", "t2").put("text", "The file has been updated."),
-            JSONObject().put("role", "tool").put("tool", "Bash").put("tool_id", "t3").put("input", JSONObject().put("command", "./gradlew test").put("description", "Прогнать тесты")),
-            JSONObject().put("role", "tool_result").put("tool_id", "t3").put("failed", true).put("text", "> Task :compileKotlin\n> Task :test FAILED\nCombatTest > armorNeverHeals() FAILED\n    expected: <0.0> but was: <-3.0>\n3 tests completed, 1 failed"),
+            JSONObject().put("role", "tool").put("tool", "Task").put("tool_id", "t2").put("input", JSONObject().put("subagent_type", "Аудитор формул").put("description", "Проверить баланс крита и высокой брони").put("model", "sonnet")),
+            JSONObject().put("role", "tool_result").put("tool_id", "t2").put("text", "При A > D нужен maxOf(0f, damage - armor), иначе броня лечит цель."),
+            JSONObject().put("role", "tool").put("tool", "Edit").put("tool_id", "t3").put("input", JSONObject().put("file_path", "/opt/sbrp-client/src/Combat.kt").put("old_string", "damage -= armor").put("new_string", "damage = maxOf(0f, damage - armor)")),
+            JSONObject().put("role", "tool_result").put("tool_id", "t3").put("text", "The file has been updated."),
+            JSONObject().put("role", "tool").put("tool", "Bash").put("tool_id", "t4").put("input", JSONObject().put("command", "./gradlew test").put("description", "Прогнать тесты")),
+            JSONObject().put("role", "tool_result").put("tool_id", "t4").put("failed", true).put("text", "> Task :compileKotlin\n> Task :test FAILED\nCombatTest > armorNeverHeals() FAILED\n    expected: <0.0> but was: <-3.0>\n3 tests completed, 1 failed"),
             JSONObject().put("role", "assistant").put("text", """
                 Средний урон за удар:
 
@@ -103,10 +109,7 @@ class UiScreenshotTest {
 
                 Волна в строке: §y(x,t) = \sum_{i=1}^{n} A_i \sin(k_i x - \omega_i t + \varphi_i) + \frac{1}{2}\rho g \sum_j h_j^2§ — и дальше текст.
 
-                где §p§ — шанс крита, §k§ — множитель, а §\text{броня} = A§. За §n§ ударов:
-                \begin{equation}
-                \sum_{i=1}^{n} D_i \approx n \bar{D}
-                \end{equation}
+                где §p§ — шанс крита, §k§ — множитель, а §\text{броня} = A§ (за §n§ ударов §\sum_{i=1}^{n} D_i \approx n \bar{D}§):
 
                 §§\vec P(x,z,t) = \begin{pmatrix} x + \sum_i \frac{Q_i}{k_i} D_{i,x}\cos\theta_i \\ \sum_i A_i \sin\theta_i \\ z + \sum_i \frac{Q_i}{k_i} D_{i,z}\cos\theta_i \end{pmatrix}, \quad \theta_i = k_i (\vec D_i \cdot \vec x) - \omega_i t§§
 
@@ -126,7 +129,7 @@ class UiScreenshotTest {
         chat(vm)
         rule.setContent { RelayApp(vm) }
         shot("04-chat")
-        rule.onNodeWithText("Действия", substring = true).performClick()
+        rule.onNodeWithText("Конвейер агента", substring = true).performClick()
         rule.mainClock.advanceTimeBy(500)
         shot("05-chat-actions")
     }
@@ -178,5 +181,12 @@ class UiScreenshotTest {
         ShadowLooper.idleMainLooper()
         rule.setContent { RelayApp(vm) }
         shot("11-demo")
+    }
+
+    @Test fun chatEmptyBento() {
+        val vm = connected()
+        vm.newChat()
+        rule.setContent { RelayApp(vm) }
+        shot("02-chat-empty")
     }
 }

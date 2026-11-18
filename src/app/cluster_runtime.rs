@@ -774,6 +774,7 @@ mod tests {
             delete_chat: None,
             lock_dialog: None,
             agents_open: None,
+            radar_open: None,
             deleted_sessions: Default::default(),
             renaming: None,
             folder_renaming: None,
@@ -1401,5 +1402,51 @@ mod tests {
         assert!(app.backend_installed(&a.id, "codex"));
         let cat = take(&mut rx_a, "catalog");
         assert_eq!(cat["backend"], "codex");
+    }
+
+    #[test]
+    fn radar_command_and_nextgen_agent_visualizations_render_cleanly() {
+        let (mut app, a, _, config, mut rx_a, _) = fixture();
+        app.start_cluster(config, "Verify next-gen visualization".into())
+            .unwrap();
+        let lead = take(&mut rx_a, "prompt");
+        let sid = lead["sid"].as_str().unwrap().to_owned();
+        let k = key(&a.id, &sid);
+
+        // Simulate active tool + subagent pipeline
+        app.chats.get_mut(&k).unwrap().messages.push(Message {
+            role: "tool".into(),
+            tool: "invoke_subagent".into(),
+            tool_id: "sub-1".into(),
+            input: json!({"Role": "UI Designer", "Prompt": "Render orbital telemetry"}),
+            ..Default::default()
+        });
+        app.chats.get_mut(&k).unwrap().draft = "/radar".into();
+        assert!(app.local_command(&a, &k));
+        assert_eq!(app.radar_open.as_deref(), Some(a.id.as_str()));
+
+        let ctx = app.controller.bus.ctx.clone();
+        for width in [680., 1240.] {
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(width, 820.));
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ctx| {
+                    app.main_panel(ctx);
+                    app.dialogs(ctx);
+                },
+            );
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ctx| {
+                    app.cluster_panel(ctx);
+                },
+            );
+        }
     }
 }

@@ -405,6 +405,189 @@ class Transcript {
     }
 }
 
+typealias ChatMessage = Message
+
+enum class ToolPhase(val label: String) {
+    Research("ПОИСК"),
+    Edit("ПРАВКА"),
+    Terminal("КОМАНДА"),
+    Subagent("СУБАГЕНТ"),
+    Desktop("ЭТОТ ПК"),
+    Other("ШАГ"),
+}
+
+data class SubagentTrace(
+    val id: String,
+    val role: String,
+    val summary: String,
+    val model: String = "",
+    /** 0 = running, 1 = completed, 2 = failed */
+    val state: Int = 1,
+) {
+    val running: Boolean get() = state == 0
+    val failed: Boolean get() = state == 2
+}
+
+data class TurnTelemetry(
+    val totalActions: Int = 0,
+    val doneActions: Int = 0,
+    val runningActions: Int = 0,
+    val failedActions: Int = 0,
+    val reads: Int = 0,
+    val edits: Int = 0,
+    val commands: Int = 0,
+    val delegations: Int = 0,
+    val desktopOps: Int = 0,
+    val activeHeadline: String = "",
+    val activeTarget: String = "",
+    val activePhase: ToolPhase = ToolPhase.Other,
+    val subagents: List<SubagentTrace> = emptyList(),
+)
+
+fun classifyToolPhase(name: String): ToolPhase {
+    val n = name.trim()
+    return when {
+        n in setOf(
+            "Task", "Agent", "invoke_subagent", "spawn_agent",
+            "define_subagent", "send_message", "swarm", "run_workflow",
+        ) || n.startsWith("mcp__relay_cluster__") -> ToolPhase.Subagent
+        n.startsWith("mcp__relay_desktop__") -> ToolPhase.Desktop
+        n in setOf(
+            "Read", "read_file", "Glob", "Grep", "grep_search", "find_by_name",
+            "WebSearch", "WebFetch", "web_search", "list_dir", "view_file_outline", "view_code_item",
+        ) -> ToolPhase.Research
+        n in setOf(
+            "Edit", "MultiEdit", "Write", "edit_file", "write_file",
+            "apply_patch", "file_change", "NotebookEdit",
+        ) -> ToolPhase.Edit
+        n in setOf("Bash", "shell", "command_execution", "run_command", "SlashCommand") -> ToolPhase.Terminal
+        else -> ToolPhase.Other
+    }
+}
+
+fun extractSubagentTrace(call: Message, result: Message?, runningTurn: Boolean): SubagentTrace {
+    val inp = call.input
+    val rawRole = listOf("Role", "role", "subagent_type", "TypeName", "agent_type", "agent", "name")
+        .firstNotNullOfOrNull { k -> inp.optString(k).trim().takeIf { it.isNotEmpty() } }
+        ?: if (call.tool.startsWith("mcp__relay_cluster__")) {
+            "Кластер · " + call.tool.removePrefix("mcp__relay_cluster__").replace('_', ' ')
+        } else {
+            "Помощник"
+        }
+    val summary = listOf("description", "Prompt", "prompt", "task", "brief", "Message", "message")
+        .firstNotNullOfOrNull { k -> inp.optString(k).trim().takeIf { it.isNotEmpty() } }
+        ?.lineSequence()?.firstOrNull()?.take(160).orEmpty()
+    val model = listOf("Model", "model")
+        .firstNotNullOfOrNull { k -> inp.optString(k).trim().takeIf { it.isNotEmpty() && it != "inherit" } }
+        .orEmpty()
+    val state = when {
+        result?.failed == true -> 2
+        result == null && runningTurn -> 0
+        else -> 1
+    }
+    return SubagentTrace(
+        id = call.toolId.ifEmpty { rawRole },
+        role = rawRole,
+        summary = summary,
+        model = model,
+        state = state,
+    )
+}
+
+fun extractToolTarget(call: Message): String {
+    val i = call.input
+    if (classifyToolPhase(call.tool) == ToolPhase.Subagent) {
+        val trace = extractSubagentTrace(call, null, false)
+        return listOf(trace.role, trace.summary).filter { it.isNotEmpty() }.joinToString(" · ").take(140)
+    }
+    for (key in listOf("file_path", "path", "command", "CommandLine", "pattern", "query", "url")) {
+        val v = i.optString(key).trim()
+        if (v.isNotEmpty()) return v.lineSequence().first().take(140)
+    }
+    return toolSummary(call.tool, i)
+}
+
+fun analyzeTurnTelemetry(messages: List<ChatMessage>, busy: Boolean, status: String = ""): TurnTelemetry {
+    val lastUser = messages.indexOfLast { it.role == "user" }
+    val scope = if (lastUser >= 0) messages.subList(lastUser + 1, messages.size) else messages
+    val resultsById = HashMap<String, ChatMessage>()
+    for (m in scope) {
+        if (m.role == "tool_result" && m.toolId.isNotEmpty()) {
+            resultsById[m.toolId] = m
+        }
+    }
+    var total = 0
+    var done = 0
+    var running = 0
+    var failed = 0
+    var reads = 0
+    var edits = 0
+    var commands = 0
+    var delegations = 0
+    var desktopOps = 0
+    val subagents = mutableListOf<SubagentTrace>()
+    var activeCall: ChatMessage? = null
+
+    val calls = scope.filter { it.role == "tool" }
+    for (call in calls) {
+        total++
+        val phase = classifyToolPhase(call.tool)
+        when (phase) {
+            ToolPhase.Research -> reads++
+            ToolPhase.Edit -> edits++
+            ToolPhase.Terminal -> commands++
+            ToolPhase.Subagent -> delegations++
+            ToolPhase.Desktop -> desktopOps++
+            ToolPhase.Other -> {}
+        }
+        val res = if (call.toolId.isNotEmpty()) resultsById[call.toolId] else null
+        when {
+            res != null -> {
+                done++
+                if (res.failed) failed++
+            }
+            busy -> {
+                running++
+                if (activeCall == null) activeCall = call
+            }
+            else -> done++
+        }
+        if (phase == ToolPhase.Subagent) {
+            subagents.add(extractSubagentTrace(call, res, busy))
+        }
+    }
+    if (activeCall == null) activeCall = calls.lastOrNull()
+
+    val activePhase = activeCall?.let { classifyToolPhase(it.tool) } ?: ToolPhase.Other
+    val activeHeadline = when {
+        busy && running > 0 && activeCall != null ->
+            activeCall.input.optString("description").trim().ifEmpty { toolName(activeCall.tool) }
+        busy && status.isNotBlank() -> status
+        activeCall != null ->
+            activeCall.input.optString("description").trim().ifEmpty { toolName(activeCall.tool) }
+        busy -> "Анализирует контекст…"
+        status.isNotBlank() -> status
+        else -> "Готов"
+    }
+    val activeTarget = if (activeCall != null && (running > 0 || !busy)) extractToolTarget(activeCall) else ""
+
+    return TurnTelemetry(
+        totalActions = total,
+        doneActions = done,
+        runningActions = running,
+        failedActions = failed,
+        reads = reads,
+        edits = edits,
+        commands = commands,
+        delegations = delegations,
+        desktopOps = desktopOps,
+        activeHeadline = activeHeadline,
+        activeTarget = activeTarget,
+        activePhase = activePhase,
+        subagents = subagents,
+    )
+}
+
 fun toolName(name: String) = when (name) {
     "Read", "read_file" -> "Чтение файла"
     "Edit", "MultiEdit", "edit_file", "apply_patch", "file_change" -> "Изменение файла"
@@ -414,13 +597,19 @@ fun toolName(name: String) = when (name) {
     "Glob", "Grep", "grep_search", "find_by_name" -> "Поиск по проекту"
     "WebSearch", "WebFetch", "web_search" -> "Поиск в интернете"
     "TodoWrite" -> "План работы"
-    "Task", "Agent" -> "Помощник"
-    else -> if (name.startsWith("mcp__relay_board__")) "Доска задач" else name.ifEmpty { "Действие" }
+    "Task", "Agent", "invoke_subagent", "spawn_agent" -> "Помощник-субагент"
+    "swarm", "run_workflow" -> "Рой агентов"
+    else -> when {
+        name.startsWith("mcp__relay_cluster__") -> "Кластер субагентов"
+        name.startsWith("mcp__relay_desktop__") -> "Действие на ПК"
+        name.startsWith("mcp__relay_board__") -> "Доска задач"
+        else -> name.ifEmpty { "Действие" }
+    }
 }
 
 /** One line that says what a tool call does: the command, the file, the query. */
 fun toolSummary(tool: String, input: JSONObject): String {
-    for (key in listOf("command", "file_path", "path", "pattern", "query", "url", "description", "prompt")) {
+    for (key in listOf("command", "CommandLine", "file_path", "path", "pattern", "query", "url", "description", "Prompt", "prompt", "Role", "subagent_type")) {
         val v = input.optString(key)
         if (v.isNotEmpty()) return v.lineSequence().first().take(200)
     }

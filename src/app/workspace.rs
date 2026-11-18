@@ -18,6 +18,16 @@ impl RelayApp {
         }
         self.settings_open = args.iter().any(|a| a == "--demo-settings");
         self.cluster_open = args.iter().any(|a| a == "--demo-cluster");
+        if args.iter().any(|a| a == "--demo-radar") {
+            self.radar_open = self.settings.selected.clone();
+            if let Some(srv) = self.settings.selected.clone() {
+                if let Some(r) = self.remote.get_mut(&srv) {
+                    if let Some(first) = r.sessions.first() {
+                        r.running.insert(first.id.clone());
+                    }
+                }
+            }
+        }
         if args.iter().any(|a| a == "--demo-delete") {
             if let Some(session) = self
                 .remote

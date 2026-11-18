@@ -23,7 +23,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const HELP: &str = "Relay TUI — Claude Code и собственный API на ваших серверах
+const HELP: &str = "Relay TUI — Claude Code, Codex, AGY и собственный API на ваших серверах
 
 Использование: relay-tui [--connect ИМЯ] [--session UUID | --new] [--cwd ПАПКА]
 
@@ -34,13 +34,14 @@ const HELP: &str = "Relay TUI — Claude Code и собственный API на
   --cwd ПАПКА           Рабочая папка для новой сессии на сервере
   --check ИМЯ           Проверить SSH и список сессий без запроса к модели
   --demo                Посмотреть интерфейс без подключения и записи настроек
+  --radar               Открыть радар агентов и живую топологию (F6)
   --snapshot ФАЙЛ       Сохранить демонстрационный экран (текст + JSON ячеек)
   --width N --height N  Размер демонстрационного снимка (по умолчанию 120×40)
   --no-mouse            Сохранить обычное выделение/прокрутку терминала мышью
   -V, --version         Версия
   -h, --help            Справка
 
-F2 — серверы; F3 — сессии; F4 — тема; F5 / Ctrl+B — рабочая панель; F1 — справка.
+F2 — серверы; F3 — сессии; F4 — тема; F5 / Ctrl+B — рабочая панель; F6 — радар агентов; F1 — справка.
 Enter — отправить, Alt+Enter / Ctrl+J — строка, Ctrl+C — остановить ответ.
 Профили, защита сессий и история общие с Relay. TUI-черновики хранятся отдельно в tui-state.json.
 ";
@@ -48,6 +49,7 @@ Enter — отправить, Alt+Enter / Ctrl+J — строка, Ctrl+C — о
 #[derive(Default)]
 struct Args {
     demo: bool,
+    radar: bool,
     list: bool,
     connect: Option<String>,
     session: Option<String>,
@@ -78,6 +80,7 @@ fn parse() -> Result<Args> {
                 std::process::exit(0);
             }
             "--demo" => out.demo = true,
+            "--radar" => out.radar = true,
             "--list" => out.list = true,
             "--connect" => out.connect = Some(value()?),
             "--session" => out.session = Some(value()?),
@@ -213,6 +216,9 @@ fn run() -> Result<()> {
     } else if args.new {
         app.new_chat();
     }
+    if args.radar {
+        app.open_radar();
+    }
     if let Some(path) = args.snapshot {
         let buffer = render::snapshot(&mut app, args.width, args.height)?;
         let mut lines = vec![];
@@ -253,6 +259,9 @@ fn run() -> Result<()> {
     if !app.demo {
         if let Some(host) = app.active.clone() {
             app.select_host(host);
+            if args.radar {
+                app.open_radar();
+            }
         } else {
             app.picker(app::Picker::Hosts);
         }
@@ -280,7 +289,9 @@ fn run() -> Result<()> {
         let mut drawn = Instant::now();
         while !app.quit && !shutdown.load(Ordering::Relaxed) {
             redraw |= app.tick();
-            let busy = app.chat().is_some_and(|c| c.busy);
+            let busy = app.chat().is_some_and(|c| c.busy)
+                || (matches!(app.popup, Some(app::Popup::Radar { .. }))
+                    && app.active_agents_count() > 0);
             if redraw || busy && drawn.elapsed() >= Duration::from_millis(120) {
                 terminal.draw(|frame| render::draw(frame, &mut app, &mut view))?;
                 redraw = false;

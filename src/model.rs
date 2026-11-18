@@ -567,6 +567,357 @@ pub fn summary(v: &Value) -> String {
     }
 }
 
+/// Distinct visual signature RGB for each engine, tuned for dark and light themes.
+pub fn backend_rgb(backend: &str, light: bool) -> (u8, u8, u8) {
+    match backend {
+        "codex" => if light { (22, 152, 115) } else { (62, 214, 168) },
+        "agy" => if light { (110, 74, 224) } else { (164, 130, 255) },
+        "api" => if light { (37, 108, 218) } else { (94, 168, 255) },
+        _ => if light { (202, 98, 52) } else { (236, 138, 92) },
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolPhase {
+    Research,
+    Edit,
+    Terminal,
+    Subagent,
+    Desktop,
+    Other,
+}
+
+impl ToolPhase {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Research => "ПОИСК",
+            Self::Edit => "ПРАВКА",
+            Self::Terminal => "КОМАНДА",
+            Self::Subagent => "СУБАГЕНТ",
+            Self::Desktop => "ЭТОТ ПК",
+            Self::Other => "ДЕЙСТВИЕ",
+        }
+    }
+
+    pub fn human_action(self) -> &'static str {
+        match self {
+            Self::Research => "Изучает проект",
+            Self::Edit => "Меняет код",
+            Self::Terminal => "Выполняет команду",
+            Self::Subagent => "Координирует агентов",
+            Self::Desktop => "Работает на этом ПК",
+            Self::Other => "Выполняет шаг",
+        }
+    }
+
+    pub fn rgb(self, light: bool) -> (u8, u8, u8) {
+        match self {
+            Self::Research => if light { (34, 126, 198) } else { (92, 184, 246) },
+            Self::Edit => if light { (32, 150, 102) } else { (98, 210, 158) },
+            Self::Terminal => if light { (192, 124, 28) } else { (238, 178, 88) },
+            Self::Subagent => if light { (122, 74, 218) } else { (176, 132, 255) },
+            Self::Desktop => if light { (196, 84, 66) } else { (236, 134, 114) },
+            Self::Other => if light { (94, 112, 144) } else { (142, 162, 194) },
+        }
+    }
+}
+
+pub fn classify_tool(tool: &str) -> ToolPhase {
+    if tool.starts_with("mcp__relay_cluster__")
+        || matches!(
+            tool,
+            "Task"
+                | "Agent"
+                | "spawn_agent"
+                | "invoke_subagent"
+                | "define_subagent"
+                | "swarm"
+                | "run_workflow"
+                | "send_message"
+        )
+    {
+        ToolPhase::Subagent
+    } else if tool.starts_with("mcp__relay_desktop__") {
+        ToolPhase::Desktop
+    } else if matches!(
+        tool,
+        "Edit"
+            | "MultiEdit"
+            | "Write"
+            | "NotebookEdit"
+            | "edit_file"
+            | "write_file"
+            | "fileChange"
+            | "apply_patch"
+    ) {
+        ToolPhase::Edit
+    } else if matches!(
+        tool,
+        "Bash" | "SlashCommand" | "run_command" | "commandExecution"
+    ) {
+        ToolPhase::Terminal
+    } else if matches!(
+        tool,
+        "Read"
+            | "Glob"
+            | "Grep"
+            | "LS"
+            | "WebSearch"
+            | "WebFetch"
+            | "read_file"
+            | "grep_search"
+            | "find_by_name"
+            | "search_web"
+            | "webSearch"
+    ) {
+        ToolPhase::Research
+    } else {
+        ToolPhase::Other
+    }
+}
+
+pub fn tool_target_preview(m: &Message, max: usize) -> String {
+    let i = &m.input;
+    let get = |k: &str| i[k].as_str().unwrap_or("").trim();
+    let raw = match m.tool.as_str() {
+        "Bash" | "run_command" | "commandExecution" | "mcp__relay_desktop__run_local_command" => {
+            let cmd = get("command");
+            let cmd = if cmd.is_empty() { get("CommandLine") } else { cmd };
+            if cmd.is_empty() {
+                String::new()
+            } else {
+                format!("$ {}", cmd.lines().next().unwrap_or("").trim())
+            }
+        }
+        "Read" | "Write" | "Edit" | "MultiEdit" | "read_file" | "write_file" | "edit_file" => {
+            let p = get("file_path");
+            let p = if p.is_empty() { get("Path") } else { p };
+            p.rsplit(['/', '\\'])
+                .find(|part| !part.is_empty())
+                .unwrap_or(p)
+                .to_owned()
+        }
+        "Grep" | "grep_search" => {
+            let pat = get("pattern");
+            let pat = if pat.is_empty() { get("Query") } else { pat };
+            if pat.is_empty() { String::new() } else { format!("«{pat}»") }
+        }
+        "Glob" | "find_by_name" => {
+            let pat = get("pattern");
+            let pat = if pat.is_empty() { get("Pattern") } else { pat };
+            pat.to_owned()
+        }
+        "WebSearch" | "search_web" => get("query").to_owned(),
+        "WebFetch" => get("url").to_owned(),
+        "Task" | "Agent" => {
+            let sub = get("subagent_type");
+            let desc = get("description");
+            if !sub.is_empty() && !desc.is_empty() {
+                format!("{sub} · {desc}")
+            } else if !desc.is_empty() {
+                desc.to_owned()
+            } else {
+                get("prompt").lines().next().unwrap_or("").to_owned()
+            }
+        }
+        "invoke_subagent" => {
+            let role = get("Role");
+            if !role.is_empty() {
+                role.to_owned()
+            } else {
+                get("TypeName").to_owned()
+            }
+        }
+        "spawn_agent" => {
+            let role = get("agent_type");
+            let msg = get("message");
+            if !role.is_empty() {
+                role.to_owned()
+            } else {
+                msg.lines().next().unwrap_or("").to_owned()
+            }
+        }
+        "mcp__relay_cluster__dispatch_task" => {
+            let worker = get("worker");
+            let title = get("title");
+            let task = get("task");
+            if !worker.is_empty() && !title.is_empty() {
+                format!("{worker} -> {title}")
+            } else if !worker.is_empty() && !task.is_empty() {
+                format!("{worker} -> {}", task.lines().next().unwrap_or(""))
+            } else {
+                worker.to_owned()
+            }
+        }
+        _ => {
+            let s = summary(i);
+            if s.starts_with('{') {
+                String::new()
+            } else {
+                s.lines().next().unwrap_or("").trim().to_owned()
+            }
+        }
+    };
+    shorten(&raw, max)
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SubagentTrace {
+    pub role: String,
+    pub task: String,
+    pub running: bool,
+    pub failed: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TurnTelemetry {
+    pub total_actions: usize,
+    pub done_actions: usize,
+    pub running_actions: usize,
+    pub failed_actions: usize,
+    pub reads: usize,
+    pub edits: usize,
+    pub commands: usize,
+    pub delegations: usize,
+    pub active_phase: Option<ToolPhase>,
+    pub active_headline: String,
+    pub active_target: String,
+    pub subagents: Vec<SubagentTrace>,
+}
+
+pub fn analyze_turn(
+    messages: &[Message],
+    start_from: usize,
+    busy: bool,
+    fallback_status: &str,
+) -> TurnTelemetry {
+    let slice = if start_from < messages.len() {
+        &messages[start_from..]
+    } else {
+        &[]
+    };
+    struct Entry<'a> {
+        call: &'a Message,
+        done: bool,
+        failed: bool,
+    }
+    let mut entries: Vec<Entry> = Vec::new();
+    let mut by_id: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let mut orphan_failures = 0usize;
+    for msg in slice {
+        if msg.role == "tool" {
+            if !msg.tool_id.is_empty() {
+                by_id.insert(msg.tool_id.as_str(), entries.len());
+            }
+            entries.push(Entry {
+                call: msg,
+                done: false,
+                failed: false,
+            });
+        } else if msg.role == "tool_result" {
+            let owner = if msg.tool_id.is_empty() {
+                entries.iter().rposition(|e| !e.done)
+            } else {
+                by_id.get(msg.tool_id.as_str()).copied()
+            };
+            if let Some(idx) = owner {
+                entries[idx].done = true;
+                entries[idx].failed |= msg.failed;
+            } else if msg.failed {
+                orphan_failures += 1;
+            }
+        }
+    }
+
+    let mut out = TurnTelemetry {
+        total_actions: entries.len() + orphan_failures,
+        failed_actions: orphan_failures,
+        ..Default::default()
+    };
+
+    for entry in &entries {
+        let phase = classify_tool(&entry.call.tool);
+        match phase {
+            ToolPhase::Research => out.reads += 1,
+            ToolPhase::Edit => out.edits += 1,
+            ToolPhase::Terminal | ToolPhase::Desktop => out.commands += 1,
+            ToolPhase::Subagent => out.delegations += 1,
+            ToolPhase::Other => {}
+        }
+        let running = busy && !entry.done;
+        if running {
+            out.running_actions += 1;
+            out.active_phase = Some(phase);
+            let custom_desc = entry.call.input["description"]
+                .as_str()
+                .map(str::trim)
+                .filter(|d| !d.is_empty());
+            out.active_headline = custom_desc
+                .map(|d| shorten(d, 58))
+                .unwrap_or_else(|| phase.human_action().to_owned());
+            out.active_target = tool_target_preview(entry.call, 64);
+        } else {
+            out.done_actions += 1;
+        }
+        if entry.failed {
+            out.failed_actions += 1;
+        }
+
+        if phase == ToolPhase::Subagent
+            && !matches!(
+                entry.call.tool.as_str(),
+                "mcp__relay_cluster__list_workers"
+                    | "mcp__relay_cluster__cluster_status"
+                    | "mcp__relay_cluster__wait_for_task"
+                    | "mcp__relay_cluster__task_status"
+            )
+        {
+            let i = &entry.call.input;
+            let role = i["Role"]
+                .as_str()
+                .or_else(|| i["worker"].as_str())
+                .or_else(|| i["subagent_type"].as_str())
+                .or_else(|| i["agent_type"].as_str())
+                .or_else(|| i["TypeName"].as_str())
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or("Субагент");
+            let task = i["description"]
+                .as_str()
+                .or_else(|| i["title"].as_str())
+                .or_else(|| i["task"].as_str())
+                .or_else(|| i["Prompt"].as_str())
+                .or_else(|| i["prompt"].as_str())
+                .or_else(|| i["message"].as_str())
+                .unwrap_or("")
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim();
+            out.subagents.push(SubagentTrace {
+                role: shorten(role.trim(), 28),
+                task: shorten(task, 54),
+                running,
+                failed: entry.failed,
+            });
+        }
+    }
+
+    if out.active_headline.is_empty() && busy {
+        let streaming_text = slice
+            .last()
+            .is_some_and(|m| m.role == "assistant" && !m.text.trim().is_empty());
+        out.active_headline = if streaming_text {
+            "Формирует ответ".into()
+        } else if !fallback_status.trim().is_empty() {
+            shorten(fallback_status.trim(), 58)
+        } else {
+            "Анализирует задачу".into()
+        };
+    }
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -646,5 +997,58 @@ mod tests {
         settings.set_session_backend(chat.clone(), "api");
         assert_eq!(settings.session_backend(&s, &chat, None), "api");
         assert!(settings.api_sessions[&chat]);
+    }
+
+    #[test]
+    fn turn_telemetry_tracks_phases_parallel_tools_and_subagents() {
+        let msgs = vec![
+            Message {
+                role: "user".into(),
+                text: "Ship next-gen UI".into(),
+                ..Default::default()
+            },
+            Message {
+                role: "tool".into(),
+                tool: "Grep".into(),
+                tool_id: "t1".into(),
+                input: serde_json::json!({"pattern": "draw_graph", "path": "src/"}),
+                ..Default::default()
+            },
+            Message {
+                role: "tool_result".into(),
+                tool_id: "t1".into(),
+                text: "src/app/cluster_view.rs".into(),
+                ..Default::default()
+            },
+            Message {
+                role: "tool".into(),
+                tool: "invoke_subagent".into(),
+                tool_id: "t2".into(),
+                input: serde_json::json!({"Role": "TUI Engineer", "Prompt": "Build radar popup"}),
+                ..Default::default()
+            },
+            Message {
+                role: "tool".into(),
+                tool: "Edit".into(),
+                tool_id: "t3".into(),
+                input: serde_json::json!({"file_path": "/opt/relay/src/timeline.rs", "description": "Обновляю конвейер шагов"}),
+                ..Default::default()
+            },
+        ];
+        let tel = analyze_turn(&msgs, 0, true, "Работает");
+        assert_eq!(tel.total_actions, 3);
+        assert_eq!(tel.done_actions, 1);
+        assert_eq!(tel.running_actions, 2);
+        assert_eq!(tel.reads, 1);
+        assert_eq!(tel.edits, 1);
+        assert_eq!(tel.delegations, 1);
+        assert_eq!(tel.active_phase, Some(ToolPhase::Edit));
+        assert_eq!(tel.active_headline, "Обновляю конвейер шагов");
+        assert_eq!(tel.active_target, "timeline.rs");
+        assert_eq!(tel.subagents.len(), 1);
+        assert_eq!(tel.subagents[0].role, "TUI Engineer");
+        assert!(tel.subagents[0].running);
+        assert_ne!(backend_rgb("claude", false), backend_rgb("codex", false));
+        assert_ne!(backend_rgb("agy", false), backend_rgb("api", false));
     }
 }

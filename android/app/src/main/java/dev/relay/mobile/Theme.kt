@@ -23,7 +23,30 @@ data class Palette(
     val elevated get() = lerp(surface, if (light) base else text, if (light) 0.35f else 0.045f)
     val subtleAccent get() = accent.copy(alpha = if (light) 0.12f else 0.15f)
     val borderSubtle get() = line.copy(alpha = if (light) 0.75f else 0.65f)
+    val specularTop get() = lerp(line, if (light) Color.White else text, if (light) 0.55f else 0.22f)
     fun mix(a: Color, b: Color, t: Float) = lerp(a, b, t)
+    fun phaseColor(phase: ToolPhase): Color = phaseColor(phase, light)
+}
+
+/** Distinct engine signature colors across Dark & Light palettes. */
+fun backendColor(backend: String, light: Boolean): Color = when (backend) {
+    "claude" -> if (light) Color(0xFFCA6234) else Color(0xFFEC8A5C)
+    "codex" -> if (light) Color(0xFF169873) else Color(0xFF3ED6A8)
+    "agy" -> if (light) Color(0xFF6E4AE0) else Color(0xFFA482FF)
+    "api" -> if (light) Color(0xFF256CDA) else Color(0xFF5EA8FF)
+    else -> if (light) Color(0xFFCA6234) else Color(0xFFEC8A5C)
+}
+
+fun backendColor(p: Palette, backend: String): Color = backendColor(backend, p.light)
+
+/** Distinct telemetry phase colors for pipeline bars, timeline nodes, and badges. */
+fun phaseColor(phase: ToolPhase, light: Boolean): Color = when (phase) {
+    ToolPhase.Research -> if (light) Color(0xFF1F74C9) else Color(0xFF63B3FF)
+    ToolPhase.Edit -> if (light) Color(0xFF1A8C5B) else Color(0xFF4AD696)
+    ToolPhase.Terminal -> if (light) Color(0xFFB97118) else Color(0xFFF0B45B)
+    ToolPhase.Subagent -> if (light) Color(0xFF6E4AE0) else Color(0xFFA482FF)
+    ToolPhase.Desktop -> if (light) Color(0xFF14828E) else Color(0xFF46D6E2)
+    ToolPhase.Other -> if (light) Color(0xFF5A6A82) else Color(0xFF93A6C2)
 }
 
 data class ThemeInfo(val id: String, val name: String, val light: Boolean, val colors: LongArray)

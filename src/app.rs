@@ -190,6 +190,7 @@ pub struct RelayApp {
     delete_chat: Option<session_actions::DeleteChat>,
     lock_dialog: Option<session_actions::LockDialog>,
     agents_open: Option<String>,
+    radar_open: Option<String>,
     deleted_sessions: std::collections::HashSet<String>,
     /// Session being renamed in the sidebar, with the text typed so far.
     renaming: Option<(String, String)>,
@@ -267,6 +268,7 @@ impl RelayApp {
             delete_chat: None,
             lock_dialog: None,
             agents_open: None,
+            radar_open: None,
             deleted_sessions: Default::default(),
             renaming: None,
             folder_renaming: None,
@@ -405,6 +407,8 @@ impl RelayApp {
                         Message { role: "assistant".into(), text: "Сначала найду, где считается урон, потом соберу.".into(), ..Default::default() },
                         tool("c1", "Grep", json!({"pattern":"fn damage","path":"src/"})),
                         done("c1", "src/combat.rs:12:pub fn damage(base: f32, crit: f32) -> f32 {\nsrc/combat.rs:40:    damage -= armor;", false),
+                        tool("c_sub", "invoke_subagent", json!({"Role":"Combat Verifier","Prompt":"Проверь краевые случаи формулы брони и урона в тестах"})),
+                        done("c_sub", "Проверено 6 сценариев: отрицательный урон при высокой броне устранён.", false),
                         tool("c2", "Edit", json!({"file_path":"/opt/sbrp-client/src/combat.rs","old_string":"    damage -= armor;","new_string":"    damage = (damage - armor).max(0.0);"})),
                         done("c2", "The file /opt/sbrp-client/src/combat.rs has been updated.", false),
                         tool("c5", "Bash", json!({"command":"cd /root/relay-desktop && sed -n \"$(grep -n 'fn send_prompt' src/app.rs | cut -d: -f1),+30p\" src/app.rs; grep -n \"send_prompt\\|fn submit\\|send = true\" src/app.rs src/app/*.rs | head -40 && echo done-with-a-very-long-command-line-that-never-ends"})),
@@ -1567,6 +1571,13 @@ impl RelayApp {
         let backend_owned = self.backend_for_chat(server, k);
         let backend = backend_owned.as_str();
         let draft_trimmed = self.chats.get(k).map(|c| c.draft.trim().to_owned()).unwrap_or_default();
+        if draft_trimmed == "/radar" || draft_trimmed == "/agents" {
+            self.radar_open = Some(server.id.clone());
+            if let Some(c) = self.chats.get_mut(k) {
+                c.draft.clear();
+            }
+            return true;
+        }
         if draft_trimmed == "/install" || draft_trimmed.starts_with("/install ") {
             let arg = draft_trimmed.strip_prefix("/install").unwrap_or("").trim();
             if arg.is_empty() {
@@ -1821,14 +1832,14 @@ impl RelayApp {
     }
     fn rail(&mut self, ctx: &egui::Context) {
         let p = design::animated_palette(ctx, self.settings.light);
-        egui::SidePanel::left("rail")
+        let rail_panel = egui::SidePanel::left("rail")
             .exact_width(60.)
             .resizable(false)
             .show_separator_line(false)
             .frame(
                 egui::Frame::new()
                     .fill(p.rail)
-                    .inner_margin(egui::Margin::symmetric(10, 14)),
+                    .inner_margin(egui::Margin::symmetric(12, 14)),
             )
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing.y = 8.;
@@ -1865,12 +1876,28 @@ impl RelayApp {
                         design::mix(p.muted, p.text, t.max(hover)),
                     );
                     if selected {
-                        marker = Some((rect.left() - 10., rect.center().y));
+                        marker = Some((rect.left() - 9., rect.center().y));
+                    }
+                    let server_busy = self
+                        .remote
+                        .get(&server.id)
+                        .is_some_and(|r| !r.running.is_empty())
+                        || self
+                            .chats
+                            .iter()
+                            .any(|(ck, cc)| ck.starts_with(&format!("{}/", server.id)) && cc.busy);
+                    if server_busy {
+                        ui.painter().rect_stroke(
+                            rect.expand(2.0),
+                            11.5,
+                            Stroke::new(1.35_f32, accent().gamma_multiply(0.65)),
+                            egui::StrokeKind::Outside,
+                        );
                     }
                     if self.connected(&server.id) {
                         let dot = rect.right_bottom() - Vec2::splat(3.);
                         ui.painter().circle_filled(dot, 4.5, p.rail);
-                        ui.painter().circle_filled(dot, 3., GREEN);
+                        ui.painter().circle_filled(dot, 3., if server_busy { accent() } else { GREEN });
                     }
                     if response
                         .on_hover_text(format!("{} · {}", server.name, server.host))
@@ -1988,66 +2015,90 @@ impl RelayApp {
                         self.save();
                     }
                 });
-                let edge = ui.max_rect();
-                ui.painter().line_segment(
-                    [egui::pos2(edge.right(), edge.top()), egui::pos2(edge.right(), edge.bottom())],
-                    Stroke::new(1.0_f32, design::mix(p.rail, p.line, 0.5)),
-                );
             });
+        let rr = rail_panel.response.rect;
+        ctx.layer_painter(rail_panel.response.layer_id).line_segment(
+            [egui::pos2(rr.right() - 0.5, rr.top()), egui::pos2(rr.right() - 0.5, rr.bottom())],
+            Stroke::new(1.0_f32, design::mix(p.rail, p.line, 0.55)),
+        );
     }
     fn sidebar(&mut self, ctx: &egui::Context) {
         let p = design::animated_palette(ctx, self.settings.light);
-        egui::SidePanel::left("sessions")
-            .default_width(268.)
-            .width_range(232.0..=360.0)
+        let side_panel = egui::SidePanel::left("sessions")
+            .default_width(276.)
+            .width_range(240.0..=360.0)
             .show_separator_line(false)
             .frame(
                 egui::Frame::new()
                     .fill(p.side)
-                    .inner_margin(egui::Margin::symmetric(12, 16)),
+                    .inner_margin(egui::Margin::symmetric(14, 14)),
             )
             .show(ctx, |ui| {
-                let side_edge = ui.max_rect();
-                ui.painter().line_segment(
-                    [egui::pos2(side_edge.right(), side_edge.top()), egui::pos2(side_edge.right(), side_edge.bottom())],
-                    Stroke::new(1.0_f32, design::mix(p.side, p.line, 0.55)),
-                );
-                ui.spacing_mut().item_spacing.y = 6.;
-                ui.horizontal(|ui| {
-                    ui.add_space(6.);
-                    label(ui, "Relay", 20., p.text);
-                    if let Some(server) = self.server() {
-                        if design::button(ui, "CLI", None, Kind::Ghost, p, Vec2::new(40., 28.)).on_hover_text("Установка и обновление Claude, Codex и AGY на сервере").clicked() {
-                            self.agents_open = Some(server.id.clone());
-                        }
-                        if design::button(ui, "API", None, Kind::Ghost, p, Vec2::new(42., 28.)).on_hover_text("API этого сервера").clicked() {
-                            self.open_api_settings(&server);
-                        }
-                    }
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if design::button(
-                            ui,
-                            "",
-                            Some(Icon::Settings),
-                            Kind::Ghost,
-                            p,
-                            Vec2::splat(28.),
-                        )
-                        .on_hover_text("Настройки подключения")
-                        .clicked()
-                        {
-                            if let Some(server) = self.server() {
-                                self.editor = Some(Editor {
-                                    server,
-                                    password: String::new(),
-                                    is_new: false,
-                                    error: String::new(),
-                                });
+                ui.spacing_mut().item_spacing.y = 7.;
+                // Perfectly vertically centered 30px brand & quick-tools row
+                ui.allocate_ui_with_layout(
+                    Vec2::new(ui.available_width(), 30.),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
+                        ui.spacing_mut().item_spacing.x = 7.;
+                        let (brand_orb, _) =
+                            ui.allocate_exact_size(Vec2::splat(19.), egui::Sense::hover());
+                        design::icon(ui.painter(), brand_orb, Icon::Orbit, accent());
+                        ui.label(RichText::new("Relay").size(18.5).color(p.text).strong());
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.spacing_mut().item_spacing.x = 3.;
+                            if design::button(
+                                ui,
+                                "",
+                                Some(Icon::Settings),
+                                Kind::Ghost,
+                                p,
+                                Vec2::splat(28.),
+                            )
+                            .on_hover_text("Настройки подключения")
+                            .clicked()
+                            {
+                                if let Some(server) = self.server() {
+                                    self.editor = Some(Editor {
+                                        server,
+                                        password: String::new(),
+                                        is_new: false,
+                                        error: String::new(),
+                                    });
+                                }
                             }
-                        }
-                    });
-                });
-                ui.add_space(6.);
+                            if let Some(server) = self.server() {
+                                if design::button(
+                                    ui,
+                                    "",
+                                    Some(Icon::Bolt),
+                                    Kind::Ghost,
+                                    p,
+                                    Vec2::splat(28.),
+                                )
+                                .on_hover_text("Пользовательский API этого сервера")
+                                .clicked()
+                                {
+                                    self.open_api_settings(&server);
+                                }
+                                if design::button(
+                                    ui,
+                                    "",
+                                    Some(Icon::Download),
+                                    Kind::Ghost,
+                                    p,
+                                    Vec2::splat(28.),
+                                )
+                                .on_hover_text("CLI-агенты: установка и обновление Claude, Codex и AGY")
+                                .clicked()
+                                {
+                                    self.agents_open = Some(server.id.clone());
+                                }
+                            }
+                        });
+                    },
+                );
+                ui.add_space(2.);
                 if design::button(
                     ui,
                     "Новая сессия",
@@ -2064,21 +2115,26 @@ impl RelayApp {
                 egui::Frame::new()
                     .fill(p.base)
                     .stroke(Stroke::new(1.0_f32, p.line))
-                    .corner_radius(8.)
-                    .inner_margin(egui::Margin::symmetric(10, 6))
+                    .corner_radius(9.)
+                    .inner_margin(egui::Margin::symmetric(11, 7))
                     .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            let (r, _) =
-                                ui.allocate_exact_size(Vec2::splat(15.), egui::Sense::hover());
-                            design::icon(ui.painter(), r, Icon::Search, p.muted);
-                            ui.add(
-                                egui::TextEdit::singleline(&mut self.search)
-                                    .frame(false)
-                                    .hint_text(RichText::new("Поиск").color(p.muted))
-                                    .font(FontId::proportional(13.5))
-                                    .desired_width(ui.available_width()),
-                            );
-                        });
+                        ui.set_width(ui.available_width());
+                        ui.allocate_ui_with_layout(
+                            Vec2::new(ui.available_width(), 19.),
+                            Layout::left_to_right(Align::Center),
+                            |ui| {
+                                let (r, _) =
+                                    ui.allocate_exact_size(Vec2::splat(14.), egui::Sense::hover());
+                                design::icon(ui.painter(), r, Icon::Search, p.muted);
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.search)
+                                        .frame(false)
+                                        .hint_text(RichText::new("Поиск сессий…").color(p.muted))
+                                        .font(FontId::proportional(13.0))
+                                        .desired_width(ui.available_width()),
+                                );
+                            },
+                        );
                     });
                 let Some(server) = self.server() else {
                     ui.add_space(10.);
@@ -2214,32 +2270,62 @@ impl RelayApp {
                                         }
                                     }
                                     ui.add_space(8.);
-                                    let active=self.login.as_ref().is_some_and(|l|l.server==server.id && l.active());
-                                    if design::service_action(ui,"Браузер",Icon::Browser,active,p).on_hover_text("Открыть браузер на сервере").clicked(){self.start_browser(&server);}
-                                    if design::service_action(ui,"Агенты и установка",Icon::Download,self.agents_open.as_deref()==Some(server.id.as_str()),p).on_hover_text("Установить или обновить Claude Code, Codex и Antigravity в 1 клик").clicked(){
-                                        self.agents_open = Some(server.id.clone());
-                                    }
+                                    let active_browser =
+                                        self.login.as_ref().is_some_and(|l| l.server == server.id && l.active());
                                     let (primary_prov, primary_label, primary_hint) = match active_backend.as_str() {
                                         "codex" => ("codex", "Войти в Codex", "Войти в учётную запись OpenAI Codex на этом сервере"),
                                         "agy" => ("agy", "Войти в AGY", "Войти в учётную запись Google Antigravity на этом сервере"),
                                         _ => ("claude", "Войти в Claude", "Войти в учётную запись Claude на этом сервере"),
                                     };
-                                    if design::service_action(ui, primary_label, Icon::Key, false, p).on_hover_text(primary_hint).clicked() {
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 6.;
+                                        let half_w = ((ui.available_width() - 6.) * 0.5).max(60.);
+                                        if design::button(
+                                            ui,
+                                            "Браузер",
+                                            Some(Icon::Browser),
+                                            if active_browser { Kind::Primary } else { Kind::Secondary },
+                                            p,
+                                            Vec2::new(half_w, 30.),
+                                        )
+                                        .on_hover_text("Открыть браузер на сервере")
+                                        .clicked()
+                                        {
+                                            self.start_browser(&server);
+                                        }
+                                        if design::button(
+                                            ui,
+                                            "Агенты",
+                                            Some(Icon::Download),
+                                            if self.agents_open.as_deref() == Some(server.id.as_str()) {
+                                                Kind::Primary
+                                            } else {
+                                                Kind::Secondary
+                                            },
+                                            p,
+                                            Vec2::new(half_w, 30.),
+                                        )
+                                        .on_hover_text("Установка, обновление и вход для Claude, Codex и AGY")
+                                        .clicked()
+                                        {
+                                            self.agents_open = Some(server.id.clone());
+                                        }
+                                    });
+                                    ui.add_space(4.);
+                                    let login_btn = design::service_action(ui, primary_label, Icon::Key, false, p)
+                                        .on_hover_text(format!("{primary_hint} (ПКМ — выбрать другого агента)"));
+                                    if login_btn.clicked() {
                                         self.start_provider_login(&server, primary_prov);
                                     }
-                                    ui.add_space(2.);
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.spacing_mut().item_spacing.x = 6.;
-                                        label(ui, "Вход:", 10.5, p.muted);
-                                        for (prov, short) in [("claude", "Claude"), ("codex", "Codex"), ("agy", "AGY")] {
-                                            if prov == primary_prov {
-                                                continue;
-                                            }
-                                            if ui.add(egui::Label::new(RichText::new(short).size(11.).color(accent())).sense(egui::Sense::click()))
-                                                .on_hover_text(format!("Войти в {short} в браузере сервера"))
-                                                .clicked()
-                                            {
+                                    login_btn.context_menu(|ui| {
+                                        for (prov, title) in [
+                                            ("claude", "Войти в Claude Code"),
+                                            ("codex", "Войти в OpenAI Codex"),
+                                            ("agy", "Войти в Google Antigravity"),
+                                        ] {
+                                            if ui.button(title).clicked() {
                                                 self.start_provider_login(&server, prov);
+                                                ui.close_menu();
                                             }
                                         }
                                     });
@@ -2276,28 +2362,143 @@ impl RelayApp {
                     .remote
                     .get(&server.id)
                     .is_some_and(|r| connected && !r.sessions_loaded);
+
+                // Live Active Agents Radar Card when one or more sessions are working
+                let mut radar_jump: Option<Session> = None;
+                let active_sessions: Vec<Session> = sessions
+                    .iter()
+                    .filter(|s| {
+                        let k = key(&server.id, &s.id);
+                        s.running
+                            || self.chats.get(&k).is_some_and(|c| c.busy)
+                            || self
+                                .remote
+                                .get(&server.id)
+                                .is_some_and(|r| r.running.contains(&s.id))
+                    })
+                    .cloned()
+                    .collect();
+                if !active_sessions.is_empty() {
+                    let light = self.settings.light;
+                    ui.add_space(4.);
+                    egui::Frame::new()
+                        .fill(design::mix(p.surface, accent(), 0.07))
+                        .stroke(Stroke::new(1.0_f32, design::mix(p.line, accent(), 0.38)))
+                        .corner_radius(11.)
+                        .inner_margin(egui::Margin::symmetric(10, 8))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                let (orb, _) =
+                                    ui.allocate_exact_size(Vec2::splat(16.), egui::Sense::hover());
+                                design::orbital_core(ui, orb, accent(), true);
+                                label(
+                                    ui,
+                                    format!("Радар агентов · {}", active_sessions.len()),
+                                    11.5,
+                                    p.text,
+                                );
+                            });
+                            ui.add_space(4.);
+                            for act in active_sessions.iter().take(3) {
+                                let ak = key(&server.id, &act.id);
+                                let b = self.backend_for_chat(&server, &ak);
+                                let b_col = design::backend_color(&b, light);
+                                let step_hint = self
+                                    .chats
+                                    .get(&ak)
+                                    .map(|c| {
+                                        let t = crate::model::analyze_turn(
+                                            &c.messages,
+                                            c.user_at,
+                                            c.busy,
+                                            &c.status,
+                                        );
+                                        if !t.active_target.is_empty() {
+                                            t.active_target
+                                        } else {
+                                            t.active_headline
+                                        }
+                                    })
+                                    .filter(|s| !s.is_empty())
+                                    .unwrap_or_else(|| "В работе…".into());
+                                let r_resp = egui::Frame::new()
+                                    .fill(p.base.gamma_multiply(0.65))
+                                    .corner_radius(7.)
+                                    .inner_margin(egui::Margin::symmetric(7, 4))
+                                    .show(ui, |ui| {
+                                        ui.set_width(ui.available_width());
+                                        ui.horizontal(|ui| {
+                                            let (dot_r, _) = ui.allocate_exact_size(
+                                                Vec2::splat(8.),
+                                                egui::Sense::hover(),
+                                            );
+                                            ui.painter().circle_filled(dot_r.center(), 3.2, b_col);
+                                            ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(model::shorten(&act.title, 22))
+                                                        .size(11.5)
+                                                        .color(p.text),
+                                                )
+                                                .truncate(),
+                                            );
+                                        });
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(model::shorten(&step_hint, 28))
+                                                    .monospace()
+                                                    .size(10.2)
+                                                    .color(b_col),
+                                            )
+                                            .truncate(),
+                                        );
+                                    })
+                                    .response;
+                                if ui
+                                    .interact(
+                                        r_resp.rect,
+                                        ui.id().with(("radar-jump", &act.id)),
+                                        egui::Sense::click(),
+                                    )
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                    .clicked()
+                                {
+                                    radar_jump = Some(act.clone());
+                                }
+                            }
+                        });
+                }
+                if let Some(target_sess) = radar_jump {
+                    self.select_chat(target_sess);
+                }
+
                 ui.add_space(4.);
-                ui.horizontal(|ui| {
-                    ui.add_space(8.);
-                    label(ui, "Сессии", 12., p.muted);
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if refreshing {
-                            design::dots(ui, p.muted);
-                        } else if design::button(ui, "", Some(Icon::Refresh), Kind::Ghost, p, Vec2::splat(24.))
-                            .on_hover_text("Обновить список и открытый разговор")
-                            .clicked()
-                        {
-                            self.refresh(&server.id);
-                        }
-                        if connected
-                            && design::button(ui, "+ Папка", None, Kind::Ghost, p, Vec2::new(0., 24.))
-                                .on_hover_text("Новая папка для сессий — её увидят все, кто подключается к серверу")
+                ui.allocate_ui_with_layout(
+                    Vec2::new(ui.available_width(), 26.),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
+                        ui.add_space(4.);
+                        label(ui, "СЕССИИ", 10.5, p.muted);
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.spacing_mut().item_spacing.x = 4.;
+                            if refreshing {
+                                design::dots(ui, p.muted);
+                            } else if design::button(ui, "", Some(Icon::Refresh), Kind::Ghost, p, Vec2::splat(24.))
+                                .on_hover_text("Обновить список и открытый разговор")
                                 .clicked()
-                        {
-                            self.folder_creating = Some((String::new(), None));
-                        }
-                    });
-                });
+                            {
+                                self.refresh(&server.id);
+                            }
+                            if connected
+                                && design::button(ui, "+ Папка", None, Kind::Ghost, p, Vec2::new(0., 24.))
+                                    .on_hover_text("Новая папка для сессий — её увидят все, кто подключается к серверу")
+                                    .clicked()
+                            {
+                                self.folder_creating = Some((String::new(), None));
+                            }
+                        });
+                    },
+                );
                 let matches = |s: &Session| {
                     query.is_empty()
                         || s.title.to_lowercase().contains(&query)
@@ -2450,6 +2651,11 @@ impl RelayApp {
                     self.row_action(&server.id, session, action);
                 }
             });
+        let sr = side_panel.response.rect;
+        ctx.layer_painter(side_panel.response.layer_id).line_segment(
+            [egui::pos2(sr.right() - 0.5, sr.top()), egui::pos2(sr.right() - 0.5, sr.bottom())],
+            Stroke::new(1.0_f32, design::mix(p.side, p.line, 0.58)),
+        );
     }
     /// One session in the sidebar; returns what the user asked for.
     #[allow(clippy::too_many_arguments)]
@@ -2483,7 +2689,7 @@ impl RelayApp {
         }
         let background = ui.painter().add(egui::Shape::Noop);
         let row = egui::Frame::new()
-            .inner_margin(egui::Margin { left: 12, right: 10, top: 7, bottom: 7 })
+            .inner_margin(egui::Margin { left: 15, right: 10, top: 8, bottom: 8 })
             .show(ui, |ui| {
                 ui.set_width(ui.available_width().max(120.));
                 ui.spacing_mut().item_spacing.y = 2.;
@@ -2510,26 +2716,57 @@ impl RelayApp {
                 );
                 ui.horizontal(|ui| {
                     ui.spacing_mut().interact_size.y = 14.;
+                    ui.spacing_mut().item_spacing.x = 5.;
                     let place = folder_name(&session.cwd);
-                    let badge = match session.backend.as_str() {
-                        "codex" => "Codex · ",
-                        "agy" => "AGY · ",
-                        "api" => "API · ",
-                        _ => "",
-                    };
-                    let meta = if busy {
-                        format!("{badge}работает · {place}")
+                    let row_backend = if crate::model::valid_backend(&session.backend) {
+                        session.backend.as_str()
+                    } else if let Some(b) = self.settings.session_backends.get(&k).filter(|b| crate::model::valid_backend(b)) {
+                        b.as_str()
                     } else {
-                        format!("{badge}{place} · {}", relative(session.modified))
+                        "claude"
                     };
-                    let width = ui.available_width() - 30. - if busy { 32. } else { 0. };
-                    let mut job = egui::text::LayoutJob::simple(meta, FontId::proportional(11.5), p.muted, width);
+                    let b_col = design::backend_color(row_backend, self.settings.light);
+                    let b_short = match row_backend {
+                        "codex" => "Codex",
+                        "agy" => "AGY",
+                        "api" => "API",
+                        _ => "Claude",
+                    };
+                    let b_galley = ui.painter().layout_no_wrap(
+                        b_short.into(),
+                        FontId::proportional(9.5),
+                        b_col,
+                    );
+                    let (br, _) = ui.allocate_exact_size(
+                        Vec2::new(b_galley.size().x + 9., 15.),
+                        egui::Sense::hover(),
+                    );
+                    ui.painter()
+                        .rect_filled(br, 4.5, design::mix(p.surface, b_col, 0.16));
+                    ui.painter().galley(
+                        egui::pos2(br.left() + 4.5, br.center().y - b_galley.size().y * 0.5),
+                        b_galley,
+                        b_col,
+                    );
+
+                    let meta = if busy {
+                        format!("активен · {place}")
+                    } else {
+                        format!("{place} · {}", relative(session.modified))
+                    };
+                    let width = (ui.available_width() - 30. - if busy { 28. } else { 0. }).max(24.);
+                    let mut job = egui::text::LayoutJob::simple(
+                        meta,
+                        FontId::proportional(11.2),
+                        if busy { b_col } else { p.muted },
+                        width,
+                    );
                     job.wrap.max_rows = 1;
                     job.wrap.break_anywhere = true;
                     job.wrap.overflow_character = Some('…');
                     ui.label(job);
                     if busy {
-                        design::dots(ui, accent());
+                        design::waveform(ui, b_col, 11.);
                     }
                 });
             })
@@ -2537,22 +2774,29 @@ impl RelayApp {
         let response = ui.interact(row.rect, ui.id().with(&session.id), egui::Sense::click());
         let t = ctx.animate_bool_with_time(response.id.with("active"), selected, 0.18);
         let hover = ctx.animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.12);
-        let mut shapes = vec![egui::Shape::rect_filled(row.rect, 9., design::mix(p.side, design::mix(p.surface, accent(), 0.12), t.max(hover * 0.45)))];
+        let mut shapes = vec![egui::Shape::rect_filled(row.rect, 10., design::mix(p.side, design::mix(p.surface, accent(), 0.11), t.max(hover * 0.45)))];
         if selected {
             shapes.push(egui::Shape::rect_stroke(
                 row.rect,
-                9.,
-                Stroke::new(1.0_f32, design::mix(p.line, accent(), 0.28)),
+                10.,
+                Stroke::new(1.0_f32, design::mix(p.line, accent(), 0.30)),
                 egui::StrokeKind::Inside,
             ));
+            let pill_h = (row.rect.height() - 24.).clamp(12., 19.);
             shapes.push(egui::Shape::rect_filled(
-                egui::Rect::from_min_size(row.rect.left_top() + Vec2::new(3., 9.), Vec2::new(3., row.rect.height() - 18.)),
-                2.,
+                egui::Rect::from_center_size(
+                    egui::pos2(row.rect.left() + 5.5, row.rect.center().y),
+                    Vec2::new(3., pill_h),
+                ),
+                1.5,
                 accent(),
             ));
         }
         ui.painter().set(background, egui::Shape::Vec(shapes));
-        let dots_rect = egui::Rect::from_min_size(egui::pos2(row.rect.right() - 32., row.rect.top() + 5.), Vec2::splat(26.));
+        let dots_rect = egui::Rect::from_center_size(
+            egui::pos2(row.rect.right() - 18., row.rect.center().y),
+            Vec2::splat(24.),
+        );
         let menu_id = response.id.with("menu");
         let open = ui.memory(|m| m.is_popup_open(menu_id));
         let dots = ui.interact(dots_rect, response.id.with("dots"), egui::Sense::click());
@@ -2625,28 +2869,85 @@ impl RelayApp {
     fn main_panel(&mut self, ctx: &egui::Context) {
         let compact_appearance=self.settings.appearance.compact;
         let chat_width = self.settings.appearance.chat_width.clamp(560., 1160.);
-        let p = design::animated_palette(ctx, self.settings.light);
+        let light = self.settings.light;
+        let p = design::animated_palette(ctx, light);
+        let active_backend_id = self
+            .server()
+            .zip(self.current_key())
+            .map(|(srv, k)| self.backend_for_chat(&srv, &k))
+            .unwrap_or_else(|| "claude".into());
+        let active_engine_col = design::backend_color(&active_backend_id, light);
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(p.base))
             .show(ctx, |ui| {
-                egui::TopBottomPanel::top("chat-header")
+                design::ambient_horizon(ui.painter(), ui.max_rect(), active_engine_col, light);
+                let hdr_panel = egui::TopBottomPanel::top("chat-header")
                     .show_separator_line(false)
                     .frame(
                         egui::Frame::new()
-                            .fill(p.base)
-                            .inner_margin(egui::Margin::symmetric(18, 9)),
+                            .fill(Color32::TRANSPARENT)
+                            .inner_margin(egui::Margin::symmetric(18, 10)),
                     )
                     .show_inside(ui, |ui| {
+                        let mut cluster_jump: Option<(String, String)> = None;
                         if let (Some(server), Some(k)) = (self.server(), self.current_key()) {
                             if let Some(c) = self.chats.get(&k) {
                                 if let Some(run_id) = self.cluster_for_chat(&server.id, &c.sid) {
                                     let title =
                                         self.cluster_label(&server.id, &c.sid).unwrap_or_default();
+                                    let run_nodes: Vec<(String, String, String, bool)> = self
+                                        .cluster_store
+                                        .runs
+                                        .iter()
+                                        .find(|r| r.id == run_id)
+                                        .map(|r| {
+                                            let mut list = vec![(
+                                                format!("◈ {}", r.config.leader.name),
+                                                r.config.leader.server.clone(),
+                                                r.leader_sid.clone(),
+                                                self.chats
+                                                    .get(&key(&r.config.leader.server, &r.leader_sid))
+                                                    .is_some_and(|ch| ch.busy),
+                                            )];
+                                            for t in &r.tasks {
+                                                list.push((
+                                                    format!("{} · {}", t.agent.name, t.state.label()),
+                                                    t.agent.server.clone(),
+                                                    t.sid.clone(),
+                                                    t.state.active(),
+                                                ));
+                                            }
+                                            list
+                                        })
+                                        .unwrap_or_default();
                                     ui.horizontal_wrapped(|ui| {
                                         design::chip(ui, &title, Icon::Cluster, p, true);
+                                        for (lbl, srv_id, node_sid, node_busy) in run_nodes.into_iter().take(5) {
+                                            let is_current = srv_id == server.id && node_sid == c.sid;
+                                            let col = if node_busy {
+                                                accent()
+                                            } else if is_current {
+                                                GREEN
+                                            } else {
+                                                p.muted
+                                            };
+                                            if design::mini_pill(
+                                                ui,
+                                                Some(if node_busy { Icon::Pulse } else { Icon::Orbit }),
+                                                &model::shorten(&lbl, 24),
+                                                col,
+                                                p,
+                                            )
+                                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                            .clicked()
+                                                && !is_current
+                                            {
+                                                cluster_jump = Some((srv_id, node_sid));
+                                            }
+                                        }
                                         if design::button(
                                             ui,
-                                            "Схема команды",
+                                            "Топология",
                                             Some(Icon::Cluster),
                                             Kind::Ghost,
                                             p,
@@ -2662,63 +2963,86 @@ impl RelayApp {
                                 }
                             }
                         }
+                        if let Some((jsrv, jsid)) = cluster_jump {
+                            self.open_cluster_chat(&jsrv, &jsid);
+                        }
                         let chat=self.current_key().and_then(|k|self.chats.get(&k));
                         let title=chat.map(|c|c.title.clone()).unwrap_or_else(||"Рабочее пространство".into());
                         let cwd=chat.map(|c|c.cwd.clone()).unwrap_or_default();
                         let fresh=chat.is_some_and(|c|c.messages.is_empty() && !c.loading && !c.busy);
+                        let chat_busy=chat.is_some_and(|c|c.busy);
                         let sid_opt=chat.map(|c|c.sid.clone());
                         let chat_locked=chat.is_some_and(|c|c.locked);
                         let chat_unlocked=chat.is_none_or(|c|c.unlocked);
                         let active_badge=self.server().zip(self.current_key()).map(|(srv, k)| crate::model::backend_short_label(&self.backend_for_chat(&srv, &k)));
                         ui.horizontal(|ui|{
-                            let right_reserve = if sid_opt.is_some() { 160. } else { 114. };
+                            let right_reserve = if sid_opt.is_some() { 202. } else { 156. };
                             let available=(ui.available_width()-right_reserve).max(100.);
-                            ui.allocate_ui_with_layout(Vec2::new(available,42.),Layout::top_down(Align::Min),|ui|{
+                            ui.allocate_ui_with_layout(Vec2::new(available,44.),Layout::top_down(Align::Min),|ui|{
                                 ui.set_width(available);
                                 ui.horizontal(|ui|{
                                     ui.spacing_mut().item_spacing.x = 6.;
-                                    if chat_locked {
+                                    if chat_busy {
+                                        let (orb,_)=ui.allocate_exact_size(Vec2::splat(16.),egui::Sense::hover());
+                                        design::orbital_core(ui, orb, active_engine_col, true);
+                                    } else if chat_locked {
                                         let (lr,_)=ui.allocate_exact_size(Vec2::splat(14.),egui::Sense::hover());
                                         design::icon(ui.painter(),lr,if chat_unlocked{Icon::Unlock}else{Icon::Lock},if chat_unlocked{GREEN}else{accent()});
                                     }
                                     ui.add(egui::Label::new(RichText::new(title).size(15.).color(p.text)).truncate());
                                 });
                                 ui.horizontal(|ui|{
+                                    ui.spacing_mut().item_spacing.x = 6.;
                                     let (r,_)=ui.allocate_exact_size(Vec2::splat(12.),egui::Sense::hover());design::icon(ui.painter(),r,Icon::Folder,p.muted);
                                     let response=ui.add(egui::Label::new(RichText::new(if cwd.is_empty(){"Выбери подключение"}else{folder_name(&cwd)}).size(11.5).color(p.muted)).sense(egui::Sense::click())).on_hover_text(&cwd);
                                     if fresh && (!chat_locked || chat_unlocked) && response.clicked(){self.open_folders();}
                                     if let Some(b_name) = active_badge {
-                                        label(ui, format!("· {b_name}"), 11.5, accent());
+                                        design::mini_pill(
+                                            ui,
+                                            Some(design::backend_icon(&active_backend_id)),
+                                            b_name,
+                                            active_engine_col,
+                                            p,
+                                        );
                                     }
                                 });
                             });
                             if let Some(server)=self.server(){
-                                if let Some(sid)=sid_opt {
-                                    let lock_icon = if chat_locked && chat_unlocked { Icon::Unlock } else { Icon::Lock };
-                                    let lock_tip = if chat_locked && !chat_unlocked {
-                                        "Сессия заблокирована паролем"
-                                    } else if chat_locked {
-                                        "Настроить защиту паролем или заблокировать (ПКМ — заблокировать сразу)"
-                                    } else {
-                                        "Защитить эту сессию паролем"
-                                    };
-                                    let lock_btn = design::button(ui,"",Some(lock_icon),Kind::Secondary,p,Vec2::new(36.,32.)).on_hover_text(lock_tip);
-                                    if lock_btn.clicked() && (!chat_locked || chat_unlocked) {
-                                        self.open_lock_dialog(&server.id, &sid);
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    ui.spacing_mut().item_spacing.x = 6.;
+                                    if design::button(ui,"Браузер",Some(Icon::Browser),Kind::Secondary,p,Vec2::new(106.,32.)).on_hover_text("Браузер выбранного сервера").clicked(){self.start_browser(&server);}
+                                    if let Some(sid)=sid_opt {
+                                        let lock_icon = if chat_locked && chat_unlocked { Icon::Unlock } else { Icon::Lock };
+                                        let lock_tip = if chat_locked && !chat_unlocked {
+                                            "Сессия заблокирована паролем"
+                                        } else if chat_locked {
+                                            "Настроить защиту паролем или заблокировать (ПКМ — заблокировать сразу)"
+                                        } else {
+                                            "Защитить эту сессию паролем"
+                                        };
+                                        let lock_btn = design::button(ui,"",Some(lock_icon),Kind::Secondary,p,Vec2::new(34.,32.)).on_hover_text(lock_tip);
+                                        if lock_btn.clicked() && (!chat_locked || chat_unlocked) {
+                                            self.open_lock_dialog(&server.id, &sid);
+                                        }
+                                        if lock_btn.secondary_clicked() && chat_locked && chat_unlocked {
+                                            self.relock_session(&server.id, &sid);
+                                        }
                                     }
-                                    if lock_btn.secondary_clicked() && chat_locked && chat_unlocked {
-                                        self.relock_session(&server.id, &sid);
+                                    if design::button(ui,"",Some(Icon::Radar),Kind::Secondary,p,Vec2::new(34.,32.))
+                                        .on_hover_text("Радар агентов · живая топология сессий на сервере (/radar)")
+                                        .clicked()
+                                    {
+                                        self.radar_open = Some(server.id.clone());
                                     }
-                                }
-                                if design::button(ui,"Браузер",Some(Icon::Browser),Kind::Secondary,p,Vec2::new(106.,32.)).on_hover_text("Браузер выбранного сервера").clicked(){self.start_browser(&server);}
+                                });
                             }
                         });
-                        let hdr = ui.max_rect();
-                        ui.painter().line_segment(
-                            [egui::pos2(hdr.left() - 18., hdr.bottom() + 9.), egui::pos2(hdr.right() + 18., hdr.bottom() + 9.)],
-                            Stroke::new(1.0_f32, design::mix(p.base, p.line, 0.55)),
-                        );
                     });
+                let hr = hdr_panel.response.rect;
+                ui.painter().line_segment(
+                    [egui::pos2(hr.left(), hr.bottom() - 0.5), egui::pos2(hr.right(), hr.bottom() - 0.5)],
+                    Stroke::new(1.0_f32, design::mix(p.base, p.line, 0.58)),
+                );
                 if !self.notice.is_empty() {
                     egui::TopBottomPanel::top("notice")
                         .show_separator_line(false)
@@ -2890,19 +3214,188 @@ impl RelayApp {
                     });
                 let chat = self.chats.get(&k).unwrap();
                 if chat.messages.is_empty() && !chat.loading {
-                    let narrow=ui.available_width()<540.;
-                    egui::ScrollArea::vertical().id_salt("welcome").auto_shrink([false,false]).show(ui,|ui|{
-                        ui.add_space((ui.available_height()*0.18).clamp(20.,120.));
-                        let width=(ui.available_width()-40.).min(420.);
-                        design::content(ui,width,|ui|{
-                            label(ui,"Что сделаем?",if narrow{24.}else{28.},p.text);
-                            ui.add_space(8.);label(ui,"Выбери задачу или напиши свою",13.,p.muted);ui.add_space(24.);
-                            for (title,detail,which) in [("Изучить проект","Структура, файлы и основные модули",Icon::Folder),("Посмотреть изменения","Проверить правки и найти ошибки",Icon::Terminal),("Продолжить задачу","Вернуться к предыдущему контексту",Icon::Chat)]{
-                                if design::starter_card(ui,title,detail,which,p).clicked(){self.chats.get_mut(&k).unwrap().draft=title.into();}
-                                ui.add_space(8.);
-                            }
+                    let narrow = ui.available_width() < 560.;
+                    let mut picked_starter: Option<String> = None;
+                    let mut picked_backend: Option<String> = None;
+                    egui::ScrollArea::vertical()
+                        .id_salt("welcome")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.add_space((ui.available_height() * 0.11).clamp(16., 84.));
+                            let width = (ui.available_width() - 40.).min(560.);
+                            design::content(ui, width, |ui| {
+                                ui.horizontal(|ui| {
+                                    let (orb, _) = ui.allocate_exact_size(
+                                        Vec2::splat(42.),
+                                        egui::Sense::hover(),
+                                    );
+                                    design::orbital_core(ui, orb, active_engine_col, false);
+                                    ui.add_space(4.);
+                                    ui.vertical(|ui| {
+                                        label(
+                                            ui,
+                                            "Что создадим?",
+                                            if narrow { 23. } else { 27. },
+                                            p.text,
+                                        );
+                                        label(
+                                            ui,
+                                            "Выбери движок агента или стартовый сценарий ниже",
+                                            12.5,
+                                            p.muted,
+                                        );
+                                    });
+                                });
+                                ui.add_space(16.);
+
+                                // Clickable Engine Signature Strip
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.spacing_mut().item_spacing = Vec2::new(7., 7.);
+                                    for (bid, btitle) in [
+                                        ("claude", "Claude Code"),
+                                        ("codex", "OpenAI Codex"),
+                                        ("agy", "Antigravity"),
+                                        ("api", "Свой API"),
+                                    ] {
+                                        let selected_b = active_backend_id == bid;
+                                        let bcol = design::backend_color(bid, light);
+                                        let g = ui.painter().layout_no_wrap(
+                                            btitle.into(),
+                                            FontId::proportional(12.0),
+                                            if selected_b { p.text } else { p.muted },
+                                        );
+                                        let (pr, presp) = ui.allocate_exact_size(
+                                            Vec2::new(g.size().x + 34., 30.),
+                                            egui::Sense::click(),
+                                        );
+                                        let h = ui.ctx().animate_bool_with_time(
+                                            presp.id.with("hover"),
+                                            presp.hovered(),
+                                            0.16,
+                                        );
+                                        ui.painter().rect_filled(
+                                            pr,
+                                            9.,
+                                            if selected_b {
+                                                design::mix(p.surface, bcol, 0.18)
+                                            } else {
+                                                design::mix(p.side, p.surface, 0.5 + 0.5 * h)
+                                            },
+                                        );
+                                        ui.painter().rect_stroke(
+                                            pr,
+                                            9.,
+                                            Stroke::new(
+                                                if selected_b { 1.35_f32 } else { 1.0_f32 },
+                                                if selected_b {
+                                                    bcol
+                                                } else {
+                                                    design::mix(p.line, bcol, h * 0.45)
+                                                },
+                                            ),
+                                            egui::StrokeKind::Inside,
+                                        );
+                                        design::icon(
+                                            ui.painter(),
+                                            egui::Rect::from_center_size(
+                                                egui::pos2(pr.left() + 14., pr.center().y),
+                                                Vec2::splat(14.),
+                                            ),
+                                            design::backend_icon(bid),
+                                            bcol,
+                                        );
+                                        ui.painter().galley(
+                                            egui::pos2(
+                                                pr.left() + 25.,
+                                                pr.center().y - g.size().y * 0.5,
+                                            ),
+                                            g,
+                                            if selected_b { p.text } else { p.muted },
+                                        );
+                                        if presp
+                                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                            .clicked()
+                                        {
+                                            picked_backend = Some(bid.into());
+                                        }
+                                    }
+                                });
+                                ui.add_space(18.);
+
+                                let missions = [
+                                    (
+                                        "Изучить проект",
+                                        "Архитектура, ключевые модули и точки входа",
+                                        Icon::Search,
+                                        design::phase_color(crate::model::ToolPhase::Research, light),
+                                    ),
+                                    (
+                                        "Посмотреть изменения",
+                                        "Проверить git diff, тесты и узкие места",
+                                        Icon::Terminal,
+                                        design::phase_color(crate::model::ToolPhase::Terminal, light),
+                                    ),
+                                    (
+                                        "Улучшить код и дизайн",
+                                        "Внести правки и проверить сборку",
+                                        Icon::Pencil,
+                                        design::phase_color(crate::model::ToolPhase::Edit, light),
+                                    ),
+                                    (
+                                        "Запустить субагентов",
+                                        "Параллельные агенты для сложных задач",
+                                        Icon::Orbit,
+                                        design::phase_color(crate::model::ToolPhase::Subagent, light),
+                                    ),
+                                ];
+                                if narrow {
+                                    for (m_title, m_det, m_ic, _) in missions {
+                                        if design::starter_card(ui, m_title, m_det, m_ic, p).clicked()
+                                        {
+                                            picked_starter = Some(m_title.into());
+                                        }
+                                        ui.add_space(8.);
+                                    }
+                                } else {
+                                    let col_w = ((width - 10.) * 0.5).max(160.);
+                                    for pair in missions.chunks(2) {
+                                        ui.horizontal(|ui| {
+                                            ui.spacing_mut().item_spacing.x = 10.;
+                                            for &(m_title, m_det, m_ic, m_tint) in pair {
+                                                if design::bento_card(
+                                                    ui, col_w, m_title, m_det, m_ic, m_tint, p,
+                                                )
+                                                .clicked()
+                                                {
+                                                    picked_starter = Some(m_title.into());
+                                                }
+                                            }
+                                        });
+                                        ui.add_space(10.);
+                                    }
+                                }
+                            });
                         });
-                    });
+                    if let Some(t) = picked_starter {
+                        if let Some(c) = self.chats.get_mut(&k) {
+                            c.draft = t;
+                        }
+                    }
+                    if let Some(new_b) = picked_backend {
+                        self.settings.set_session_backend(k.clone(), &new_b);
+                        if let Some(srv) = self.server() {
+                            if let Some(c) = self.chats.get_mut(&k) {
+                                if !c.cluster_context.is_object() {
+                                    c.model = srv.model_for(&new_b).to_owned();
+                                }
+                            }
+                            if matches!(new_b.as_str(), "codex" | "agy") {
+                                self.controller
+                                    .send(&srv.id, json!({"op": "catalog", "backend": new_b}));
+                            }
+                        }
+                        self.save();
+                    }
                     return;
                 }
                 let chat = self.chats.get_mut(&k).unwrap();
@@ -2912,15 +3405,21 @@ impl RelayApp {
                     0.30,
                     egui::emath::easing::cubic_in_out,
                 );
-                // Measured outside the scroll area, so content cannot widen it.
-                let visible = ui.available_width();
+                // Measured from the actual panel header & window right edge so wide code blocks never widen the column.
+                let visible = hr
+                    .width()
+                    .min(ctx.screen_rect().right() - ui.max_rect().left())
+                    .min(ui.available_width())
+                    .max(160.);
                 egui::ScrollArea::vertical()
                     .id_salt(("chat", &k))
+                    .max_width(visible)
                     .stick_to_bottom(true)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         ui.add_space(24.);
                         design::column(ui, visible, chat_width, |ui| {
+                            let col_w = ui.max_rect().width();
                             ui.set_opacity(fade);
                             if chat.loading {
                                 ui.horizontal(|ui| {
@@ -2938,14 +3437,25 @@ impl RelayApp {
                                 let index = match item {
                                     crate::timeline::Item::Actions(range) => {
                                         let busy = chat.busy && range.end == chat.messages.len();
-                                        crate::timeline::show(
-                                            ui,
-                                            &k,
-                                            &chat.messages,
-                                            range,
-                                            busy,
-                                            p,
-                                            &mut self.markdown,
+                                        let item_rect = egui::Rect::from_min_size(
+                                            ui.cursor().min,
+                                            Vec2::new(col_w, f32::INFINITY),
+                                        );
+                                        ui.scope_builder(
+                                            egui::UiBuilder::new().max_rect(item_rect),
+                                            |ui| {
+                                                ui.set_width(col_w);
+                                                ui.set_max_width(col_w);
+                                                crate::timeline::show(
+                                                    ui,
+                                                    &k,
+                                                    &chat.messages,
+                                                    range,
+                                                    busy,
+                                                    p,
+                                                    &mut self.markdown,
+                                                );
+                                            },
                                         );
                                         continue;
                                     }
@@ -2959,7 +3469,15 @@ impl RelayApp {
                                     design::duration(ui.ctx(), 0.28),
                                     egui::emath::easing::cubic_out,
                                 );
-                                ui.push_id(index, |ui| {
+                                let msg_rect = egui::Rect::from_min_size(
+                                    ui.cursor().min,
+                                    Vec2::new(col_w, f32::INFINITY),
+                                );
+                                ui.scope_builder(
+                                    egui::UiBuilder::new().id_salt(index).max_rect(msg_rect),
+                                    |ui| {
+                                        ui.set_width(col_w);
+                                        ui.set_max_width(col_w);
                                 ui.set_opacity(appear);
                                 match message.role.as_str() {
                                     "user" => {
@@ -2986,6 +3504,27 @@ impl RelayApp {
                                     }
                                     _ => {
                                         let top = ui.cursor().top();
+                                        // Subtle Engine Signature Header above assistant turns
+                                        ui.horizontal(|ui| {
+                                            ui.spacing_mut().item_spacing.x = 5.;
+                                            let (er, _) = ui.allocate_exact_size(
+                                                Vec2::splat(13.),
+                                                egui::Sense::hover(),
+                                            );
+                                            design::icon(
+                                                ui.painter(),
+                                                er,
+                                                design::backend_icon(&active_backend_id),
+                                                active_engine_col,
+                                            );
+                                            label(
+                                                ui,
+                                                crate::model::backend_label(&active_backend_id),
+                                                11.0,
+                                                active_engine_col,
+                                            );
+                                        });
+                                        ui.add_space(2.);
                                         let file_links = crate::artifacts::links(&message.text);
                                         for (destination, _) in &file_links {
                                             self.markdown.add_link_hook(destination.clone());
@@ -3069,12 +3608,107 @@ impl RelayApp {
                                 }
                                 });
                             }
-                            if chat.busy && !grouped_busy {
-                                ui.horizontal(|ui| {
-                                    design::dots(ui, accent());
-                                    label(ui, &chat.status, 13., p.muted);
-                                });
-                                ui.add_space(18.);
+                            if chat.busy {
+                                let tel = crate::model::analyze_turn(
+                                    &chat.messages,
+                                    chat.user_at,
+                                    chat.busy,
+                                    &chat.status,
+                                );
+                                if !grouped_busy || !tel.subagents.is_empty() {
+                                    ui.add_space(6.);
+                                    let pod_tint = tel
+                                        .active_phase
+                                        .map(|ph| design::phase_color(ph, light))
+                                        .unwrap_or(active_engine_col);
+                                    let pod_resp = egui::Frame::new()
+                                        .fill(design::mix(
+                                            p.side,
+                                            design::mix(p.surface, pod_tint, 0.12),
+                                            0.75,
+                                        ))
+                                        .stroke(Stroke::new(
+                                            1.1_f32,
+                                            design::mix(p.line, pod_tint, 0.45),
+                                        ))
+                                        .corner_radius(13.)
+                                        .inner_margin(egui::Margin::symmetric(14, 11))
+                                        .show(ui, |ui| {
+                                            ui.set_width((ui.available_width() - 28.).max(80.));
+                                            ui.horizontal(|ui| {
+                                                let (orb, _) = ui.allocate_exact_size(
+                                                    Vec2::splat(24.),
+                                                    egui::Sense::hover(),
+                                                );
+                                                design::orbital_core(ui, orb, pod_tint, true);
+                                                ui.add_space(4.);
+                                                ui.vertical(|ui| {
+                                                    ui.horizontal_wrapped(|ui| {
+                                                        label(
+                                                            ui,
+                                                            &tel.active_headline,
+                                                            13.0,
+                                                            p.text,
+                                                        );
+                                                        design::waveform(ui, pod_tint, 13.);
+                                                    });
+                                                    if !tel.active_target.is_empty() {
+                                                        ui.add(
+                                                            egui::Label::new(
+                                                                RichText::new(&tel.active_target)
+                                                                    .monospace()
+                                                                    .size(11.2)
+                                                                    .color(pod_tint),
+                                                            )
+                                                            .truncate(),
+                                                        );
+                                                    }
+                                                });
+                                            });
+                                            if tel.total_actions > 0 || !tel.subagents.is_empty() {
+                                                ui.add_space(6.);
+                                                ui.horizontal_wrapped(|ui| {
+                                                    ui.spacing_mut().item_spacing = Vec2::new(6., 4.);
+                                                    if tel.total_actions > 0 {
+                                                        design::mini_pill(
+                                                            ui,
+                                                            Some(Icon::Layers),
+                                                            &format!(
+                                                                "шагов: {}/{}",
+                                                                tel.done_actions, tel.total_actions
+                                                            ),
+                                                            pod_tint,
+                                                            p,
+                                                        );
+                                                    }
+                                                    for sa in tel.subagents.iter().take(4) {
+                                                        let scol = design::phase_color(
+                                                            crate::model::ToolPhase::Subagent,
+                                                            light,
+                                                        );
+                                                        design::mini_pill(
+                                                            ui,
+                                                            Some(Icon::Orbit),
+                                                            &format!(
+                                                                "{}{}",
+                                                                sa.role,
+                                                                if sa.running {
+                                                                    " · в работе"
+                                                                } else {
+                                                                    " · готово"
+                                                                }
+                                                            ),
+                                                            scol,
+                                                            p,
+                                                        );
+                                                    }
+                                                });
+                                            }
+                                        })
+                                        .response;
+                                    design::specular_rim(ui.painter(), pod_resp.rect, 13., light);
+                                    ui.add_space(18.);
+                                }
                             }
                         });
                     });
@@ -4148,7 +4782,8 @@ impl RelayApp {
             || self.close_confirm
             || self.delete_chat.is_some()
             || self.lock_dialog.is_some()
-            || self.agents_open.is_some();
+            || self.agents_open.is_some()
+            || self.radar_open.is_some();
         let modal_t = ctx.animate_bool_with_time_and_easing(
             egui::Id::new("modal-fade"),
             visible,
@@ -4158,6 +4793,7 @@ impl RelayApp {
         self.deletion_dialog(ctx, p, modal_t);
         self.lock_dialog(ctx, p, modal_t);
         self.agents_dialog(ctx, p, modal_t);
+        self.radar_dialog(ctx, p, modal_t);
         if let Some(mut editor) = self.editor.take() {
             let mut open = true;
             let mut submit = false;

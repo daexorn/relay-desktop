@@ -179,6 +179,12 @@ pub enum Icon {
     Lock,
     Unlock,
     Download,
+    Orbit,
+    Spark,
+    Pulse,
+    Bolt,
+    Radar,
+    Layers,
 }
 pub fn icon(p: &egui::Painter, r: Rect, which: Icon, color: Color32) {
     let c = r.center();
@@ -432,7 +438,305 @@ pub fn icon(p: &egui::Painter, r: Rect, which: Icon, color: Color32) {
             path(&[(-4., -0.5), (0., 3.8), (4., -0.5)]);
             path(&[(-7., 5.5), (-7., 8.), (7., 8.), (7., 5.5)]);
         }
+        Icon::Orbit => {
+            p.circle_filled(c, 2.3 * z, color);
+            let ring_a: Vec<_> = (0..=24)
+                .map(|i| {
+                    let a = i as f32 * std::f32::consts::TAU / 24.;
+                    let (sx, sy) = (a.cos() * 8.4, a.sin() * 3.8);
+                    let rot = egui::emath::Rot2::from_angle(-0.52) * Vec2::new(sx, sy);
+                    c + rot * z
+                })
+                .collect();
+            let ring_b: Vec<_> = (0..=24)
+                .map(|i| {
+                    let a = i as f32 * std::f32::consts::TAU / 24.;
+                    let (sx, sy) = (a.cos() * 8.4, a.sin() * 3.8);
+                    let rot = egui::emath::Rot2::from_angle(0.52) * Vec2::new(sx, sy);
+                    c + rot * z
+                })
+                .collect();
+            p.add(egui::Shape::line(ring_a, Stroke::new(1.35 * z, color)));
+            p.add(egui::Shape::line(ring_b, Stroke::new(1.35 * z, color.gamma_multiply(0.75))));
+        }
+        Icon::Spark => {
+            let star = [
+                (0., -8.5),
+                (2.1, -2.1),
+                (8.5, 0.),
+                (2.1, 2.1),
+                (0., 8.5),
+                (-2.1, 2.1),
+                (-8.5, 0.),
+                (-2.1, -2.1),
+                (0., -8.5),
+            ];
+            path(&star);
+            p.circle_filled(c, 1.5 * z, color);
+        }
+        Icon::Pulse => {
+            path(&[
+                (-8.5, 0.5),
+                (-4.5, 0.5),
+                (-2.2, -6.5),
+                (1.2, 6.8),
+                (3.8, -2.5),
+                (5.6, 0.5),
+                (8.5, 0.5),
+            ]);
+        }
+        Icon::Bolt => {
+            path(&[
+                (1.5, -8.5),
+                (-5.5, 0.8),
+                (-0.2, 0.8),
+                (-1.8, 8.5),
+                (5.5, -0.8),
+                (0.2, -0.8),
+                (1.5, -8.5),
+            ]);
+        }
+        Icon::Radar => {
+            p.circle_stroke(c, 8.2 * z, s);
+            p.circle_stroke(c, 4.4 * z, Stroke::new(1.25 * z, color.gamma_multiply(0.7)));
+            p.circle_filled(c, 1.6 * z, color);
+            line((0., 0.), (5.8, -5.8));
+        }
+        Icon::Layers => {
+            path(&[(0., -7.5), (8., -3.5), (0., 0.5), (-8., -3.5), (0., -7.5)]);
+            path(&[(-8., 0.8), (0., 4.8), (8., 0.8)]);
+            path(&[(-8., 4.6), (0., 8.6), (8., 4.6)]);
+        }
     }
+}
+
+pub fn backend_color(backend: &str, light: bool) -> Color32 {
+    let (r, g, b) = crate::model::backend_rgb(backend, light);
+    Color32::from_rgb(r, g, b)
+}
+
+pub fn backend_icon(backend: &str) -> Icon {
+    match backend {
+        "codex" => Icon::Terminal,
+        "agy" => Icon::Orbit,
+        "api" => Icon::Bolt,
+        _ => Icon::Spark,
+    }
+}
+
+pub fn phase_color(phase: crate::model::ToolPhase, light: bool) -> Color32 {
+    let (r, g, b) = phase.rgb(light);
+    Color32::from_rgb(r, g, b)
+}
+
+pub fn phase_icon(phase: crate::model::ToolPhase) -> Icon {
+    match phase {
+        crate::model::ToolPhase::Research => Icon::Search,
+        crate::model::ToolPhase::Edit => Icon::Pencil,
+        crate::model::ToolPhase::Terminal => Icon::Terminal,
+        crate::model::ToolPhase::Subagent => Icon::Orbit,
+        crate::model::ToolPhase::Desktop => Icon::Computer,
+        crate::model::ToolPhase::Other => Icon::Layers,
+    }
+}
+
+/// Paints an atmospheric next-gen horizon glow along the top of a workspace panel.
+pub fn ambient_horizon(painter: &egui::Painter, rect: Rect, color: Color32, light: bool) {
+    let max_alpha = if light { 0.055 } else { 0.095 };
+    let bands = 14;
+    let total_h = 160.0_f32.min(rect.height() * 0.35);
+    for i in 0..bands {
+        let t0 = i as f32 / bands as f32;
+        let t1 = (i + 1) as f32 / bands as f32;
+        let fade = (1.0 - t0) * (1.0 - t0);
+        let band = Rect::from_min_max(
+            Pos2::new(rect.left(), rect.top() + total_h * t0),
+            Pos2::new(rect.right(), rect.top() + total_h * t1 + 1.0),
+        );
+        painter.rect_filled(band, 0.0, color.gamma_multiply(max_alpha * fade));
+    }
+    // Focused center flare along the top hairline
+    let flare_w = (rect.width() * 0.58).clamp(180.0, 620.0);
+    for (scale, alpha) in [(1.0_f32, 0.16_f32), (0.55, 0.30)] {
+        let w = flare_w * scale;
+        painter.line_segment(
+            [
+                Pos2::new(rect.center().x - w * 0.5, rect.top() + 0.5),
+                Pos2::new(rect.center().x + w * 0.5, rect.top() + 0.5),
+            ],
+            Stroke::new(1.2_f32, color.gamma_multiply(if light { alpha * 0.7 } else { alpha })),
+        );
+    }
+}
+
+/// Specular 1px top-edge highlight on elevated glass cards.
+pub fn specular_rim(painter: &egui::Painter, rect: Rect, radius: f32, light: bool) {
+    let inset = radius.max(6.0);
+    if rect.width() > inset * 2.2 {
+        let rim = if light {
+            Color32::from_white_alpha(170)
+        } else {
+            Color32::from_white_alpha(22)
+        };
+        painter.line_segment(
+            [
+                Pos2::new(rect.left() + inset, rect.top() + 0.75),
+                Pos2::new(rect.right() - inset, rect.top() + 0.75),
+            ],
+            Stroke::new(1.0_f32, rim),
+        );
+    }
+}
+
+/// Counter-rotating dual orbital rings + breathing core for active AI agents.
+pub fn orbital_core(ui: &egui::Ui, rect: Rect, color: Color32, spinning: bool) {
+    let painter = ui.painter();
+    let c = rect.center();
+    let r = (rect.width().min(rect.height()) * 0.5 - 1.5).max(4.0);
+    let animated = ui
+        .ctx()
+        .data(|d| d.get_temp::<bool>(egui::Id::new("relay-animations")))
+        .unwrap_or(true);
+    let t = if spinning && animated {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(24));
+        ui.input(|i| i.time) as f32
+    } else {
+        0.65
+    };
+    painter.circle_filled(c, r, color.gamma_multiply(if spinning { 0.14 } else { 0.09 }));
+    painter.circle_stroke(c, r, Stroke::new(1.0_f32, color.gamma_multiply(0.22)));
+    let outer_arc: Vec<Pos2> = (0..=14)
+        .map(|k| {
+            let a = t * 2.6 + k as f32 / 14.0 * 3.5;
+            c + Vec2::new(a.cos(), a.sin()) * r
+        })
+        .collect();
+    painter.add(egui::Shape::line(outer_arc, Stroke::new(1.75_f32, color)));
+    if r >= 7.0 {
+        let inner_r = r * 0.60;
+        let inner_arc: Vec<Pos2> = (0..=10)
+            .map(|k| {
+                let a = -t * 3.4 + 1.4 + k as f32 / 10.0 * 2.7;
+                c + Vec2::new(a.cos(), a.sin()) * inner_r
+            })
+            .collect();
+        painter.add(egui::Shape::line(
+            inner_arc,
+            Stroke::new(1.3_f32, color.gamma_multiply(0.75)),
+        ));
+    }
+    let pulse = if spinning && animated {
+        0.78 + ((t * 4.2).sin() * 0.5 + 0.5) * 0.34
+    } else {
+        0.85
+    };
+    painter.circle_filled(c, (r * 0.24 * pulse).max(1.8), color);
+}
+
+/// 5-bar kinetic harmonic waveform indicator for live streaming telemetry.
+pub fn waveform(ui: &mut egui::Ui, color: Color32, height: f32) {
+    let bars = 5usize;
+    let width = bars as f32 * 4.2;
+    let (r, _) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
+    let animated = ui
+        .ctx()
+        .data(|d| d.get_temp::<bool>(egui::Id::new("relay-animations")))
+        .unwrap_or(true);
+    let time = if animated {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(28));
+        ui.input(|i| i.time) as f32
+    } else {
+        1.1
+    };
+    for i in 0..bars {
+        let wave = (time * 5.2 + i as f32 * 0.95).sin() * 0.5 + 0.5;
+        let h = (height * (0.26 + 0.70 * wave)).max(3.0);
+        let x = r.left() + i as f32 * 4.2 + 1.5;
+        let bar = Rect::from_center_size(Pos2::new(x, r.center().y), Vec2::new(2.2, h));
+        ui.painter()
+            .rect_filled(bar, 1.1, color.gamma_multiply(0.50 + 0.50 * wave));
+    }
+}
+
+/// Proportional multi-segment color bar visualizing Research / Edit / Terminal / Subagent steps.
+pub fn phase_bar(
+    painter: &egui::Painter,
+    rect: Rect,
+    tel: &crate::model::TurnTelemetry,
+    light: bool,
+    p: Palette,
+) {
+    painter.rect_filled(rect, rect.height() * 0.5, p.line.gamma_multiply(0.65));
+    let other = tel
+        .total_actions
+        .saturating_sub(tel.reads + tel.edits + tel.commands + tel.delegations);
+    let segments = [
+        (tel.reads, phase_color(crate::model::ToolPhase::Research, light)),
+        (tel.edits, phase_color(crate::model::ToolPhase::Edit, light)),
+        (tel.commands, phase_color(crate::model::ToolPhase::Terminal, light)),
+        (tel.delegations, phase_color(crate::model::ToolPhase::Subagent, light)),
+        (other, phase_color(crate::model::ToolPhase::Other, light)),
+    ];
+    let sum: usize = segments.iter().map(|(n, _)| *n).sum();
+    if sum == 0 || rect.width() < 6.0 {
+        return;
+    }
+    let mut x = rect.left();
+    let active_segments: Vec<_> = segments.into_iter().filter(|(n, _)| *n > 0).collect();
+    let gaps = active_segments.len().saturating_sub(1) as f32 * 1.5;
+    let usable = (rect.width() - gaps).max(2.0);
+    for (idx, (count, col)) in active_segments.iter().enumerate() {
+        let w = if idx + 1 == active_segments.len() {
+            (rect.right() - x).max(2.0)
+        } else {
+            (usable * (*count as f32 / sum as f32)).max(3.0)
+        };
+        let seg = Rect::from_min_size(Pos2::new(x, rect.top()), Vec2::new(w, rect.height()));
+        painter.rect_filled(seg, rect.height() * 0.5, *col);
+        x += w + 1.5;
+    }
+}
+
+/// Compact tinted icon + text pill for telemetry counters and engine tags.
+pub fn mini_pill(
+    ui: &mut egui::Ui,
+    icon_opt: Option<Icon>,
+    text: &str,
+    color: Color32,
+    p: Palette,
+) -> Response {
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.into(), FontId::proportional(10.5), color);
+    let icon_space = if icon_opt.is_some() { 15.0 } else { 0.0 };
+    let width = galley.size().x + icon_space + 14.0;
+    let (r, resp) = ui.allocate_exact_size(Vec2::new(width, 20.0), Sense::hover());
+    ui.painter()
+        .rect_filled(r, 10.0, mix(p.surface, color, 0.14));
+    ui.painter().rect_stroke(
+        r,
+        10.0,
+        Stroke::new(1.0_f32, mix(p.line, color, 0.32)),
+        egui::StrokeKind::Inside,
+    );
+    let mut tx = r.left() + 7.0;
+    if let Some(ic) = icon_opt {
+        icon(
+            ui.painter(),
+            Rect::from_center_size(Pos2::new(tx + 5.5, r.center().y), Vec2::splat(11.5)),
+            ic,
+            color,
+        );
+        tx += 14.5;
+    }
+    ui.painter().galley(
+        Pos2::new(tx, r.center().y - galley.size().y * 0.5),
+        galley,
+        color,
+    );
+    resp
 }
 #[derive(Clone, Copy, PartialEq)]
 pub enum Kind {
@@ -669,21 +973,34 @@ pub fn service_action(
     p: Palette,
 ) -> Response {
     let (r, response) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), 36.), Sense::click());
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 32.), Sense::click());
     let hover = ui.ctx().animate_bool_with_time(
         response.id.with("hover"),
         response.hovered(),
         duration(ui.ctx(), 0.16),
     );
     let fill = if active {
-        mix(p.surface, accent(), 0.13)
+        mix(p.surface, accent(), 0.16)
     } else {
-        mix(p.surface, p.line, 0.55 * hover)
+        mix(mix(p.base, p.surface, 0.45), p.line, 0.55 * hover)
     };
     ui.painter().rect_filled(r, 8., fill);
+    ui.painter().rect_stroke(
+        r,
+        8.,
+        Stroke::new(
+            1.0_f32,
+            if active {
+                mix(p.line, accent(), 0.45)
+            } else {
+                mix(p.line.gamma_multiply(0.65), accent(), hover * 0.35)
+            },
+        ),
+        egui::StrokeKind::Inside,
+    );
     icon(
         ui.painter(),
-        Rect::from_center_size(egui::pos2(r.left() + 18., r.center().y), Vec2::splat(18.)),
+        Rect::from_center_size(egui::pos2(r.left() + 15., r.center().y), Vec2::splat(15.)),
         which,
         if active {
             accent()
@@ -692,15 +1009,15 @@ pub fn service_action(
         },
     );
     ui.painter().text(
-        egui::pos2(r.left() + 36., r.center().y),
+        egui::pos2(r.left() + 30., r.center().y),
         egui::Align2::LEFT_CENTER,
         text,
-        FontId::proportional(13.),
+        FontId::proportional(12.5),
         p.text,
     );
     chevron(
         ui.painter(),
-        Rect::from_center_size(r.right_center() - Vec2::new(16., 0.), Vec2::splat(14.)),
+        Rect::from_center_size(r.right_center() - Vec2::new(13., 0.), Vec2::splat(13.)),
         0.,
         p.muted,
     );
@@ -736,36 +1053,91 @@ pub fn starter_card(
         response.hovered(),
         duration(ui.ctx(), 0.16),
     );
-    ui.painter().rect_filled(r, 10., mix(p.side, p.surface, t));
+    ui.painter().rect_filled(r, 12., mix(p.side, p.surface, 0.55 + 0.45 * t));
     ui.painter().rect_stroke(
         r,
-        10.,
-        Stroke::new(1.0_f32, mix(p.line, accent(), t * 0.35)),
+        12.,
+        Stroke::new(1.0_f32, mix(p.line, accent(), 0.14 + t * 0.42)),
         egui::StrokeKind::Inside,
     );
-    let tile = Rect::from_center_size(egui::pos2(r.left() + 30., r.center().y), Vec2::splat(34.));
-    ui.painter().rect_filled(tile, 8., p.surface);
+    specular_rim(ui.painter(), r, 12., !ui.visuals().dark_mode);
+    let tile = Rect::from_center_size(egui::pos2(r.left() + 31., r.center().y), Vec2::splat(36.));
+    ui.painter()
+        .rect_filled(tile, 10., mix(p.surface, accent(), 0.08 + 0.14 * t));
     icon(
         ui.painter(),
-        tile.shrink(8.),
+        tile.shrink(8.5),
         which,
-        mix(p.muted, accent(), t),
+        mix(p.muted, accent(), 0.35 + 0.65 * t),
     );
     let painter = ui.painter().with_clip_rect(r.shrink2(Vec2::new(12., 0.)));
     painter.text(
-        egui::pos2(r.left() + 58., r.top() + 21.),
+        egui::pos2(r.left() + 60., r.top() + 21.),
         egui::Align2::LEFT_CENTER,
         title,
         FontId::proportional(13.5),
         p.text,
     );
     painter.text(
-        egui::pos2(r.left() + 58., r.top() + 43.),
+        egui::pos2(r.left() + 60., r.top() + 43.),
         egui::Align2::LEFT_CENTER,
         detail,
         FontId::proportional(11.5),
         p.muted,
     );
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+pub fn bento_card(
+    ui: &mut egui::Ui,
+    width: f32,
+    title: &str,
+    detail: &str,
+    which: Icon,
+    tint: Color32,
+    p: Palette,
+) -> Response {
+    let (r, response) = ui.allocate_exact_size(Vec2::new(width, 92.), Sense::click());
+    let t = ui.ctx().animate_bool_with_time(
+        response.id.with("hover"),
+        response.hovered(),
+        duration(ui.ctx(), 0.18),
+    );
+    ui.painter()
+        .rect_filled(r, 13., mix(p.side, mix(p.surface, tint, 0.07), 0.6 + 0.4 * t));
+    ui.painter().rect_stroke(
+        r,
+        13.,
+        Stroke::new(1.0_f32, mix(p.line, tint, 0.18 + 0.45 * t)),
+        egui::StrokeKind::Inside,
+    );
+    specular_rim(ui.painter(), r, 13., !ui.visuals().dark_mode);
+    let tile = Rect::from_min_size(r.min + Vec2::new(14., 12.), Vec2::splat(30.));
+    ui.painter()
+        .rect_filled(tile, 8., mix(p.surface, tint, 0.14 + 0.12 * t));
+    icon(ui.painter(), tile.shrink(6.5), which, tint);
+    chevron(
+        ui.painter(),
+        Rect::from_center_size(Pos2::new(r.right() - 18., r.top() + 27.), Vec2::splat(13.)),
+        0.,
+        mix(p.muted, tint, t),
+    );
+    let painter = ui.painter().with_clip_rect(r.shrink2(Vec2::new(13., 6.)));
+    painter.text(
+        Pos2::new(r.left() + 14., r.top() + 55.),
+        egui::Align2::LEFT_CENTER,
+        title,
+        FontId::proportional(13.5),
+        p.text,
+    );
+    painter.text(
+        Pos2::new(r.left() + 14., r.top() + 74.),
+        egui::Align2::LEFT_CENTER,
+        detail,
+        FontId::proportional(11.0),
+        p.muted,
+    );
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, title));
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
@@ -826,7 +1198,13 @@ pub fn card(p: Palette) -> egui::Frame {
 }
 pub fn mark(ui: &mut egui::Ui, size: f32) {
     let (r, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
-    icon(ui.painter(), r, Icon::Server, accent());
+    let c = r.center();
+    let a = accent();
+    ui.painter().circle_filled(c, size * 0.50, a.gamma_multiply(0.08));
+    ui.painter()
+        .circle_stroke(c, size * 0.46, Stroke::new(1.1_f32, a.gamma_multiply(0.24)));
+    ui.painter().circle_filled(c, size * 0.34, a.gamma_multiply(0.14));
+    icon(ui.painter(), r.shrink(size * 0.22), Icon::Orbit, a);
 }
 pub fn field(ui: &mut egui::Ui, value: &mut String, hint: &str, password: bool) -> Response {
     let p = animated_palette(ui.ctx(), !ui.visuals().dark_mode);
@@ -902,9 +1280,11 @@ pub fn toggle(ui: &mut egui::Ui, value: &mut bool, text: &str, p: Palette) -> Re
 /// A centred column whose width comes from the window, not from what is inside: a wide
 /// line of output can never make the whole chat wider than the screen.
 pub fn column(ui: &mut egui::Ui, visible: f32, max_width: f32, add: impl FnOnce(&mut egui::Ui)) {
-    let w = (visible - 40.).min(max_width).max(120.);
-    let gap = ((visible - w) * 0.5).max(0.);
+    let avail = visible.min(ui.available_width()).min(ui.clip_rect().width());
+    let w = (avail - 40.).min(max_width).max(120.);
+    let gap = ((avail - w) * 0.5).max(0.);
     ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.;
         ui.add_space(gap);
         ui.vertical(|ui| {
             ui.set_width(w);

@@ -1,6 +1,6 @@
 use super::{
     app::{App, Field, Hit, Picker, Popup, COMMANDS},
-    conversation::tool_name,
+    conversation::{self, engine_badge, tool_name, TranscriptTheme},
     editor::Editor,
     markdown::{self, clean},
 };
@@ -11,7 +11,7 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, Paragraph},
     Frame,
 };
-use std::collections::BTreeMap;
+use relay_desktop::model::{backend_rgb, ToolPhase, TurnTelemetry};
 use unicode_width::UnicodeWidthStr;
 
 fn rgb(hex: u32) -> Color {
@@ -21,9 +21,13 @@ fn rgb(hex: u32) -> Color {
         (hex & 0xff) as u8,
     )
 }
+fn rgb_tuple((r, g, b): (u8, u8, u8)) -> Color {
+    Color::Rgb(r, g, b)
+}
 
 #[derive(Clone, Copy)]
 struct Palette {
+    light: bool,
     base: Color,
     panel: Color,
     surface: Color,
@@ -31,6 +35,7 @@ struct Palette {
     text: Color,
     muted: Color,
     accent: Color,
+    amber: Color,
     red: Color,
     green: Color,
 }
@@ -38,6 +43,7 @@ impl Palette {
     fn new(theme: &str) -> Self {
         let &(_, _, is_light, c) = relay_desktop::model::theme_spec(theme);
         Self {
+            light: is_light,
             base: rgb(c[0]),
             panel: rgb(c[1]),
             surface: rgb(c[3]),
@@ -45,6 +51,11 @@ impl Palette {
             text: rgb(c[5]),
             muted: rgb(c[6]),
             accent: rgb(c[7]),
+            amber: if is_light {
+                Color::Rgb(192, 118, 22)
+            } else {
+                Color::Rgb(242, 184, 88)
+            },
             red: if is_light {
                 Color::Rgb(185, 48, 56)
             } else {
@@ -63,7 +74,7 @@ impl Palette {
 }
 #[derive(Default)]
 pub struct View {
-    cache: Option<(String, u64, usize, u16, bool, String, String)>,
+    cache: Option<(String, u64, usize, u16, bool, bool, String, String)>,
     lines: Vec<Line<'static>>,
 }
 
@@ -124,41 +135,80 @@ pub fn draw(frame: &mut Frame, app: &mut App, view: &mut View) {
     ])
     .split(area);
     let header = layout[0];
-    let right_reserve = if area.width >= 76 {
-        36
-    } else if area.width >= 54 {
-        13
+    let right_reserve = if area.width >= 90 {
+        46
+    } else if area.width >= 62 {
+        23
+    } else if area.width >= 48 {
+        12
     } else {
         2
     };
+    let left_limit = (header.width as usize).saturating_sub(right_reserve + 1);
+    let ver_str = format!(" TUI  {}", env!("CARGO_PKG_VERSION"));
+    let mut used_w = 4 + 5 + ver_str.width();
     let mut head = vec![
         label("  ◈ ", p.accent),
         Span::styled(
             "Relay",
             Style::default().fg(p.text).add_modifier(Modifier::BOLD),
         ),
-        label(format!(" TUI  {}", env!("CARGO_PKG_VERSION")), p.muted),
+        label(ver_str, p.muted),
     ];
     if let Some(server) = app.server() {
-        head.push(label(
-            format!("   {} ", if app.connected() { "●" } else { "○" }),
-            if app.connected() { p.green } else { p.muted },
-        ));
-        let max_srv = (area.width as usize).saturating_sub(26 + right_reserve);
-        head.push(Span::styled(
-            fit(&clean(&server.name), max_srv),
-            Style::default().fg(p.text).add_modifier(Modifier::BOLD),
-        ));
+        let dot = format!("   {} ", if app.connected() { "●" } else { "○" });
+        if used_w + dot.width() + 2 <= left_limit {
+            head.push(label(
+                dot.clone(),
+                if app.connected() { p.green } else { p.muted },
+            ));
+            used_w += dot.width();
+            let srv_cap = left_limit.saturating_sub(used_w).min(24);
+            let shown_srv = fit(&clean(&server.name), srv_cap);
+            used_w += shown_srv.width();
+            head.push(Span::styled(
+                shown_srv,
+                Style::default().fg(p.text).add_modifier(Modifier::BOLD),
+            ));
+        }
     }
-    if area.width >= 98 {
-        if let Some(c) = app.chat() {
+    if let Some(c) = app.chat() {
+        let badge = format!(" {} ", engine_badge(&c.backend));
+        if used_w + 2 + badge.width() <= left_limit {
+            let eng_col = rgb_tuple(backend_rgb(&c.backend, p.light));
             head.push(label("  ", p.muted));
             head.push(Span::styled(
-                format!(" {} ", relay_desktop::model::backend_short_label(&c.backend)),
+                badge.clone(),
                 Style::default()
-                    .fg(p.accent)
+                    .fg(eng_col)
                     .bg(p.surface)
                     .add_modifier(Modifier::BOLD),
+            ));
+            used_w += 2 + badge.width();
+        }
+    }
+    let active_agents = app.active_agents_count();
+    if active_agents > 0 {
+        let live_badge = format!(" ⚡ {active_agents} в работе ");
+        if used_w + 2 + live_badge.width() <= left_limit {
+            let live_x = header.x + (used_w + 2) as u16;
+            let live_w = live_badge.width() as u16;
+            head.push(label("  ", p.muted));
+            head.push(Span::styled(
+                live_badge,
+                Style::default()
+                    .fg(p.amber)
+                    .bg(p.surface)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            app.hits.push((
+                Rect {
+                    x: live_x,
+                    y: header.y + 1,
+                    width: live_w,
+                    height: 1,
+                },
+                Hit::Radar,
             ));
         }
     }
@@ -173,8 +223,9 @@ pub fn draw(frame: &mut Frame, app: &mut App, view: &mut View) {
         Line::from(head),
         p,
     );
-    if area.width >= 76 {
-        let controls = "[F2 Хосты] [F3 Сессии] [F5 Меню]";
+    let radar_fg = if active_agents > 0 { p.amber } else { p.accent };
+    if area.width >= 90 {
+        let controls = "[F2 Хосты] [F3 Сессии] [F5 Меню] [F6 Радар]";
         let w = controls.width() as u16;
         let r = Rect {
             x: header.right().saturating_sub(w + 2),
@@ -201,6 +252,12 @@ pub fn draw(frame: &mut Frame, app: &mut App, view: &mut View) {
                 Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
             ),
             label(" Меню", p.text),
+            label("] [", p.border),
+            Span::styled(
+                "F6",
+                Style::default().fg(radar_fg).add_modifier(Modifier::BOLD),
+            ),
+            label(" Радар", p.text),
             label("]", p.border),
         ];
         put(frame, r, Line::from(spans), p);
@@ -221,7 +278,53 @@ pub fn draw(frame: &mut Frame, app: &mut App, view: &mut View) {
             },
             Hit::Workspace,
         ));
-    } else if area.width >= 54 {
+        app.hits.push((
+            Rect {
+                x: r.x + 33,
+                width: 10,
+                ..r
+            },
+            Hit::Radar,
+        ));
+    } else if area.width >= 62 {
+        let controls = "[F5 Меню] [F6 Радар]";
+        let w = controls.width() as u16;
+        let r = Rect {
+            x: header.right().saturating_sub(w + 2),
+            y: header.y + 1,
+            width: w,
+            height: 1,
+        };
+        put(
+            frame,
+            r,
+            Line::from(vec![
+                label("[", p.border),
+                Span::styled(
+                    "F5",
+                    Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
+                ),
+                label(" Меню", p.text),
+                label("] [", p.border),
+                Span::styled(
+                    "F6",
+                    Style::default().fg(radar_fg).add_modifier(Modifier::BOLD),
+                ),
+                label(" Радар", p.text),
+                label("]", p.border),
+            ]),
+            p,
+        );
+        app.hits.push((Rect { width: 9, ..r }, Hit::Workspace));
+        app.hits.push((
+            Rect {
+                x: r.x + 10,
+                width: 10,
+                ..r
+            },
+            Hit::Radar,
+        ));
+    } else if area.width >= 48 {
         let controls = "[F5 Меню]";
         let w = controls.width() as u16;
         let r = Rect {
@@ -271,10 +374,25 @@ pub fn draw(frame: &mut Frame, app: &mut App, view: &mut View) {
         .unwrap_or(1)
         .clamp(2, 6) as u16;
     let notice_height = if app.notice.is_empty() { 0 } else { 2 };
+    let active_tel = if app.chat().is_some_and(|c| c.busy) {
+        app.active_turn_telemetry()
+    } else {
+        None
+    };
+    let telemetry_height = if area.height >= 19
+        && app.chat().is_some_and(|c| c.busy)
+        && active_tel
+            .as_ref()
+            .is_some_and(|t| !t.subagents.is_empty() || !app.chat().unwrap().queue.is_empty())
+    {
+        2
+    } else {
+        1
+    };
     let sections = Layout::vertical([
         Constraint::Length(2),
         Constraint::Min(1),
-        Constraint::Length(1),
+        Constraint::Length(telemetry_height),
         Constraint::Length(notice_height),
         Constraint::Length(input_rows + 3),
     ])
@@ -353,13 +471,15 @@ pub fn draw(frame: &mut Frame, app: &mut App, view: &mut View) {
     composer(frame, app, sections[4], p);
 
     let hint = if matches!(app.popup, Some(Popup::Workspace { .. })) {
-        " Esc/F5 закрыть   ↑↓ выбор   Tab раздел   Enter открыть   Ctrl+N новая   Ctrl+A сервер "
+        " Esc/F5 закрыть   ↑↓ выбор   Tab раздел   Enter открыть   F6 радар   Ctrl+N новая   Ctrl+A сервер "
+    } else if matches!(app.popup, Some(Popup::Radar { .. })) {
+        " Esc/F6 закрыть   ↑↓ / j k выбор агента   Enter открыть сессию   F5 меню   Ctrl+N новая "
     } else if app.popup.is_some() {
         " Esc закрыть   ↑↓ выбор   Enter открыть "
-    } else if area.width < 84 {
-        " Enter отправить · F5 меню · Alt+Enter строка · F1 справка "
+    } else if area.width < 92 {
+        " Enter отправить · F5 меню · F6 радар · Alt+Enter строка · F1 справка "
     } else {
-        " Enter отправить   Alt+Enter строка   F5 меню   Ctrl+N новая   Ctrl+O вывод   PgUp/PgDn история   F1 справка "
+        " Enter отправить  Alt+Enter строка  F5 меню  F6 радар  Ctrl+N новая  Ctrl+O подробно  PgUp/PgDn история  F1 справка "
     };
     put(
         frame,
@@ -462,7 +582,7 @@ fn welcome(frame: &mut Frame, app: &App, area: Rect, p: Palette) {
         rows.push(Line::default());
         rows.extend(markdown::wrap(
             Line::styled(
-                "/menu  панель    /backend  агент    /install  CLI    /lock  пароль    /help  команды",
+                "/menu  панель    /radar  агенты    /backend  агент    /install  CLI    /lock  пароль    /help  команды",
                 Style::default().fg(p.accent),
             ),
             area.width.saturating_sub(4) as usize,
@@ -493,132 +613,27 @@ fn transcript(frame: &mut Frame, app: &mut App, view: &mut View, area: Rect, p: 
         c.messages.len(),
         area.width,
         c.expanded,
+        c.busy,
         app.theme().to_owned(),
         c.backend.clone(),
     );
     if view.cache.as_ref() != Some(&signature) {
-        let mut rows = vec![];
-        let width = area.width as usize;
-        let mut results = BTreeMap::new();
-        for message in &c.messages {
-            if message.role == "tool_result" && !message.tool_id.is_empty() {
-                results.insert(message.tool_id.as_str(), message);
-            }
-        }
-        for message in &c.messages {
-            match message.role.as_str() {
-                "user" => {
-                    rows.push(Line::from(vec![Span::styled(
-                        "› Вы",
-                        Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
-                    )]));
-                    rows.extend(markdown::render(
-                        &message.text,
-                        width,
-                        p.text,
-                        p.accent,
-                        p.muted,
-                    ));
-                    rows.push(Line::default());
-                }
-                "assistant" => {
-                    if message.text.is_empty() {
-                        continue;
-                    }
-                    rows.push(Line::styled(
-                        match c.backend.as_str() {
-                            "codex" => "● Codex",
-                            "agy" => "● AGY",
-                            "api" => "● API",
-                            _ => "● Claude",
-                        },
-                        Style::default().fg(p.muted),
-                    ));
-                    rows.extend(markdown::render(
-                        &message.text,
-                        width,
-                        p.text,
-                        p.accent,
-                        p.muted,
-                    ));
-                    rows.push(Line::default());
-                }
-                "tool" => {
-                    let result = results.get(message.tool_id.as_str());
-                    let failed = result.is_some_and(|r| r.failed);
-                    let color = if failed { p.red } else { p.accent };
-                    rows.extend(markdown::wrap(
-                        Line::styled(
-                            format!(
-                                "╭─ {}  {}",
-                                tool_name(&clean(&message.tool)),
-                                if result.is_some() {
-                                    if failed {
-                                        "ошибка"
-                                    } else {
-                                        "готово"
-                                    }
-                                } else {
-                                    "в работе"
-                                }
-                            ),
-                            Style::default().fg(color),
-                        ),
-                        width,
-                    ));
-                    let command = message.input["command"]
-                        .as_str()
-                        .or_else(|| message.input["file_path"].as_str())
-                        .or_else(|| message.input["pattern"].as_str())
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| message.input.to_string());
-                    for row in markdown::wrap(
-                        Line::styled(clean(&command), Style::default().fg(p.text)),
-                        width.saturating_sub(2),
-                    ) {
-                        let mut spans = vec![label("│ ", p.border)];
-                        spans.extend(row.spans);
-                        rows.push(Line::from(spans));
-                    }
-                    if let Some(result) = result {
-                        let output = clean(&result.text);
-                        let output: Vec<_> = output.lines().collect();
-                        let count = if c.expanded {
-                            output.len()
-                        } else {
-                            output.len().min(5)
-                        };
-                        if count < output.len() {
-                            rows.push(Line::styled(
-                                format!(
-                                    "│ … ещё {} строк · Ctrl+O развернуть",
-                                    output.len() - count
-                                ),
-                                Style::default().fg(p.muted),
-                            ));
-                        }
-                        for line in output.iter().skip(output.len() - count) {
-                            for row in markdown::wrap(
-                                Line::styled(
-                                    (*line).to_owned(),
-                                    Style::default().fg(if failed { p.red } else { p.muted }),
-                                ),
-                                width.saturating_sub(2),
-                            ) {
-                                let mut spans = vec![label("│ ", p.border)];
-                                spans.extend(row.spans);
-                                rows.push(Line::from(spans));
-                            }
-                        }
-                    }
-                    rows.push(Line::styled("╰─", Style::default().fg(p.border)));
-                    rows.push(Line::default());
-                }
-                "tool_result" => {}
-                _ => {}
-            }
-        }
-        view.lines = rows;
+        view.lines = conversation::render_transcript(
+            &c.messages,
+            &c.backend,
+            c.busy,
+            c.expanded,
+            area.width as usize,
+            TranscriptTheme {
+                light: p.light,
+                border: p.border,
+                text: p.text,
+                muted: p.muted,
+                accent: p.accent,
+                red: p.red,
+                green: p.green,
+            },
+        );
         view.cache = Some(signature);
     }
     let c = app.chats.get_mut(&key).unwrap();
@@ -651,45 +666,228 @@ fn transcript(frame: &mut Frame, app: &mut App, view: &mut View, area: Rect, p: 
 }
 
 fn status(frame: &mut Frame, app: &App, area: Rect, p: Palette) {
-    if let Some(c) = app.chat() {
-        let mut spans = vec![];
-        if !c.error.is_empty() {
-            spans.push(label(fit(&clean(&c.error), area.width as usize), p.red));
-        } else if c.busy {
-            let chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-            let i = (std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis()
-                / 120) as usize;
-            spans.push(label(
-                format!("{} {}", chars[i % chars.len()], c.status),
-                p.accent,
-            ));
-            spans.push(label("  Ctrl+C остановить", p.muted));
-        } else if c.loading {
-            spans.push(label("Загрузка истории…", p.muted));
-        } else if app.active_backend_missing() {
-            spans.push(label(
-                fit(
-                    "Агент не установлен на сервере · введи /install",
-                    area.width as usize,
-                ),
-                p.red,
-            ));
-        }
+    let Some(c) = app.chat() else {
+        return;
+    };
+    let width = area.width as usize;
+    if !c.error.is_empty() {
+        let mut spans = vec![label(fit(&clean(&c.error), width), p.red)];
         if !c.queue.is_empty() {
             spans.push(label(
-                format!(
-                    "  ◷ {} в очереди{} · /queue",
-                    c.queue.len(),
-                    if c.paused { " · пауза" } else { "" }
-                ),
+                format!("  ◷ {} в очереди · /queue", c.queue.len()),
                 p.accent,
             ));
         }
         put(frame, area, Line::from(spans), p);
+        return;
     }
+
+    if c.busy && frame.area().height >= 16 {
+        let tel = app.active_turn_telemetry().unwrap_or_default();
+        let orbits = ["◉", "◎", "◈", "◎"];
+        let tick = (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            / 180) as usize;
+        let pulse = orbits[tick % orbits.len()];
+        let eng_col = rgb_tuple(backend_rgb(&c.backend, p.light));
+        let active_col = tel
+            .active_phase
+            .map_or(eng_col, |ph| rgb_tuple(ph.rgb(p.light)));
+        let strip_bg = p.panel;
+
+        let mut spans = vec![
+            Span::styled(
+                format!(" {pulse} "),
+                Style::default()
+                    .fg(active_col)
+                    .bg(strip_bg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{} ", engine_badge(&c.backend)),
+                Style::default()
+                    .fg(eng_col)
+                    .bg(strip_bg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("│ ", Style::default().fg(p.border).bg(strip_bg)),
+        ];
+        let mut used: usize = spans.iter().map(Span::width).sum();
+
+        let headline = clean(&tel.active_headline);
+        let headline_shown = fit(&headline, width.saturating_sub(used + 6).min(38));
+        used += headline_shown.width();
+        spans.push(Span::styled(
+            headline_shown,
+            Style::default()
+                .fg(p.text)
+                .bg(strip_bg)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+        if !tel.active_target.is_empty() && used + 6 < width {
+            let target = format!(" · {}", clean(&tel.active_target));
+            let shown_t = fit(&target, width.saturating_sub(used + 4).min(30));
+            used += shown_t.width();
+            spans.push(Span::styled(
+                shown_t,
+                Style::default().fg(active_col).bg(strip_bg),
+            ));
+        }
+
+        if tel.total_actions > 0 && used + 26 <= width {
+            let step_txt = format!("  │  шагов: {}/{}", tel.done_actions, tel.total_actions);
+            if used + step_txt.width() <= width {
+                used += step_txt.width();
+                spans.push(Span::styled(
+                    step_txt,
+                    Style::default().fg(p.muted).bg(strip_bg),
+                ));
+            }
+            let counts = format!(" · 🔍{} ✎{} $_{}", tel.reads, tel.edits, tel.commands);
+            if used + counts.width() <= width {
+                used += counts.width();
+                spans.push(Span::styled(
+                    counts,
+                    Style::default().fg(p.text).bg(strip_bg),
+                ));
+            }
+        }
+
+        if !tel.subagents.is_empty() {
+            let sub_badge = format!(" · ◈ субагентов: {}", tel.subagents.len());
+            if used + sub_badge.width() <= width {
+                used += sub_badge.width();
+                spans.push(Span::styled(
+                    sub_badge,
+                    Style::default()
+                        .fg(rgb_tuple(ToolPhase::Subagent.rgb(p.light)))
+                        .bg(strip_bg)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+        }
+
+        let stop_hint = "  Ctrl+C стоп ";
+        if used + stop_hint.width() <= width {
+            let pad = width.saturating_sub(used + stop_hint.width());
+            spans.push(Span::styled(" ".repeat(pad), Style::default().bg(strip_bg)));
+            spans.push(Span::styled(
+                stop_hint,
+                Style::default().fg(p.muted).bg(strip_bg),
+            ));
+        } else if used < width {
+            spans.push(Span::styled(
+                " ".repeat(width - used),
+                Style::default().bg(strip_bg),
+            ));
+        }
+
+        let mut lines = vec![Line::from(spans)];
+        if area.height >= 2 {
+            let mut sub_spans = Vec::new();
+            let mut sub_used = 0usize;
+            if let Some(sub) = tel.subagents.last() {
+                let violet = rgb_tuple(ToolPhase::Subagent.rgb(p.light));
+                let pfx = "   ╰─ ";
+                let role_txt = format!("◈ Субагент · {}", clean(&sub.role));
+                sub_spans.push(Span::styled(pfx, Style::default().fg(p.border).bg(strip_bg)));
+                sub_spans.push(Span::styled(
+                    role_txt.clone(),
+                    Style::default()
+                        .fg(violet)
+                        .bg(strip_bg)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                sub_used += pfx.width() + role_txt.width();
+                if !sub.task.is_empty() && sub_used + 8 < width {
+                    let task_txt = fit(
+                        &format!(" -> {}", clean(&sub.task)),
+                        width.saturating_sub(sub_used + 14),
+                    );
+                    sub_used += task_txt.width();
+                    sub_spans.push(Span::styled(
+                        task_txt,
+                        Style::default().fg(p.text).bg(strip_bg),
+                    ));
+                }
+                let state = if sub.failed {
+                    (" [ошибка]", p.red)
+                } else if sub.running {
+                    (" [в работе]", violet)
+                } else {
+                    (" [готово]", p.green)
+                };
+                if sub_used + state.0.width() <= width {
+                    sub_used += state.0.width();
+                    sub_spans.push(Span::styled(
+                        state.0,
+                        Style::default().fg(state.1).bg(strip_bg),
+                    ));
+                }
+            }
+            if !c.queue.is_empty() {
+                let q_txt = format!(
+                    "   ◷ {} в очереди{} · /queue",
+                    c.queue.len(),
+                    if c.paused { " · пауза" } else { "" }
+                );
+                if sub_used + q_txt.width() <= width {
+                    sub_used += q_txt.width();
+                    sub_spans.push(Span::styled(
+                        q_txt,
+                        Style::default().fg(p.accent).bg(strip_bg),
+                    ));
+                }
+            }
+            if sub_used < width {
+                sub_spans.push(Span::styled(
+                    " ".repeat(width - sub_used),
+                    Style::default().bg(strip_bg),
+                ));
+            }
+            lines.push(Line::from(sub_spans));
+        }
+        put(frame, area, Text::from(lines), p);
+        return;
+    }
+
+    let mut spans = vec![];
+    if c.busy {
+        let chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+        let i = (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            / 120) as usize;
+        spans.push(label(
+            fit(
+                &format!("{} {}", chars[i % chars.len()], clean(&c.status)),
+                width,
+            ),
+            p.accent,
+        ));
+    } else if c.loading {
+        spans.push(label("Загрузка истории…", p.muted));
+    } else if app.active_backend_missing() {
+        spans.push(label(
+            fit("Агент не установлен на сервере · введи /install", width),
+            p.red,
+        ));
+    }
+    if !c.queue.is_empty() {
+        spans.push(label(
+            format!(
+                "  ◷ {} в очереди{} · /queue",
+                c.queue.len(),
+                if c.paused { " · пауза" } else { "" }
+            ),
+            p.accent,
+        ));
+    }
+    put(frame, area, Line::from(spans), p);
 }
 
 fn composer(frame: &mut Frame, app: &App, area: Rect, p: Palette) {
@@ -750,7 +948,7 @@ fn composer(frame: &mut Frame, app: &App, area: Rect, p: Palette) {
         let placeholder = if c.is_locked_gate() {
             "🔒 Сессия закрыта · нажми Enter или введи /unlock"
         } else {
-            "Напиши задачу…  /help  ·  F5 панель"
+            "Напиши задачу…  /help  ·  F5 панель  ·  F6 радар"
         };
         editor(
             frame,
@@ -915,11 +1113,12 @@ fn popup_view(
 ) {
     let outer = frame.area();
     let width = outer.width.saturating_sub(4).min(match popup {
+        Popup::Radar { .. } => 108,
         Popup::Workspace { .. } => 96,
         _ => 86,
     });
     let height = outer.height.saturating_sub(2).min(match popup {
-        Popup::Workspace { .. } => 34,
+        Popup::Radar { .. } | Popup::Workspace { .. } => 34,
         Popup::Picker { .. } | Popup::Help { .. } => 28,
         Popup::Permission { .. } => 24,
         Popup::Queue { .. } => 20,
@@ -937,6 +1136,7 @@ fn popup_view(
     frame.render_widget(Clear, area);
     let title = match popup {
         Popup::Workspace { .. } => "Рабочая панель · Relay",
+        Popup::Radar { .. } => "Радар агентов · Живая топология",
         Popup::Picker { kind, .. } => match kind {
             Picker::Hosts => "Серверы",
             Picker::Sessions => "Сессии",
@@ -1662,8 +1862,11 @@ fn popup_view(
                 p,
             );
         }
+        Popup::Radar { cursor } => {
+            radar_view(frame, app, *cursor, inner, p, hits);
+        }
         Popup::Help { scroll } => {
-            let text = "Enter — отправить или добавить в очередь\nAlt+Enter / Shift+Enter / Ctrl+J — новая строка\nCtrl+C — остановить ответ; Ctrl+Q — выйти\nF2 — серверы; Ctrl+A в списке — добавить сервер\nF3 — сессии; F4 — 24 темы оформления; Ctrl+N — новая сессия\nF5 / Ctrl+B — рабочая панель (серверы, сессии, лимиты, CLI, защита)\nCtrl+O — полный вывод команд\nPgUp/PgDn — история; Ctrl+End — к последнему сообщению\nCtrl+P / Alt+N — предыдущие отправленные сообщения\nСтрелки / Home / End — редактирование; Ctrl+W — убрать слово\nTab — дополнить slash-команду; Shift+мышь — выделение в терминале\n\nСессии, парольная защита и авторизация общие с графическим Relay.\nПри запуске восстановленная очередь всегда на паузе.\nБраузер и управление кластером остаются в графическом Relay.\n";
+            let text = "Enter — отправить или добавить в очередь\nAlt+Enter / Shift+Enter / Ctrl+J — новая строка\nCtrl+C — остановить ответ; Ctrl+Q — выйти\nF2 — серверы; Ctrl+A в списке — добавить сервер\nF3 — сессии; F4 — 24 темы оформления; Ctrl+N — новая сессия\nF5 / Ctrl+B — рабочая панель (серверы, сессии, лимиты, CLI, защита)\nF6 — радар агентов: живая топология сессий, конвейеры и субагенты (/radar)\nCtrl+O — подробный вывод конвейера шагов и диффов\nPgUp/PgDn — история; Ctrl+End — к последнему сообщению\nCtrl+P / Alt+N — предыдущие отправленные сообщения\nСтрелки / Home / End — редактирование; Ctrl+W — убрать слово\nTab — дополнить slash-команду; Shift+мышь — выделение в терминале\n\nСессии, парольная защита и авторизация общие с графическим Relay.\nПри запуске восстановленная очередь всегда на паузе.\nБраузер и управление кластером остаются в графическом Relay.\n";
             let mut lines = markdown::render(text, inner.width as usize, p.text, p.accent, p.muted);
             lines.push(Line::default());
             for (command, description) in COMMANDS {
@@ -1689,6 +1892,601 @@ fn popup_view(
                 p,
             );
         }
+    }
+}
+
+fn phase_bar_spans(
+    tel: &TurnTelemetry,
+    running: bool,
+    locked: bool,
+    eng_col: Color,
+    p: Palette,
+    bg: Color,
+) -> Vec<Span<'static>> {
+    const CELLS: usize = 6;
+    if locked {
+        return vec![Span::styled(
+            "[🔒····]",
+            Style::default().fg(p.muted).bg(bg),
+        )];
+    }
+    if tel.total_actions == 0 {
+        if running {
+            return vec![
+                Span::styled("[", Style::default().fg(p.border).bg(bg)),
+                Span::styled("▒▒", Style::default().fg(eng_col).bg(bg)),
+                Span::styled("░░░░]", Style::default().fg(p.border).bg(bg)),
+            ];
+        }
+        return vec![Span::styled(
+            "[░░░░░░]",
+            Style::default().fg(p.border).bg(bg),
+        )];
+    }
+    let done_cells = ((tel.done_actions * CELLS) + tel.total_actions / 2)
+        .checked_div(tel.total_actions)
+        .unwrap_or(0)
+        .min(CELLS);
+    let run_cells = if tel.running_actions > 0 || (running && done_cells < CELLS) {
+        ((tel.running_actions.max(1) * CELLS).div_ceil(tel.total_actions))
+            .max(1)
+            .min(CELLS.saturating_sub(done_cells))
+    } else {
+        0
+    };
+    let rem_cells = CELLS.saturating_sub(done_cells + run_cells);
+    let run_col = tel
+        .active_phase
+        .map_or(eng_col, |ph| rgb_tuple(ph.rgb(p.light)));
+    let done_col = if tel.failed_actions > 0 {
+        p.red
+    } else {
+        p.green
+    };
+    vec![
+        Span::styled("[", Style::default().fg(p.border).bg(bg)),
+        Span::styled("■".repeat(done_cells), Style::default().fg(done_col).bg(bg)),
+        Span::styled("▒".repeat(run_cells), Style::default().fg(run_col).bg(bg)),
+        Span::styled("░".repeat(rem_cells), Style::default().fg(p.border).bg(bg)),
+        Span::styled("]", Style::default().fg(p.border).bg(bg)),
+    ]
+}
+
+fn radar_view(
+    frame: &mut Frame,
+    app: &App,
+    cursor: usize,
+    inner: Rect,
+    p: Palette,
+    hits: &mut Vec<(Rect, Hit)>,
+) {
+    let nodes = app.radar_nodes();
+    let clamped = cursor.min(nodes.len().saturating_sub(1));
+    let max_w = inner.width as usize;
+    let mut y_cursor = inner.y;
+
+    // 1. Top Summary Ribbon
+    if inner.height >= 5 {
+        let connected = app.connected();
+        let running_n = nodes.iter().filter(|n| n.running).count();
+        let total_n = nodes.len();
+        let mut by_eng = [0usize; 4];
+        for n in &nodes {
+            match n.backend.as_str() {
+                "codex" => by_eng[1] += 1,
+                "agy" => by_eng[2] += 1,
+                "api" => by_eng[3] += 1,
+                _ => by_eng[0] += 1,
+            }
+        }
+        let bg = p.panel;
+        let mut ribbon = vec![Span::styled(
+            if connected {
+                " ● На связи "
+            } else {
+                " ○ Не подключён "
+            },
+            Style::default()
+                .fg(if connected { p.green } else { p.muted })
+                .bg(bg)
+                .add_modifier(Modifier::BOLD),
+        )];
+        let mut r_used: usize = ribbon.iter().map(Span::width).sum();
+        let act_str = format!(" │ ⚡ В работе: {running_n} · Всего: {total_n} ");
+        if r_used + act_str.width() <= max_w {
+            r_used += act_str.width();
+            ribbon.push(Span::styled(
+                act_str,
+                Style::default()
+                    .fg(if running_n > 0 { p.amber } else { p.text })
+                    .bg(bg)
+                    .add_modifier(if running_n > 0 {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
+            ));
+        }
+        let eng_specs = [
+            ("claude", "Claude", by_eng[0]),
+            ("codex", "Codex", by_eng[1]),
+            ("agy", "AGY", by_eng[2]),
+            ("api", "API", by_eng[3]),
+        ];
+        if r_used + 36 <= max_w {
+            ribbon.push(Span::styled("│ ", Style::default().fg(p.border).bg(bg)));
+            r_used += 2;
+            for (id, name, count) in eng_specs {
+                let piece = format!("{name}:{count}  ");
+                if r_used + piece.width() <= max_w {
+                    r_used += piece.width();
+                    let col = if count > 0 {
+                        rgb_tuple(backend_rgb(id, p.light))
+                    } else {
+                        p.muted
+                    };
+                    ribbon.push(Span::styled(
+                        piece,
+                        Style::default()
+                            .fg(col)
+                            .bg(bg)
+                            .add_modifier(if count > 0 {
+                                Modifier::BOLD
+                            } else {
+                                Modifier::empty()
+                            }),
+                    ));
+                }
+            }
+        }
+        if r_used < max_w {
+            ribbon.push(Span::styled(
+                " ".repeat(max_w - r_used),
+                Style::default().bg(bg),
+            ));
+        }
+        put(
+            frame,
+            Rect {
+                x: inner.x,
+                y: y_cursor,
+                width: inner.width,
+                height: 1,
+            },
+            Line::from(ribbon),
+            p,
+        );
+        y_cursor += if inner.height >= 9 { 2 } else { 1 };
+    }
+
+    // Reserve space for Live Agent Inspector + Footer
+    let footer_rows = u16::from(inner.height >= 4);
+    let inspector_rows = if inner.height >= 16 && !nodes.is_empty() {
+        6u16
+    } else if inner.height >= 12 && !nodes.is_empty() {
+        4u16
+    } else {
+        0u16
+    };
+    let map_height = inner
+        .bottom()
+        .saturating_sub(y_cursor + inspector_rows + footer_rows)
+        .max(1) as usize;
+
+    // 2. ASCII/Unicode Topology & Pipeline Map
+    let mut visual: Vec<(Option<usize>, Line<'static>)> = Vec::new();
+    let srv_line = if let Some(srv) = app.server() {
+        let root_txt = format!("◈ Сервер {}", clean(&srv.name));
+        let addr_txt = format!(
+            "  ·  {}@{}:{}  ·  живая топология узлов",
+            clean(&srv.user),
+            clean(&srv.host),
+            srv.port
+        );
+        let r_shown = fit(&root_txt, max_w);
+        let rem = max_w.saturating_sub(r_shown.width());
+        let mut sp = vec![Span::styled(
+            r_shown,
+            Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
+        )];
+        if rem >= 12 {
+            sp.push(Span::styled(
+                fit(&addr_txt, rem),
+                Style::default().fg(p.muted),
+            ));
+        }
+        Line::from(sp)
+    } else {
+        Line::styled(
+            fit("◈ Сервер не выбран · нажми F2 для подключения", max_w),
+            Style::default().fg(p.muted).add_modifier(Modifier::BOLD),
+        )
+    };
+    visual.push((None, srv_line));
+
+    let show_sub_twigs = inner.height >= 20;
+    let mut selected_visual = 0usize;
+
+    if nodes.is_empty() {
+        visual.push((
+            None,
+            Line::styled(
+                fit(
+                    " ╰─▶ ○ Сессий пока нет · нажми Ctrl+N для запуска агента",
+                    max_w,
+                ),
+                Style::default().fg(p.muted),
+            ),
+        ));
+    } else {
+        for (idx, node) in nodes.iter().enumerate() {
+            let is_last = idx + 1 == nodes.len();
+            let selected = idx == clamped;
+            if selected {
+                selected_visual = visual.len();
+            }
+            let row_bg = if selected { p.surface } else { p.base };
+            let eng_col = rgb_tuple(backend_rgb(&node.backend, p.light));
+            let branch = if is_last { " ╰─▶ " } else { " ├─▶ " };
+            let (status_txt, status_col) = if node.locked_gate {
+                ("🔒 ЗАКРЫТА ", p.red)
+            } else if node.running {
+                ("◉ В РАБОТЕ ", eng_col)
+            } else if node.is_current {
+                ("● Готов    ", p.green)
+            } else {
+                ("○ Готов    ", p.muted)
+            };
+            let eng_txt = format!("{:<8}  ", engine_badge(&node.backend));
+
+            let mut spans = vec![
+                Span::styled(
+                    branch,
+                    Style::default()
+                        .fg(if selected { p.accent } else { p.border })
+                        .bg(row_bg)
+                        .add_modifier(if selected {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                ),
+                Span::styled(
+                    status_txt,
+                    Style::default()
+                        .fg(status_col)
+                        .bg(row_bg)
+                        .add_modifier(if node.running || node.locked_gate {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                ),
+                Span::styled(
+                    eng_txt,
+                    Style::default()
+                        .fg(eng_col)
+                        .bg(row_bg)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ];
+            let mut used: usize = spans.iter().map(Span::width).sum();
+            let title_cap = max_w.saturating_sub(used).min(if max_w >= 92 { 24 } else { 18 });
+            let raw_title = if node.is_current {
+                format!("{} •", clean(&node.title))
+            } else {
+                clean(&node.title)
+            };
+            let padded_title = {
+                let t = fit(&raw_title, title_cap);
+                let pad = title_cap.saturating_sub(t.width());
+                format!("{t}{}", " ".repeat(pad))
+            };
+            used += padded_title.width();
+            spans.push(Span::styled(
+                padded_title,
+                Style::default()
+                    .fg(if selected { p.accent } else { p.text })
+                    .bg(row_bg)
+                    .add_modifier(if selected || node.running || node.is_current {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
+            ));
+
+            if used + 10 <= max_w {
+                spans.push(Span::styled("  ", Style::default().bg(row_bg)));
+                used += 2;
+                let bar = phase_bar_spans(
+                    &node.telemetry,
+                    node.running,
+                    node.locked_gate,
+                    eng_col,
+                    p,
+                    row_bg,
+                );
+                used += bar.iter().map(Span::width).sum::<usize>();
+                spans.extend(bar);
+            }
+
+            if node.loaded_in_mem && !node.locked_gate && used + 18 <= max_w {
+                let t = &node.telemetry;
+                let counts = format!(
+                    " 🔍{} ✎{} $_{} ◈{}",
+                    t.reads, t.edits, t.commands, t.delegations
+                );
+                if used + counts.width() <= max_w {
+                    used += counts.width();
+                    spans.push(Span::styled(
+                        counts,
+                        Style::default().fg(p.muted).bg(row_bg),
+                    ));
+                }
+            }
+
+            if !node.telemetry.active_headline.is_empty() && used + 10 <= max_w {
+                let tail = if node.telemetry.active_target.is_empty() {
+                    format!("  · {}", clean(&node.telemetry.active_headline))
+                } else {
+                    format!(
+                        "  · {} ({})",
+                        clean(&node.telemetry.active_headline),
+                        clean(&node.telemetry.active_target)
+                    )
+                };
+                let shown_tail = fit(&tail, max_w.saturating_sub(used));
+                used += shown_tail.width();
+                spans.push(Span::styled(
+                    shown_tail,
+                    Style::default().fg(p.text).bg(row_bg),
+                ));
+            }
+
+            if used < max_w {
+                spans.push(Span::styled(
+                    " ".repeat(max_w - used),
+                    Style::default().bg(row_bg),
+                ));
+            }
+            visual.push((Some(idx), Line::from(spans)));
+
+            if show_sub_twigs && !node.locked_gate && !node.telemetry.subagents.is_empty() {
+                let violet = rgb_tuple(ToolPhase::Subagent.rgb(p.light));
+                let sub_slice = &node.telemetry.subagents;
+                let take_n = sub_slice.len().min(2);
+                for (si, sub) in sub_slice.iter().take(take_n).enumerate() {
+                    let sub_last = si + 1 == take_n;
+                    let rail = if is_last { "     " } else { " │   " };
+                    let twig = if sub_last { "  ╰─ " } else { "  ├─ " };
+                    let mut ssp = vec![
+                        Span::styled(rail, Style::default().fg(p.border)),
+                        Span::styled(twig, Style::default().fg(p.border)),
+                        Span::styled(
+                            format!("◈ Субагент · {}", clean(&sub.role)),
+                            Style::default().fg(violet).add_modifier(Modifier::BOLD),
+                        ),
+                    ];
+                    let mut su: usize = ssp.iter().map(Span::width).sum();
+                    if !sub.task.is_empty() && su + 10 <= max_w {
+                        let task_s = fit(
+                            &format!(" -> {}", clean(&sub.task)),
+                            max_w.saturating_sub(su + 10),
+                        );
+                        su += task_s.width();
+                        ssp.push(Span::styled(task_s, Style::default().fg(p.muted)));
+                    }
+                    let st = if sub.failed {
+                        (" [ошибка]", p.red)
+                    } else if sub.running {
+                        (" [◉ активен]", violet)
+                    } else {
+                        (" [✓ готово]", p.green)
+                    };
+                    if su + st.0.width() <= max_w {
+                        ssp.push(Span::styled(st.0, Style::default().fg(st.1)));
+                    }
+                    visual.push((Some(idx), Line::from(ssp)));
+                }
+            }
+        }
+    }
+
+    let offset = if selected_visual >= map_height {
+        (selected_visual + 1).saturating_sub(map_height)
+    } else {
+        0
+    };
+    for (row_off, (item_idx, line)) in visual
+        .into_iter()
+        .skip(offset)
+        .take(map_height)
+        .enumerate()
+    {
+        let r = Rect {
+            x: inner.x,
+            y: y_cursor + row_off as u16,
+            width: inner.width,
+            height: 1,
+        };
+        if let Some(idx) = item_idx {
+            hits.push((r, Hit::RadarItem(idx)));
+        }
+        put(frame, r, line, p);
+    }
+
+    // 3. Live Agent Inspector Pane
+    if inspector_rows > 0 {
+        if let Some(sel) = nodes.get(clamped) {
+            let insp_y = inner.bottom() - footer_rows - inspector_rows;
+            let eng_col = rgb_tuple(backend_rgb(&sel.backend, p.light));
+            let violet = rgb_tuple(ToolPhase::Subagent.rgb(p.light));
+            let mut insp_lines = Vec::new();
+
+            let head_title = format!(
+                "╭─ ◈ Инспектор агента · {} · {} ",
+                clean(&sel.title),
+                relay_desktop::model::backend_label(&sel.backend)
+            );
+            let shown_ht = fit(&head_title, max_w);
+            let rule_len = max_w.saturating_sub(shown_ht.width());
+            insp_lines.push(Line::from(vec![
+                Span::styled(
+                    shown_ht,
+                    Style::default().fg(eng_col).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("─".repeat(rule_len), Style::default().fg(p.border)),
+            ]));
+
+            if sel.locked_gate {
+                insp_lines.push(Line::from(vec![
+                    Span::styled("│  ", Style::default().fg(p.border)),
+                    Span::styled(
+                        fit(
+                            "🔒 Сессия защищена паролем · нажми Enter для разблокировки (/unlock)",
+                            max_w.saturating_sub(3),
+                        ),
+                        Style::default().fg(p.red).add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+            } else if sel.running {
+                let phase_tag = sel
+                    .telemetry
+                    .active_phase
+                    .map(|ph| format!("[{}] ", ph.label()))
+                    .unwrap_or_default();
+                let target_part = if sel.telemetry.active_target.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · {}", clean(&sel.telemetry.active_target))
+                };
+                let act_line = format!(
+                    "⚡ Действие: {phase_tag}{}{target_part}   (шагов: {}/{}, 🔍{} ✎{} $_{} ◈{})",
+                    clean(&sel.telemetry.active_headline),
+                    sel.telemetry.done_actions,
+                    sel.telemetry.total_actions,
+                    sel.telemetry.reads,
+                    sel.telemetry.edits,
+                    sel.telemetry.commands,
+                    sel.telemetry.delegations,
+                );
+                insp_lines.push(Line::from(vec![
+                    Span::styled("│  ", Style::default().fg(p.border)),
+                    Span::styled(
+                        fit(&act_line, max_w.saturating_sub(3)),
+                        Style::default().fg(p.text).add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+            } else {
+                let idle_line = format!(
+                    "○ Статус: Готов к новой задаче  ·  шагов в последнем ходе: {} (🔍{}  ✎{}  $_{}  ◈{})",
+                    sel.telemetry.total_actions,
+                    sel.telemetry.reads,
+                    sel.telemetry.edits,
+                    sel.telemetry.commands,
+                    sel.telemetry.delegations,
+                );
+                insp_lines.push(Line::from(vec![
+                    Span::styled("│  ", Style::default().fg(p.border)),
+                    Span::styled(
+                        fit(&idle_line, max_w.saturating_sub(3)),
+                        Style::default().fg(p.text),
+                    ),
+                ]));
+            }
+
+            let sub_summary = if sel.locked_gate {
+                "◈ Субагенты: скрыты до ввода пароля".to_owned()
+            } else if sel.telemetry.subagents.is_empty() {
+                "◈ Субагенты: не вызывались в этом ходе".to_owned()
+            } else {
+                let joined = sel
+                    .telemetry
+                    .subagents
+                    .iter()
+                    .map(|s| {
+                        if s.task.is_empty() {
+                            clean(&s.role)
+                        } else {
+                            format!("{} -> {}", clean(&s.role), clean(&s.task))
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("  ·  ");
+                format!(
+                    "◈ Субагенты ({}): {}",
+                    sel.telemetry.subagents.len(),
+                    joined
+                )
+            };
+            insp_lines.push(Line::from(vec![
+                Span::styled("│  ", Style::default().fg(p.border)),
+                Span::styled(
+                    fit(&sub_summary, max_w.saturating_sub(3)),
+                    Style::default().fg(if sel.telemetry.subagents.is_empty() {
+                        p.muted
+                    } else {
+                        violet
+                    }),
+                ),
+            ]));
+
+            if inspector_rows >= 6 {
+                let env_line = format!(
+                    "⌁ Папка: {}   ·   Последний инструмент: {}",
+                    clean(&sel.cwd),
+                    if sel.last_tool.is_empty() {
+                        "—".into()
+                    } else {
+                        clean(&sel.last_tool)
+                    }
+                );
+                insp_lines.push(Line::from(vec![
+                    Span::styled("│  ", Style::default().fg(p.border)),
+                    Span::styled(
+                        fit(&env_line, max_w.saturating_sub(3)),
+                        Style::default().fg(p.muted),
+                    ),
+                ]));
+                insp_lines.push(Line::styled(
+                    fit("╰────", max_w),
+                    Style::default().fg(p.border),
+                ));
+            }
+
+            insp_lines.truncate(inspector_rows as usize);
+            put(
+                frame,
+                Rect {
+                    x: inner.x,
+                    y: insp_y,
+                    width: inner.width,
+                    height: inspector_rows,
+                },
+                Text::from(insp_lines),
+                p,
+            );
+        }
+    }
+
+    if footer_rows > 0 {
+        put(
+            frame,
+            Rect {
+                x: inner.x,
+                y: inner.bottom() - 1,
+                width: inner.width,
+                height: 1,
+            },
+            Line::styled(
+                fit(
+                    "↑↓ / j k выбор · Enter открыть сессию · F5 панель · Ctrl+N новая · F6 / Esc закрыть",
+                    max_w,
+                ),
+                Style::default().fg(p.muted),
+            ),
+            p,
+        );
     }
 }
 
@@ -1765,7 +2563,12 @@ mod tests {
             }
             app.open_workspace();
             snapshot(&mut app, w, h).unwrap();
+            app.open_radar();
+            snapshot(&mut app, w, h).unwrap();
             app.popup = Some(Popup::Help { scroll: 0 });
+            snapshot(&mut app, w, h).unwrap();
+            app.popup = None;
+            app.chat_mut().unwrap().busy = true;
             snapshot(&mut app, w, h).unwrap();
         }
     }
@@ -1882,5 +2685,47 @@ mod tests {
         for cell in b.content {
             assert!(!cell.symbol().chars().any(char::is_control));
         }
+    }
+
+    #[test]
+    fn cockpit_header_pipeline_radar_and_telemetry_strip_render_cleanly() {
+        let mut app = App::new(true).unwrap();
+        app.demo();
+        let main_buf = snapshot(&mut app, 120, 40).unwrap();
+        let main_txt = buffer_text(&main_buf);
+        assert!(main_txt.contains("◈ Claude"));
+        assert!(main_txt.contains("⚡") && main_txt.contains("1 в работе"));
+        assert!(main_txt.contains("[F6 Радар]"));
+        assert!(main_txt.contains("╭─ ◈ Конвейер агента · 5 шагов"));
+        assert!(main_txt.contains("[ПОИСК]"));
+        assert!(main_txt.contains("[СУБАГЕНТ]"));
+        assert!(main_txt.contains("◈ Субагент · Coastline Verifier"));
+        assert!(main_txt.contains("[ПРАВКА]"));
+        assert!(main_txt.contains("[КОМАНДА]"));
+        assert!(main_txt.contains("◈ Claude Code"));
+
+        // Open Radar Observatory and verify topology tree & Live Agent Inspector
+        app.open_radar();
+        let radar_buf = snapshot(&mut app, 120, 40).unwrap();
+        let radar_txt = buffer_text(&radar_buf);
+        assert!(radar_txt.contains("Радар агентов · Живая топология"));
+        assert!(radar_txt.contains("◈ Сервер Production"));
+        assert!(radar_txt.contains("├─▶"));
+        assert!(radar_txt.contains("╰─▶"));
+        assert!(radar_txt.contains("◉ В РАБОТЕ"));
+        assert!(radar_txt.contains("UI Verifier"));
+        assert!(radar_txt.contains("Инспектор агента"));
+
+        // Switch to busy session and verify Live Agent Telemetry Strip above Composer
+        app.popup = None;
+        let s2 = app.remote["demo"].sessions[1].clone();
+        app.open_session(s2);
+        app.chat_mut().unwrap().busy = true;
+        let busy_buf = snapshot(&mut app, 120, 40).unwrap();
+        let busy_txt = buffer_text(&busy_buf);
+        assert!(busy_txt.contains("◈ Codex"));
+        assert!(busy_txt.contains("Прогоняю тесты лаунчера"));
+        assert!(busy_txt.contains("шагов: 1/3"));
+        assert!(busy_txt.contains("◈ субагентов: 1"));
     }
 }

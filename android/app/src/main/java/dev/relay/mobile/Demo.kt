@@ -32,13 +32,18 @@ object Demo {
         """.trimIndent()
         val messages = JSONArray(listOf(
             JSONObject().put("role", "user").put("text", "Посчитай средний урон, покажи формулы и собери мод"),
-            JSONObject().put("role", "assistant").put("text", "Сначала посмотрю, как сейчас считается урон."),
+            JSONObject().put("role", "assistant").put("text", "Сначала найду расчёт урона, проверю баланс субагентом и соберу JAR."),
             JSONObject().put("role", "tool").put("tool", "Grep").put("tool_id", "t1").put("input", JSONObject().put("pattern", "damage").put("path", "src/")),
             JSONObject().put("role", "tool_result").put("tool_id", "t1").put("text", "src/Combat.kt:12: val damage = base * crit\nsrc/Combat.kt:40: damage -= armor"),
-            JSONObject().put("role", "tool").put("tool", "Edit").put("tool_id", "t2").put("input", JSONObject().put("file_path", "/opt/sbrp-client/src/Combat.kt").put("old_string", "damage -= armor").put("new_string", "damage = maxOf(0f, damage - armor)")),
-            JSONObject().put("role", "tool_result").put("tool_id", "t2").put("text", "The file has been updated."),
-            JSONObject().put("role", "tool").put("tool", "Bash").put("tool_id", "t3").put("input", JSONObject().put("command", "./gradlew build").put("description", "Собрать мод")),
-            JSONObject().put("role", "tool_result").put("tool_id", "t3").put("text", "> Task :compileKotlin\n> Task :jar\nBUILD SUCCESSFUL in 41s"),
+            JSONObject().put("role", "tool").put("tool", "Task").put("tool_id", "t2").put("input", JSONObject()
+                .put("subagent_type", "Аудитор баланса")
+                .put("description", "Проверить формулу крита и брони на краевых значениях")
+                .put("model", "sonnet")),
+            JSONObject().put("role", "tool_result").put("tool_id", "t2").put("text", "Проверено 14 сценариев: при A > D урон уходит в минус — нужен maxOf(0f, damage - armor)."),
+            JSONObject().put("role", "tool").put("tool", "Edit").put("tool_id", "t3").put("input", JSONObject().put("file_path", "/opt/sbrp-client/src/Combat.kt").put("old_string", "damage -= armor").put("new_string", "damage = maxOf(0f, damage - armor)")),
+            JSONObject().put("role", "tool_result").put("tool_id", "t3").put("text", "The file has been updated."),
+            JSONObject().put("role", "tool").put("tool", "Bash").put("tool_id", "t4").put("input", JSONObject().put("command", "./gradlew build").put("description", "Собрать мод")),
+            JSONObject().put("role", "tool_result").put("tool_id", "t4").put("text", "> Task :compileKotlin\n> Task :jar\nBUILD SUCCESSFUL in 41s"),
             JSONObject().put("role", "assistant").put("text", answer),
         ))
         val backends = JSONObject()
@@ -63,9 +68,9 @@ object Demo {
                 .put("sessions", JSONArray(listOf(
                     s(SID, "Формулы для расчёта урона", 60.0, pinned = now, backend = "claude"),
                     s("demo-anchor", "Якорь и цепь у штурвала", 3000.0, folder = "f1", backend = "codex"),
-                    s("demo-sails", "Паруса и ветер", 90000.0, folder = "f1", backend = "agy"),
+                    s("demo-sails", "Паруса и ветер", 90000.0, folder = "f1", running = true, backend = "agy"),
                     s("demo-forge", "Новая кузня: печь на домне", 600.0, running = true, backend = "codex"),
-                    s("demo-update", "Проверка обновления сервера", 100000.0, backend = "claude"),
+                    s("demo-update", "Проверка обновления сервера", 100000.0, backend = "api"),
                 )))
                 .put("folders", JSONArray(listOf(JSONObject().put("id", "f1").put("name", "Корабли")))),
             JSONObject().put("type", "history").put("sid", SID).put("messages", messages),

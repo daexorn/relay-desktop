@@ -268,4 +268,72 @@ class MultiAgentLockThemeTest {
         assertTrue(helperText.contains("INSTALLER_SOURCE = \"# agent_installer.py\""))
         assertTrue(helperText.contains("DEFAULT_BACKEND = \"agy\""))
     }
+
+    @Test fun engineSignaturesAndTurnTelemetrySubagentAnalysis() {
+        assertEquals(androidx.compose.ui.graphics.Color(0xFFEC8A5C), backendColor("claude", light = false))
+        assertEquals(androidx.compose.ui.graphics.Color(0xFFCA6234), backendColor("claude", light = true))
+        assertEquals(androidx.compose.ui.graphics.Color(0xFF3ED6A8), backendColor("codex", light = false))
+        assertEquals(androidx.compose.ui.graphics.Color(0xFF169873), backendColor("codex", light = true))
+        assertEquals(androidx.compose.ui.graphics.Color(0xFFA482FF), backendColor("agy", light = false))
+        assertEquals(androidx.compose.ui.graphics.Color(0xFF6E4AE0), backendColor("agy", light = true))
+        assertEquals(androidx.compose.ui.graphics.Color(0xFF5EA8FF), backendColor("api", light = false))
+        assertEquals(androidx.compose.ui.graphics.Color(0xFF256CDA), backendColor("api", light = true))
+
+        assertEquals("ПОИСК", classifyToolPhase("grep_search").label)
+        assertEquals("ПРАВКА", classifyToolPhase("edit_file").label)
+        assertEquals("КОМАНДА", classifyToolPhase("run_command").label)
+        assertEquals("СУБАГЕНТ", classifyToolPhase("invoke_subagent").label)
+        assertEquals("СУБАГЕНТ", classifyToolPhase("spawn_agent").label)
+        assertEquals("СУБАГЕНТ", classifyToolPhase("mcp__relay_cluster__delegate").label)
+        assertEquals("ЭТОТ ПК", classifyToolPhase("mcp__relay_desktop__screenshot").label)
+        assertEquals("ШАГ", classifyToolPhase("TodoWrite").label)
+
+        val msgs = listOf(
+            ChatMessage(role = "user", text = "Проверь и обнови модуль"),
+            ChatMessage(role = "tool", tool = "Grep", toolId = "1", input = JSONObject().put("pattern", "Combat")),
+            ChatMessage(role = "tool_result", toolId = "1", text = "src/Combat.kt:12"),
+            ChatMessage(
+                role = "tool",
+                tool = "invoke_subagent",
+                toolId = "2",
+                input = JSONObject().put("Role", "Аудитор безопасности").put("Prompt", "Проверь граничные случаи").put("Model", "pro"),
+            ),
+            ChatMessage(role = "tool_result", toolId = "2", text = "Уязвимостей нет"),
+            ChatMessage(
+                role = "tool",
+                tool = "Edit",
+                toolId = "3",
+                input = JSONObject().put("file_path", "src/Combat.kt").put("old_string", "a").put("new_string", "b"),
+            ),
+            ChatMessage(role = "tool_result", toolId = "3", failed = true, text = "conflict"),
+            ChatMessage(
+                role = "tool",
+                tool = "mcp__relay_cluster__spawn",
+                toolId = "4",
+                input = JSONObject().put("agent", "Тестировщик").put("task", "Прогон интеграционных тестов"),
+            ),
+            ChatMessage(
+                role = "tool",
+                tool = "Bash",
+                toolId = "5",
+                input = JSONObject().put("command", "./gradlew test").put("description", "Запуск модульных тестов"),
+            ),
+        )
+
+        val tel = analyzeTurnTelemetry(msgs, busy = true, status = "Работает")
+        assertEquals(5, tel.totalActions)
+        assertEquals(3, tel.doneActions)
+        assertEquals(2, tel.runningActions)
+        assertEquals(1, tel.failedActions)
+        assertEquals(1, tel.reads)
+        assertEquals(1, tel.edits)
+        assertEquals(1, tel.commands)
+        assertEquals(2, tel.delegations)
+        assertEquals(2, tel.subagents.size)
+        assertEquals("Аудитор безопасности", tel.subagents[0].role)
+        assertFalse(tel.subagents[0].running)
+        assertEquals("Тестировщик", tel.subagents[1].role)
+        assertTrue(tel.subagents[1].running)
+        assertEquals(ToolPhase.Subagent, tel.activePhase)
+    }
 }

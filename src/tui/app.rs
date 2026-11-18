@@ -25,6 +25,8 @@ use std::{
 pub const COMMANDS: &[(&str, &str)] = &[
     ("/help", "Клавиши и команды"),
     ("/menu", "Открыть панель серверов, сессий, агентов и лимитов"),
+    ("/radar", "Живой радар агентов и топология сессий (F6)"),
+    ("/agents", "Открыть радар активных агентов и субагентов (F6)"),
     ("/hosts", "Выбрать сервер"),
     ("/connect", "Подключиться или переподключиться"),
     ("/disconnect", "Отключиться от сервера"),
@@ -264,6 +266,9 @@ pub enum Popup {
         section: usize,
         index: usize,
     },
+    Radar {
+        cursor: usize,
+    },
     Help {
         scroll: usize,
     },
@@ -273,8 +278,24 @@ pub enum Hit {
     Hosts,
     Sessions,
     Workspace,
+    Radar,
     WorkspaceTab(usize),
     WorkspaceItem(usize),
+    RadarItem(usize),
+}
+
+pub struct RadarNode {
+    pub sid: String,
+    pub session: Option<Session>,
+    pub title: String,
+    pub backend: String,
+    pub cwd: String,
+    pub running: bool,
+    pub locked_gate: bool,
+    pub is_current: bool,
+    pub loaded_in_mem: bool,
+    pub telemetry: relay_desktop::model::TurnTelemetry,
+    pub last_tool: String,
 }
 
 pub struct App {
@@ -442,6 +463,227 @@ impl App {
             section: 0,
             index: 0,
         });
+    }
+    pub fn open_radar(&mut self) {
+        self.popup = Some(Popup::Radar { cursor: 0 });
+    }
+    pub fn active_agents_count(&self) -> usize {
+        let Some(host) = self.active.as_deref() else {
+            return 0;
+        };
+        let mut active_ids = BTreeSet::new();
+        if let Some(r) = self.remote.get(host) {
+            for s in &r.sessions {
+                if s.running {
+                    active_ids.insert(s.id.clone());
+                }
+            }
+        }
+        let prefix = format!("{host}/");
+        for (key, c) in &self.chats {
+            if let Some(sid) = key.strip_prefix(&prefix) {
+                if c.busy {
+                    active_ids.insert(sid.to_owned());
+                }
+            }
+        }
+        active_ids.len()
+    }
+    pub fn active_turn_telemetry(&self) -> Option<relay_desktop::model::TurnTelemetry> {
+        let c = self.chat()?;
+        if c.is_locked_gate() {
+            return None;
+        }
+        let start = if c.user_at < c.messages.len()
+            && c.messages.get(c.user_at).is_some_and(|m| m.role == "user")
+        {
+            c.user_at
+        } else {
+            c.messages
+                .iter()
+                .rposition(|m| m.role == "user")
+                .unwrap_or(0)
+        };
+        Some(relay_desktop::model::analyze_turn(
+            &c.messages,
+            start,
+            c.busy,
+            &c.status,
+        ))
+    }
+    pub fn radar_nodes(&self) -> Vec<RadarNode> {
+        let Some(host) = self.active.as_deref() else {
+            return Vec::new();
+        };
+        let server = self.server().unwrap_or_default();
+        let current_sid = self.selected.get(host).map(String::as_str);
+        let mut sessions = self
+            .remote
+            .get(host)
+            .map(|r| r.sessions.clone())
+            .unwrap_or_default();
+        sessions.sort_by(|a, b| {
+            let a_run =
+                a.running || self.chats.get(&chat_key(host, &a.id)).is_some_and(|c| c.busy);
+            let b_run =
+                b.running || self.chats.get(&chat_key(host, &b.id)).is_some_and(|c| c.busy);
+            b_run
+                .cmp(&a_run)
+                .then_with(|| (b.pinned > 0.).cmp(&(a.pinned > 0.)))
+                .then_with(|| b.modified.total_cmp(&a.modified))
+        });
+
+        let mut nodes = Vec::new();
+        let mut seen = BTreeSet::new();
+        for s in sessions {
+            seen.insert(s.id.clone());
+            let key = chat_key(host, &s.id);
+            let chat = self.chats.get(&key);
+            let running = s.running || chat.is_some_and(|c| c.busy);
+            let locked_gate = chat.map_or_else(|| s.is_locked_gate(), Chat::is_locked_gate);
+            let backend = chat
+                .map(|c| c.backend.clone())
+                .filter(|b| !b.is_empty())
+                .unwrap_or_else(|| {
+                    self.settings.session_backend(
+                        &server,
+                        &key,
+                        Some(s.backend.as_str()).filter(|b| !b.is_empty()),
+                    )
+                });
+            let (telemetry, last_tool) = if locked_gate {
+                (Default::default(), String::new())
+            } else if let Some(c) = chat {
+                let start = if c.user_at < c.messages.len()
+                    && c.messages.get(c.user_at).is_some_and(|m| m.role == "user")
+                {
+                    c.user_at
+                } else {
+                    c.messages
+                        .iter()
+                        .rposition(|m| m.role == "user")
+                        .unwrap_or(0)
+                };
+                let tel = relay_desktop::model::analyze_turn(
+                    &c.messages,
+                    start,
+                    running,
+                    &c.status,
+                );
+                let last = c
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|m| m.role == "tool")
+                    .map(|m| {
+                        let prev = relay_desktop::model::tool_target_preview(m, 44);
+                        if prev.is_empty() {
+                            m.tool.clone()
+                        } else {
+                            format!("{} {}", m.tool, prev)
+                        }
+                    })
+                    .unwrap_or_default();
+                (tel, last)
+            } else {
+                let mut tel = relay_desktop::model::TurnTelemetry::default();
+                if running {
+                    tel.active_headline = "Выполняет задачу на сервере".into();
+                }
+                (tel, String::new())
+            };
+            nodes.push(RadarNode {
+                sid: s.id.clone(),
+                title: chat
+                    .map(|c| c.title.clone())
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or_else(|| s.title.clone()),
+                cwd: chat
+                    .map(|c| c.cwd.clone())
+                    .filter(|d| !d.is_empty())
+                    .unwrap_or_else(|| s.cwd.clone()),
+                backend,
+                running,
+                locked_gate,
+                is_current: current_sid == Some(s.id.as_str()),
+                loaded_in_mem: chat.is_some_and(|c| c.loaded || !c.messages.is_empty()),
+                telemetry,
+                last_tool,
+                session: Some(s),
+            });
+        }
+
+        if let Some(sid) = current_sid {
+            if !seen.contains(sid) {
+                if let Some(c) = self.chats.get(&chat_key(host, sid)) {
+                    let locked_gate = c.is_locked_gate();
+                    let start = c
+                        .messages
+                        .iter()
+                        .rposition(|m| m.role == "user")
+                        .unwrap_or(0);
+                    let telemetry = if locked_gate {
+                        Default::default()
+                    } else {
+                        relay_desktop::model::analyze_turn(
+                            &c.messages,
+                            start,
+                            c.busy,
+                            &c.status,
+                        )
+                    };
+                    let last_tool = if locked_gate {
+                        String::new()
+                    } else {
+                        c.messages
+                            .iter()
+                            .rev()
+                            .find(|m| m.role == "tool")
+                            .map(|m| {
+                                let prev = relay_desktop::model::tool_target_preview(m, 44);
+                                if prev.is_empty() {
+                                    m.tool.clone()
+                                } else {
+                                    format!("{} {}", m.tool, prev)
+                                }
+                            })
+                            .unwrap_or_default()
+                    };
+                    let node = RadarNode {
+                        sid: sid.to_owned(),
+                        session: None,
+                        title: c.title.clone(),
+                        backend: c.backend.clone(),
+                        cwd: c.cwd.clone(),
+                        running: c.busy,
+                        locked_gate,
+                        is_current: true,
+                        loaded_in_mem: true,
+                        telemetry,
+                        last_tool,
+                    };
+                    if c.busy {
+                        nodes.insert(0, node);
+                    } else {
+                        nodes.push(node);
+                    }
+                }
+            }
+        }
+        nodes
+    }
+    fn activate_radar(&mut self, index: usize) {
+        let nodes = self.radar_nodes();
+        let Some(node) = nodes.get(index) else {
+            return;
+        };
+        if let Some(session) = node.session.clone() {
+            self.open_session(session);
+        } else if let Some(host) = self.active.clone() {
+            self.selected.insert(host.clone(), node.sid.clone());
+            self.store.last.insert(host, node.sid.clone());
+            self.dirty = true;
+        }
     }
     pub fn workspace_items(&self) -> Vec<WorkspaceEntry> {
         let mut out = vec![];
@@ -1456,8 +1698,14 @@ impl App {
                 if !sid.is_empty() {
                     self.ensure_chat(host, sid, None);
                 }
+                let busy = value["busy"] == true;
+                if let Some(r) = self.remote.get_mut(host) {
+                    if let Some(s) = r.sessions.iter_mut().find(|s| s.id == sid) {
+                        s.running = busy;
+                    }
+                }
                 if let Some(c) = self.chats.get_mut(&key) {
-                    c.busy = value["busy"] == true;
+                    c.busy = busy;
                     if c.busy {
                         if let Some(b) = value["backend"]
                             .as_str()
@@ -1478,6 +1726,11 @@ impl App {
                 if let Some(c) = self.chats.get_mut(&key) {
                     c.reduce(&value["data"]);
                     if value["data"]["type"] == "result" {
+                        if let Some(r) = self.remote.get_mut(host) {
+                            if let Some(s) = r.sessions.iter_mut().find(|s| s.id == sid) {
+                                s.running = false;
+                            }
+                        }
                         self.controller.send(host, json!({"op":"sessions"}));
                         if c.history_dirty {
                             c.history_dirty = false;
@@ -1514,6 +1767,11 @@ impl App {
                 }
             }
             "run_closed" => {
+                if let Some(r) = self.remote.get_mut(host) {
+                    if let Some(s) = r.sessions.iter_mut().find(|s| s.id == sid) {
+                        s.running = false;
+                    }
+                }
                 if let Some(c) = self.chats.get_mut(&key) {
                     c.busy = false;
                     c.paused = true;
@@ -1911,6 +2169,8 @@ impl App {
                         | "/exit"
                         | "/menu"
                         | "/panel"
+                        | "/radar"
+                        | "/agents"
                         | "/theme"
                         | "/connect"
                         | "/disconnect"
@@ -1990,6 +2250,7 @@ impl App {
         match command {
             "/help"=>self.popup=Some(Popup::Help{scroll:0}),
             "/menu"|"/panel"=>self.open_workspace(),
+            "/radar"|"/agents"=>self.open_radar(),
             "/hosts"=>{if !self.demo{if let Ok(settings)=storage::load(){self.settings=settings;}}self.picker(Picker::Hosts);},
             "/connect"=>if arg.is_empty(){self.connect();}else{let servers=self.servers();let found:Vec<_>=servers.iter().filter(|s|s.id==arg||s.name.eq_ignore_ascii_case(arg)||s.host==arg).collect();if found.len()==1{self.select_host(found[0].id.clone());}else{self.notice="Имя не найдено или неоднозначно. Выбери сервер через F2.".into();}},
             "/disconnect"=>if let Some(host)=self.active.clone(){self.controller.disconnect(&host);self.event(Event::Disconnected{server:host});},
@@ -2350,6 +2611,7 @@ impl App {
                     KeyCode::F(3) => self.command("/sessions"),
                     KeyCode::F(4) => self.picker(Picker::Themes),
                     KeyCode::F(5) => self.open_workspace(),
+                    KeyCode::F(6) => self.open_radar(),
                     KeyCode::Char('q') if ctrl => self.request_quit(),
                     KeyCode::Char('c') if ctrl => {
                         if self.chat().is_some_and(|c| c.busy) {
@@ -2487,7 +2749,8 @@ impl App {
                             Hit::Hosts => self.command("/hosts"),
                             Hit::Sessions => self.command("/sessions"),
                             Hit::Workspace => self.open_workspace(),
-                            Hit::WorkspaceTab(_) | Hit::WorkspaceItem(_) => {}
+                            Hit::Radar => self.open_radar(),
+                            Hit::WorkspaceTab(_) | Hit::WorkspaceItem(_) | Hit::RadarItem(_) => {}
                         }
                     }
                 }
@@ -2852,13 +3115,21 @@ impl App {
                                         self.command("/sessions");
                                         keep = false;
                                     }
+                                    Hit::Radar => {
+                                        self.open_radar();
+                                        keep = false;
+                                    }
+                                    Hit::RadarItem(_) => {}
                                 }
                             }
                         }
                         _ => {}
                     }
                 } else if let Some(key) = key {
-                    if ctrl && key.code == KeyCode::Char('a') {
+                    if key.code == KeyCode::F(6) {
+                        self.open_radar();
+                        keep = false;
+                    } else if ctrl && key.code == KeyCode::Char('a') {
                         self.command("/add");
                         keep = false;
                     } else if ctrl && key.code == KeyCode::Char('n') {
@@ -2901,6 +3172,83 @@ impl App {
                                     items.get((*index).min(items.len().saturating_sub(1)))
                                 {
                                     self.activate_workspace(item.action.clone());
+                                    keep = false;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            Popup::Radar { cursor } => {
+                let nodes = self.radar_nodes();
+                if cancel || key.is_some_and(|k| k.code == KeyCode::F(6)) {
+                    keep = false;
+                } else if let Input::Mouse(mouse) = event {
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => *cursor = cursor.saturating_sub(1),
+                        MouseEventKind::ScrollDown => {
+                            *cursor = (*cursor + 1).min(nodes.len().saturating_sub(1))
+                        }
+                        MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                            let position = ratatui::layout::Position::new(mouse.column, mouse.row);
+                            if let Some(hit) = self
+                                .hits
+                                .iter()
+                                .find(|(r, _)| r.contains(position))
+                                .map(|(_, h)| h.clone())
+                            {
+                                match hit {
+                                    Hit::Radar => keep = false,
+                                    Hit::RadarItem(idx) => {
+                                        self.activate_radar(idx);
+                                        keep = false;
+                                    }
+                                    Hit::Workspace => {
+                                        self.open_workspace();
+                                        keep = false;
+                                    }
+                                    Hit::Hosts => {
+                                        self.command("/hosts");
+                                        keep = false;
+                                    }
+                                    Hit::Sessions => {
+                                        self.command("/sessions");
+                                        keep = false;
+                                    }
+                                    Hit::WorkspaceTab(_) | Hit::WorkspaceItem(_) => {}
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                } else if let Some(key) = key {
+                    let alt = key.modifiers.contains(KeyModifiers::ALT);
+                    if key.code == KeyCode::F(5) || (ctrl && key.code == KeyCode::Char('b')) {
+                        self.open_workspace();
+                        keep = false;
+                    } else if ctrl && key.code == KeyCode::Char('n') {
+                        self.new_chat();
+                        keep = false;
+                    } else if ctrl && key.code == KeyCode::Char('r') {
+                        self.refresh();
+                    } else {
+                        match key.code {
+                            KeyCode::Up => *cursor = cursor.saturating_sub(1),
+                            KeyCode::Char('k') if !ctrl && !alt => {
+                                *cursor = cursor.saturating_sub(1)
+                            }
+                            KeyCode::Down => {
+                                *cursor = (*cursor + 1).min(nodes.len().saturating_sub(1))
+                            }
+                            KeyCode::Char('j') if !ctrl && !alt => {
+                                *cursor = (*cursor + 1).min(nodes.len().saturating_sub(1))
+                            }
+                            KeyCode::Home => *cursor = 0,
+                            KeyCode::End => *cursor = nodes.len().saturating_sub(1),
+                            KeyCode::Enter => {
+                                if !nodes.is_empty() {
+                                    self.activate_radar((*cursor).min(nodes.len() - 1));
                                     keep = false;
                                 }
                             }
@@ -3128,9 +3476,106 @@ impl App {
         self.settings.servers = vec![server];
         self.active = Some("demo".into());
         self.store.theme = "graphite".into();
-        self.remote.insert("demo".into(),Remote{connected:true,loaded:true,home:"/root".into(),version:"Claude Code".into(),backends:json!({"claude":{"installed":true,"version":"2.1.12","running":false,"label":"Claude Code"},"codex":{"installed":true,"version":"0.98.0","running":false,"label":"OpenAI Codex CLI"},"agy":{"installed":false,"version":"","running":false,"label":"Antigravity CLI (agy)"},"api":{"installed":true,"version":"","running":false,"label":"Пользовательский API"}}),usage:json!({"available":true,"windows":[{"id":"five_hour","label":"5 часов","utilization":38.},{"id":"seven_day","label":"Неделя","utilization":64.}]}),sessions:vec![Session{id:"11111111-1111-4111-8111-111111111111".into(),title:"Оптимизация атласа".into(),cwd:"/opt/project".into(),pinned:1.,..Default::default()},Session{id:"22222222-2222-4222-8222-222222222222".into(),title:"Новый интерфейс лаунчера".into(),cwd:"/opt/launcher".into(),..Default::default()}],..Default::default()});
-        let session = self.remote["demo"].sessions[0].clone();
-        self.open_session(session);
+        let s1 = Session {
+            id: "11111111-1111-4111-8111-111111111111".into(),
+            title: "Оптимизация атласа".into(),
+            cwd: "/opt/project".into(),
+            pinned: 1.,
+            modified: 1700000300.,
+            backend: "claude".into(),
+            ..Default::default()
+        };
+        let s2 = Session {
+            id: "22222222-2222-4222-8222-222222222222".into(),
+            title: "Новый интерфейс лаунчера".into(),
+            cwd: "/opt/launcher".into(),
+            modified: 1700000400.,
+            running: true,
+            backend: "codex".into(),
+            ..Default::default()
+        };
+        let s3 = Session {
+            id: "44444444-4444-4444-8444-444444444444".into(),
+            title: "Аудит ключей релизов".into(),
+            cwd: "/opt/security".into(),
+            modified: 1700000200.,
+            backend: "agy".into(),
+            locked: true,
+            unlocked: false,
+            ..Default::default()
+        };
+        self.remote.insert(
+            "demo".into(),
+            Remote {
+                connected: true,
+                loaded: true,
+                home: "/root".into(),
+                version: "Claude Code".into(),
+                backends: json!({
+                    "claude": {"installed": true, "version": "2.1.12", "running": false, "label": "Claude Code"},
+                    "codex": {"installed": true, "version": "0.98.0", "running": false, "label": "OpenAI Codex CLI"},
+                    "agy": {"installed": false, "version": "", "running": false, "label": "Antigravity CLI (agy)"},
+                    "api": {"installed": true, "version": "", "running": false, "label": "Пользовательский API"}
+                }),
+                usage: json!({
+                    "available": true,
+                    "windows": [
+                        {"id": "five_hour", "label": "5 часов", "utilization": 38.},
+                        {"id": "seven_day", "label": "Неделя", "utilization": 64.}
+                    ]
+                }),
+                sessions: vec![s1.clone(), s2.clone(), s3],
+                ..Default::default()
+            },
+        );
+
+        // Preload live Codex session telemetry for the Radar Observatory
+        self.ensure_chat("demo", &s2.id, Some(&s2));
+        if let Some(bg) = self.chats.get_mut(&chat_key("demo", &s2.id)) {
+            bg.loaded = true;
+            bg.loading = false;
+            bg.busy = false;
+            bg.backend = "codex".into();
+            bg.model = "gpt-5.4".into();
+            bg.mode = "auto".into();
+            bg.messages = vec![
+                relay_desktop::model::Message {
+                    role: "user".into(),
+                    text: "Собери новый UI лаунчера и прогони интеграционные тесты".into(),
+                    ..Default::default()
+                },
+                relay_desktop::model::Message {
+                    role: "tool".into(),
+                    tool: "Read".into(),
+                    tool_id: "bg1".into(),
+                    input: json!({"file_path": "/opt/launcher/src/theme.rs"}),
+                    ..Default::default()
+                },
+                relay_desktop::model::Message {
+                    role: "tool_result".into(),
+                    tool_id: "bg1".into(),
+                    text: "pub struct LauncherTheme".into(),
+                    ..Default::default()
+                },
+                relay_desktop::model::Message {
+                    role: "tool".into(),
+                    tool: "spawn_agent".into(),
+                    tool_id: "bg2".into(),
+                    input: json!({"agent_type": "UI Verifier", "message": "Проверить сетку карточек и контраст"}),
+                    ..Default::default()
+                },
+                relay_desktop::model::Message {
+                    role: "tool".into(),
+                    tool: "Bash".into(),
+                    tool_id: "bg3".into(),
+                    input: json!({"command": "cargo test --workspace --locked", "description": "Прогоняю тесты лаунчера"}),
+                    ..Default::default()
+                },
+            ];
+            bg.user_at = 0;
+        }
+
+        self.open_session(s1);
         let c = self.chat_mut().unwrap();
         c.loaded = true;
         c.loading = false;
@@ -3138,7 +3583,93 @@ impl App {
         c.mode = "auto".into();
         c.model = "opus".into();
         c.effort = "high".into();
-        c.messages=vec![relay_desktop::model::Message{role:"user".into(),text:"Проверь изменения в атласе и запусти тесты".into(),..Default::default()},relay_desktop::model::Message{role:"assistant".into(),text:"Проверю привязку карты и границы. Сначала посмотрю изменения, затем прогоню тесты.\n\n### Что проверяю\n1. Совпадение координат атласа и фракционной карты.\n2. Рельеф, острова и границы у побережья.\n3. Облака над восточной частью карты.".into(),..Default::default()},relay_desktop::model::Message{role:"tool".into(),tool:"Bash".into(),tool_id:"test".into(),input:json!({"command":"./gradlew test --no-daemon"}),..Default::default()},relay_desktop::model::Message{role:"tool_result".into(),tool_id:"test".into(),text:"AtlasCoordinatesTest > alignsBothMaps PASSED\nCoastlineTest > followsMapPixels PASSED\nFogRendererTest > coversEasternMountains PASSED\n\nBUILD SUCCESSFUL in 12s\n18 tests completed, 0 failed".into(),..Default::default()},relay_desktop::model::Message{role:"assistant".into(),text:"**Все 18 тестов прошли.** Смещение границ исправлено; облака закрывают край гор.\n\n| Проверка | Результат |\n| --- | --- |\n| Координаты | Совпадают |\n| Границы | По пикселям карты |\n| Облака | Плавный переход |\n\nИзменения в `AtlasRenderer.java`. Сервер перезапускать не потребовалось.".into(),..Default::default()}];
+        c.messages = vec![
+            relay_desktop::model::Message {
+                role: "user".into(),
+                text: "Проверь изменения в атласе и запусти тесты".into(),
+                ..Default::default()
+            },
+            relay_desktop::model::Message {
+                role: "assistant".into(),
+                text: "Сверю привязку координат карты, поручу субагенту аудит береговой линии и прогоню тесты.".into(),
+                ..Default::default()
+            },
+            relay_desktop::model::Message {
+                role: "tool".into(),
+                tool: "Grep".into(),
+                tool_id: "step1".into(),
+                input: json!({"pattern": "AtlasCoordinates", "path": "src/"}),
+                ..Default::default()
+            },
+            relay_desktop::model::Message {
+                role: "tool_result".into(),
+                tool_id: "step1".into(),
+                text: "src/AtlasRenderer.java:84\nsrc/CoastlineTest.java:19".into(),
+                ..Default::default()
+            },
+            relay_desktop::model::Message {
+                role: "tool".into(),
+                tool: "Read".into(),
+                tool_id: "step2".into(),
+                input: json!({"file_path": "/opt/project/src/AtlasRenderer.java"}),
+                ..Default::default()
+            },
+            relay_desktop::model::Message {
+                role: "tool_result".into(),
+                tool_id: "step2".into(),
+                text: "public final class AtlasRenderer { ... }".into(),
+                ..Default::default()
+            },
+            relay_desktop::model::Message {
+                role: "tool".into(),
+                tool: "invoke_subagent".into(),
+                tool_id: "step3".into(),
+                input: json!({"Role": "Coastline Verifier", "Prompt": "Сверить пиксельные границы у побережья и облаков"}),
+                ..Default::default()
+            },
+            relay_desktop::model::Message {
+                role: "tool_result".into(),
+                tool_id: "step3".into(),
+                text: "Контуры берега и тумана совпадают без зазоров.".into(),
+                ..Default::default()
+            },
+            relay_desktop::model::Message {
+                role: "tool".into(),
+                tool: "Edit".into(),
+                tool_id: "step4".into(),
+                input: json!({
+                    "file_path": "/opt/project/src/AtlasRenderer.java",
+                    "old_string": "int margin = region.rawOffset();\nrenderCoast(margin);",
+                    "new_string": "int margin = region.pixelAlignedOffset();\nrenderCoast(margin);"
+                }),
+                ..Default::default()
+            },
+            relay_desktop::model::Message {
+                role: "tool_result".into(),
+                tool_id: "step4".into(),
+                text: "Updated AtlasRenderer.java".into(),
+                ..Default::default()
+            },
+            relay_desktop::model::Message {
+                role: "tool".into(),
+                tool: "Bash".into(),
+                tool_id: "test".into(),
+                input: json!({"command": "./gradlew test --no-daemon"}),
+                ..Default::default()
+            },
+            relay_desktop::model::Message {
+                role: "tool_result".into(),
+                tool_id: "test".into(),
+                text: "AtlasCoordinatesTest > alignsBothMaps PASSED\nCoastlineTest > followsMapPixels PASSED\nFogRendererTest > coversEasternMountains PASSED\nBUILD SUCCESSFUL in 12s · 18 tests completed, 0 failed".into(),
+                ..Default::default()
+            },
+            relay_desktop::model::Message {
+                role: "assistant".into(),
+                text: "**Все 18 тестов прошли.** Смещение границ исправлено; облака закрывают край гор.\n\n| Проверка | Результат |\n| --- | --- |\n| Координаты | Совпадают |\n| Границы | По пикселям карты |\n| Облака | Плавный переход |\n\nИзменения в `AtlasRenderer.java`. Сервер перезапускать не потребовалось.".into(),
+                ..Default::default()
+            },
+        ];
+        c.user_at = 0;
     }
 }
 
@@ -3667,5 +4198,68 @@ mod tests {
             json!({"type":"backends_status","backends":{"claude":{"installed":true,"version":"2.1.15","running":false},"codex":{"installed":true,"version":"0.99.0","running":false},"agy":{"installed":true,"version":"1.4.0","running":false}}}),
         );
         assert_eq!(app.remote["demo"].backends["claude"]["version"], "2.1.15");
+    }
+
+    #[test]
+    fn radar_popup_opens_via_f6_and_commands_navigates_j_k_and_jumps_on_enter() {
+        let mut app = App::new(true).unwrap();
+        app.demo();
+        assert_eq!(app.active_agents_count(), 1);
+
+        let nodes = app.radar_nodes();
+        assert_eq!(nodes.len(), 3);
+        // Running Codex session is prioritized first on the radar
+        assert_eq!(nodes[0].sid, "22222222-2222-4222-8222-222222222222");
+        assert!(nodes[0].running);
+        assert_eq!(nodes[0].backend, "codex");
+        assert_eq!(nodes[0].telemetry.active_headline, "Прогоняю тесты лаунчера");
+        assert_eq!(nodes[0].telemetry.subagents.len(), 1);
+        assert_eq!(nodes[0].telemetry.subagents[0].role, "UI Verifier");
+
+        assert_eq!(nodes[1].sid, "11111111-1111-4111-8111-111111111111");
+        assert!(nodes[1].is_current);
+        assert_eq!(nodes[1].telemetry.total_actions, 5);
+        assert_eq!(nodes[1].telemetry.reads, 2);
+        assert_eq!(nodes[1].telemetry.edits, 1);
+        assert_eq!(nodes[1].telemetry.commands, 1);
+        assert_eq!(nodes[1].telemetry.delegations, 1);
+
+        assert!(nodes[2].locked_gate);
+        assert_eq!(nodes[2].telemetry.total_actions, 0);
+
+        // Open via F6 and toggle closed with F6
+        app.input(key(KeyCode::F(6), KeyModifiers::NONE));
+        assert!(matches!(app.popup, Some(Popup::Radar { cursor: 0 })));
+        app.input(key(KeyCode::F(6), KeyModifiers::NONE));
+        assert!(app.popup.is_none());
+
+        // Open via /radar, navigate with j / k and Down / Up, select running session 0 via Enter
+        app.command("/radar");
+        assert!(matches!(app.popup, Some(Popup::Radar { cursor: 0 })));
+        app.input(key(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert!(matches!(app.popup, Some(Popup::Radar { cursor: 1 })));
+        app.input(key(KeyCode::Char('k'), KeyModifiers::NONE));
+        assert!(matches!(app.popup, Some(Popup::Radar { cursor: 0 })));
+        app.input(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.popup.is_none());
+        assert_eq!(
+            app.chat().unwrap().sid,
+            "22222222-2222-4222-8222-222222222222"
+        );
+        assert_eq!(app.chat().unwrap().backend, "codex");
+
+        // Open via /agents and select locked session (index 2) -> opens SessionUnlock prompt
+        app.command("/agents");
+        app.input(key(KeyCode::Down, KeyModifiers::NONE));
+        app.input(key(KeyCode::Down, KeyModifiers::NONE));
+        assert!(matches!(app.popup, Some(Popup::Radar { cursor: 2 })));
+        app.input(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            app.popup,
+            Some(Popup::Field {
+                kind: Field::SessionUnlock { .. },
+                ..
+            })
+        ));
     }
 }

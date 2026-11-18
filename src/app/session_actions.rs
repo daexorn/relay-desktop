@@ -818,4 +818,362 @@ impl RelayApp {
             self.agents_open = None;
         }
     }
+
+    pub(super) fn radar_dialog(&mut self, ctx: &egui::Context, p: Palette, modal_t: f32) {
+        let Some(server_id) = self.radar_open.clone() else {
+            return;
+        };
+        let Some(server) = self
+            .settings
+            .servers
+            .iter()
+            .find(|s| s.id == server_id)
+            .cloned()
+        else {
+            self.radar_open = None;
+            return;
+        };
+        let light = self.settings.light;
+        let connected = self.connected(&server.id);
+        let sessions: Vec<Session> = self
+            .remote
+            .get(&server.id)
+            .map(|r| r.sessions.clone())
+            .unwrap_or_default();
+        let mut sorted = sessions.clone();
+        sorted.sort_by(|a, b| {
+            let a_busy = a.running
+                || self.chats.get(&key(&server.id, &a.id)).is_some_and(|c| c.busy)
+                || self
+                    .remote
+                    .get(&server.id)
+                    .is_some_and(|r| r.running.contains(&a.id));
+            let b_busy = b.running
+                || self.chats.get(&key(&server.id, &b.id)).is_some_and(|c| c.busy)
+                || self
+                    .remote
+                    .get(&server.id)
+                    .is_some_and(|r| r.running.contains(&b.id));
+            b_busy
+                .cmp(&a_busy)
+                .then_with(|| b.modified.total_cmp(&a.modified))
+        });
+
+        let active_count = sorted
+            .iter()
+            .filter(|s| {
+                s.running
+                    || self.chats.get(&key(&server.id, &s.id)).is_some_and(|c| c.busy)
+                    || self
+                        .remote
+                        .get(&server.id)
+                        .is_some_and(|r| r.running.contains(&s.id))
+            })
+            .count();
+
+        let mut close = false;
+        let mut jump_to: Option<Session> = None;
+        let modal_w = (ctx.screen_rect().width() - 48.).clamp(340., 680.);
+        let response = egui::Modal::new(egui::Id::new("agent-radar-dialog"))
+            .area(
+                egui::Modal::default_area(egui::Id::new("agent-radar-dialog")).anchor(
+                    egui::Align2::CENTER_CENTER,
+                    Vec2::new(0., (1. - modal_t) * 9.),
+                ),
+            )
+            .frame(
+                egui::Frame::new()
+                    .fill(p.surface)
+                    .corner_radius(16.)
+                    .inner_margin(22.)
+                    .stroke(Stroke::new(1.0_f32, design::mix(p.line, accent(), 0.32))),
+            )
+            .backdrop_color(Color32::from_black_alpha((128. * modal_t) as u8))
+            .show(ctx, |ui| {
+                ui.set_width(modal_w);
+                ui.set_opacity(modal_t);
+                ui.horizontal(|ui| {
+                    let (orb, _) = ui.allocate_exact_size(Vec2::splat(28.), egui::Sense::hover());
+                    design::orbital_core(ui, orb, accent(), active_count > 0);
+                    ui.vertical(|ui| {
+                        label(ui, "Радар агентов · Живая телеметрия", 20., p.text);
+                        label(
+                            ui,
+                            format!(
+                                "{} · активных потоков: {} · всего сессий: {}",
+                                server.name,
+                                active_count,
+                                sorted.len()
+                            ),
+                            12.,
+                            p.muted,
+                        );
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if design::button(ui, "", Some(Icon::Close), Kind::Ghost, p, Vec2::splat(28.))
+                            .clicked()
+                        {
+                            close = true;
+                        }
+                    });
+                });
+                ui.add_space(12.);
+
+                let shown_nodes: Vec<_> = sorted.iter().take(5).collect();
+                let canvas_h = (shown_nodes.len().max(2) as f32 * 64. + 24.).clamp(160., 348.);
+                let (canvas, _) =
+                    ui.allocate_exact_size(Vec2::new(ui.available_width(), canvas_h), egui::Sense::hover());
+                ui.painter()
+                    .rect_filled(canvas, 13., design::mix(p.side, p.base, 0.45));
+                ui.painter().rect_stroke(
+                    canvas,
+                    13.,
+                    Stroke::new(1.0_f32, p.line),
+                    egui::StrokeKind::Inside,
+                );
+                let mut gx = canvas.left() + 16.;
+                while gx < canvas.right() - 10. {
+                    let mut gy = canvas.top() + 16.;
+                    while gy < canvas.bottom() - 10. {
+                        ui.painter()
+                            .circle_filled(egui::pos2(gx, gy), 0.9, p.line.gamma_multiply(0.45));
+                        gy += 22.;
+                    }
+                    gx += 22.;
+                }
+
+                let hub_w = (canvas.width() * 0.28).clamp(112., 168.);
+                let hub_rect = egui::Rect::from_center_size(
+                    egui::pos2(canvas.left() + hub_w * 0.5 + 18., canvas.center().y),
+                    Vec2::new(hub_w, 76.),
+                );
+                ui.painter()
+                    .circle_filled(hub_rect.center(), hub_w * 0.42, accent().gamma_multiply(0.08));
+                ui.painter().rect_filled(hub_rect, 11., p.surface);
+                ui.painter().rect_stroke(
+                    hub_rect,
+                    11.,
+                    Stroke::new(1.3_f32, design::mix(p.line, accent(), 0.55)),
+                    egui::StrokeKind::Inside,
+                );
+                let hc = ui.painter().with_clip_rect(hub_rect.shrink(8.));
+                hc.text(
+                    hub_rect.left_top() + Vec2::new(11., 11.),
+                    egui::Align2::LEFT_TOP,
+                    "УЗЕЛ СЕРВЕРА",
+                    FontId::proportional(9.0),
+                    accent(),
+                );
+                hc.text(
+                    hub_rect.left_top() + Vec2::new(11., 27.),
+                    egui::Align2::LEFT_TOP,
+                    model::shorten(&server.name, 16),
+                    FontId::proportional(13.5),
+                    p.text,
+                );
+                hc.text(
+                    hub_rect.left_bottom() + Vec2::new(11., -10.),
+                    egui::Align2::LEFT_BOTTOM,
+                    if connected { "● на связи" } else { "○ нет связи" },
+                    FontId::proportional(10.5),
+                    if connected { GREEN } else { p.muted },
+                );
+
+                if shown_nodes.is_empty() {
+                    ui.painter().text(
+                        egui::pos2(
+                            (hub_rect.right() + canvas.right()) * 0.5,
+                            canvas.center().y,
+                        ),
+                        egui::Align2::CENTER_CENTER,
+                        "Нет открытых сессий на сервере",
+                        FontId::proportional(12.5),
+                        p.muted,
+                    );
+                } else {
+                    let node_w = (canvas.right() - hub_rect.right() - 56.).clamp(140., 360.);
+                    let step_y = 62.;
+                    let total_h = (shown_nodes.len() - 1) as f32 * step_y;
+                    let y0 = canvas.center().y - total_h * 0.5;
+                    let now = ui.input(|i| i.time) as f32;
+                    let mut need_repaint = false;
+
+                    for (idx, sess) in shown_nodes.iter().enumerate() {
+                        let sk = key(&server.id, &sess.id);
+                        let busy = sess.running
+                            || self.chats.get(&sk).is_some_and(|c| c.busy)
+                            || self
+                                .remote
+                                .get(&server.id)
+                                .is_some_and(|r| r.running.contains(&sess.id));
+                        let sb = self.backend_for_chat(&server, &sk);
+                        let bcol = design::backend_color(&sb, light);
+                        let n_rect = egui::Rect::from_center_size(
+                            egui::pos2(canvas.right() - node_w * 0.5 - 16., y0 + idx as f32 * step_y),
+                            Vec2::new(node_w, 52.),
+                        );
+                        let p0 = hub_rect.right_center();
+                        let p3 = n_rect.left_center();
+                        let dx = (p3.x - p0.x) * 0.5;
+                        let p1 = p0 + Vec2::new(dx, 0.);
+                        let p2 = p3 - Vec2::new(dx, 0.);
+                        ui.painter().add(egui::epaint::CubicBezierShape::from_points_stroke(
+                            [p0, p1, p2, p3],
+                            false,
+                            Color32::TRANSPARENT,
+                            Stroke::new(
+                                if busy { 1.8_f32 } else { 1.1_f32 },
+                                if busy { bcol } else { p.line },
+                            ),
+                        ));
+                        if busy {
+                            need_repaint = true;
+                            for p_idx in 0..2 {
+                                let t = (now * 0.55 + p_idx as f32 * 0.5 + idx as f32 * 0.2) % 1.0;
+                                let q = 1.0 - t;
+                                let pt = (p0.to_vec2() * (q * q * q)
+                                    + p1.to_vec2() * (3.0 * q * q * t)
+                                    + p2.to_vec2() * (3.0 * q * t * t)
+                                    + p3.to_vec2() * (t * t * t))
+                                .to_pos2();
+                                ui.painter().circle_filled(pt, 4.5, bcol.gamma_multiply(0.24));
+                                ui.painter().circle_filled(pt, 2.4, bcol);
+                            }
+                        }
+
+                        let n_resp = ui.interact(
+                            n_rect,
+                            ui.id().with(("radar-node", &sess.id)),
+                            egui::Sense::click(),
+                        );
+                        let hov = n_resp.hovered();
+                        ui.painter().rect_filled(
+                            n_rect,
+                            10.,
+                            design::mix(
+                                p.surface,
+                                bcol,
+                                if busy { 0.14 } else if hov { 0.09 } else { 0.03 },
+                            ),
+                        );
+                        ui.painter().rect_stroke(
+                            n_rect,
+                            10.,
+                            Stroke::new(
+                                if busy || hov { 1.3_f32 } else { 1.0_f32 },
+                                design::mix(p.line, bcol, if busy || hov { 0.58 } else { 0.22 }),
+                            ),
+                            egui::StrokeKind::Inside,
+                        );
+                        let icon_r = egui::Rect::from_center_size(
+                            egui::pos2(n_rect.left() + 18., n_rect.center().y),
+                            Vec2::splat(18.),
+                        );
+                        if busy {
+                            design::orbital_core(ui, icon_r, bcol, true);
+                        } else if sess.is_locked_gate() {
+                            design::icon(ui.painter(), icon_r.shrink(2.), Icon::Lock, accent());
+                        } else {
+                            design::icon(
+                                ui.painter(),
+                                icon_r.shrink(2.),
+                                design::backend_icon(&sb),
+                                bcol,
+                            );
+                        }
+                        let tel = self
+                            .chats
+                            .get(&sk)
+                            .map(|c| {
+                                crate::model::analyze_turn(
+                                    &c.messages,
+                                    c.user_at,
+                                    busy,
+                                    &c.status,
+                                )
+                            })
+                            .unwrap_or_default();
+                        let sub_line = if sess.is_locked_gate() {
+                            "Защищено паролем".to_owned()
+                        } else if busy && !tel.active_target.is_empty() {
+                            tel.active_target.clone()
+                        } else if busy && !tel.active_headline.is_empty() {
+                            tel.active_headline.clone()
+                        } else {
+                            format!(
+                                "{} · {}",
+                                crate::model::backend_short_label(&sb),
+                                folder_name(&sess.cwd)
+                            )
+                        };
+                        let nc = ui.painter().with_clip_rect(n_rect.shrink2(Vec2::new(8., 4.)));
+                        nc.text(
+                            egui::pos2(n_rect.left() + 34., n_rect.top() + 16.),
+                            egui::Align2::LEFT_CENTER,
+                            model::shorten(&sess.title, 30),
+                            FontId::proportional(12.5),
+                            p.text,
+                        );
+                        nc.text(
+                            egui::pos2(n_rect.left() + 34., n_rect.bottom() - 14.),
+                            egui::Align2::LEFT_CENTER,
+                            model::shorten(&sub_line, 36),
+                            FontId::monospace(10.5),
+                            if busy { bcol } else { p.muted },
+                        );
+                        if tel.total_actions > 0 && n_rect.width() >= 220. {
+                            let pb = egui::Rect::from_min_size(
+                                egui::pos2(n_rect.right() - 56., n_rect.top() + 13.),
+                                Vec2::new(44., 5.),
+                            );
+                            design::phase_bar(ui.painter(), pb, &tel, light, p);
+                        }
+                        if n_resp
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .on_hover_text("Перейти к этой сессии")
+                            .clicked()
+                        {
+                            jump_to = Some((*sess).clone());
+                        }
+                    }
+                    if need_repaint {
+                        ctx.request_repaint_after(Duration::from_millis(28));
+                    }
+                }
+
+                ui.add_space(12.);
+                ui.horizontal(|ui| {
+                    if design::button(
+                        ui,
+                        "Команда агентов",
+                        Some(Icon::Cluster),
+                        Kind::Secondary,
+                        p,
+                        Vec2::new(164., 32.),
+                    )
+                    .clicked()
+                    {
+                        self.cluster_open = true;
+                        close = true;
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if design::button(ui, "Закрыть", None, Kind::Secondary, p, Vec2::new(98., 32.))
+                            .clicked()
+                        {
+                            close = true;
+                        }
+                    });
+                });
+            });
+
+        if response.should_close() {
+            close = true;
+        }
+        if let Some(sess) = jump_to {
+            self.radar_open = None;
+            self.select_chat(sess);
+        } else if close {
+            self.radar_open = None;
+        }
+    }
 }

@@ -5,13 +5,8 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
-import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.MutableTransitionState
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -33,6 +28,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -92,11 +88,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.SolidColor
@@ -107,6 +104,8 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -125,6 +124,8 @@ import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
+import kotlin.math.cos
+import kotlin.math.sin
 
 val LocalPalette = staticCompositionLocalOf { palette("graphite") }
 
@@ -169,7 +170,8 @@ fun RelayApp(vm: RelayViewModel) {
 
 enum class Glyph {
     RelayMark, Lock, Unlock, ShieldLock, Pin, Folder, FolderOpen,
-    Paperclip, Image, Terminal, Spark, Download, Server, Key, Check
+    Paperclip, Image, Terminal, Spark, Download, Server, Key, Check,
+    Orbit, Pulse, Bolt, Layers, Radar
 }
 
 @Composable
@@ -191,6 +193,98 @@ fun VectorGlyph(glyph: Glyph, tint: Color = LocalPalette.current.muted, size: Dp
                 drawCircle(tint, r, top)
                 drawCircle(tint, r, left)
                 drawCircle(tint, r, right)
+            }
+            Glyph.Orbit -> {
+                val c = Offset(w * 0.5f, h * 0.5f)
+                drawCircle(tint.copy(alpha = 0.18f), w * 0.38f, c)
+                drawArc(
+                    color = tint,
+                    startAngle = -35f,
+                    sweepAngle = 215f,
+                    useCenter = false,
+                    topLeft = Offset(w * 0.12f, h * 0.12f),
+                    size = Size(w * 0.76f, h * 0.76f),
+                    style = stroke,
+                )
+                drawArc(
+                    color = tint.copy(alpha = 0.65f),
+                    startAngle = 155f,
+                    sweepAngle = 115f,
+                    useCenter = false,
+                    topLeft = Offset(w * 0.24f, h * 0.24f),
+                    size = Size(w * 0.52f, h * 0.52f),
+                    style = stroke,
+                )
+                drawCircle(tint, w * 0.13f, c)
+                drawCircle(tint, w * 0.09f, Offset(w * 0.80f, h * 0.26f))
+            }
+            Glyph.Pulse -> {
+                val bars = floatArrayOf(0.32f, 0.72f, 1.0f, 0.58f, 0.36f)
+                val step = w * 0.16f
+                val startX = w * 0.18f
+                for (i in bars.indices) {
+                    val x = startX + i * step
+                    val half = h * 0.38f * bars[i]
+                    drawLine(
+                        color = if (i == 2) tint else tint.copy(alpha = 0.82f),
+                        start = Offset(x, h * 0.5f - half),
+                        end = Offset(x, h * 0.5f + half),
+                        strokeWidth = sw * 1.05f,
+                        cap = StrokeCap.Round,
+                    )
+                }
+            }
+            Glyph.Bolt -> {
+                val bolt = Path().apply {
+                    moveTo(w * 0.56f, h * 0.10f)
+                    lineTo(w * 0.22f, h * 0.54f)
+                    lineTo(w * 0.48f, h * 0.54f)
+                    lineTo(w * 0.42f, h * 0.90f)
+                    lineTo(w * 0.78f, h * 0.44f)
+                    lineTo(w * 0.52f, h * 0.44f)
+                    close()
+                }
+                drawPath(bolt, tint.copy(alpha = 0.18f))
+                drawPath(bolt, tint, style = stroke)
+            }
+            Glyph.Layers -> {
+                val topPlane = Path().apply {
+                    moveTo(w * 0.50f, h * 0.14f)
+                    lineTo(w * 0.86f, h * 0.33f)
+                    lineTo(w * 0.50f, h * 0.52f)
+                    lineTo(w * 0.14f, h * 0.33f)
+                    close()
+                }
+                val midPlane = Path().apply {
+                    moveTo(w * 0.16f, h * 0.51f)
+                    lineTo(w * 0.50f, h * 0.69f)
+                    lineTo(w * 0.84f, h * 0.51f)
+                }
+                val botPlane = Path().apply {
+                    moveTo(w * 0.16f, h * 0.68f)
+                    lineTo(w * 0.50f, h * 0.86f)
+                    lineTo(w * 0.84f, h * 0.68f)
+                }
+                drawPath(topPlane, tint.copy(alpha = 0.16f))
+                drawPath(topPlane, tint, style = stroke)
+                drawPath(midPlane, tint.copy(alpha = 0.85f), style = stroke)
+                drawPath(botPlane, tint.copy(alpha = 0.65f), style = stroke)
+            }
+            Glyph.Radar -> {
+                val c = Offset(w * 0.5f, h * 0.5f)
+                drawArc(
+                    color = tint.copy(alpha = 0.20f),
+                    startAngle = -65f,
+                    sweepAngle = 65f,
+                    useCenter = true,
+                    topLeft = Offset(w * 0.12f, h * 0.12f),
+                    size = Size(w * 0.76f, h * 0.76f),
+                )
+                drawCircle(tint, w * 0.38f, c, style = stroke)
+                drawCircle(tint.copy(alpha = 0.52f), w * 0.21f, c, style = Stroke(width = sw * 0.8f))
+                drawLine(tint, c, Offset(w * 0.77f, h * 0.23f), sw, StrokeCap.Round)
+                drawCircle(tint, w * 0.085f, c)
+                drawCircle(tint, w * 0.09f, Offset(w * 0.69f, h * 0.31f))
             }
             Glyph.Lock -> {
                 val archW = w * 0.44f
@@ -393,27 +487,138 @@ fun VectorGlyph(glyph: Glyph, tint: Color = LocalPalette.current.muted, size: Dp
     }
 }
 
-fun backendColor(p: Palette, backend: String): Color = when (backend) {
-    "codex" -> if (p.light) Color(0xFF17825D) else Color(0xFF53CFA1)
-    "agy" -> if (p.light) Color(0xFF2858D8) else Color(0xFF7CA6FF)
-    "api" -> p.amber
-    else -> p.accent
+/** Atmospheric top horizon bloom + 1dp specular border catchlight helpers. */
+@Composable
+fun AtmosphericHorizon(glowColor: Color, modifier: Modifier = Modifier) {
+    val p = LocalPalette.current
+    val animatedGlow by animateColorAsState(glowColor, tween(220), label = "horizon")
+    Canvas(modifier.fillMaxWidth().height(210.dp)) {
+        val w = size.width
+        val h = size.height
+        drawRect(
+            brush = Brush.verticalGradient(
+                colors = listOf(
+                    animatedGlow.copy(alpha = if (p.light) 0.09f else 0.13f),
+                    animatedGlow.copy(alpha = if (p.light) 0.03f else 0.045f),
+                    Color.Transparent,
+                ),
+                startY = 0f,
+                endY = h,
+            )
+        )
+        drawCircle(
+            brush = Brush.radialGradient(
+                colors = listOf(
+                    animatedGlow.copy(alpha = if (p.light) 0.13f else 0.20f),
+                    Color.Transparent,
+                ),
+                center = Offset(w * 0.5f, -h * 0.12f),
+                radius = w * 0.75f,
+            ),
+            radius = w * 0.75f,
+            center = Offset(w * 0.5f, -h * 0.12f),
+        )
+    }
+}
+
+fun Modifier.specularBorder(
+    shape: RoundedCornerShape,
+    topColor: Color,
+    bottomColor: Color,
+    width: Dp = 1.dp,
+): Modifier = this.border(width, Brush.verticalGradient(listOf(topColor, bottomColor)), shape)
+
+/** Multi-layered concentric orbital core emblem — zero infinite transitions so Robolectric stays instant. */
+@Composable
+fun OrbitalEmblem(color: Color, active: Boolean = true, size: Dp = 30.dp, modifier: Modifier = Modifier) {
+    val tone by animateColorAsState(color, tween(220), label = "orbTone")
+    val boost by animateFloatAsState(if (active) 1f else 0.65f, tween(220), label = "orbBoost")
+    Canvas(modifier.size(size)) {
+        val w = this.size.width
+        val r = this.size.minDimension * 0.44f
+        val c = Offset(w * 0.5f, this.size.height * 0.5f)
+        drawCircle(
+            brush = Brush.radialGradient(
+                colors = listOf(tone.copy(alpha = 0.28f * boost), Color.Transparent),
+                center = c,
+                radius = r * 1.15f,
+            ),
+            radius = r * 1.15f,
+            center = c,
+        )
+        val outerStroke = Stroke(width = (w * 0.068f).coerceAtLeast(1.4f), cap = StrokeCap.Round)
+        val innerStroke = Stroke(width = (w * 0.055f).coerceAtLeast(1.2f), cap = StrokeCap.Round)
+        drawCircle(tone.copy(alpha = 0.16f), r, c, style = outerStroke)
+        drawArc(
+            color = tone.copy(alpha = 0.92f * boost),
+            startAngle = -55f,
+            sweepAngle = 215f,
+            useCenter = false,
+            topLeft = Offset(c.x - r, c.y - r),
+            size = Size(r * 2f, r * 2f),
+            style = outerStroke,
+        )
+        val rInner = r * 0.64f
+        drawArc(
+            color = tone.copy(alpha = 0.65f * boost),
+            startAngle = 125f,
+            sweepAngle = 175f,
+            useCenter = false,
+            topLeft = Offset(c.x - rInner, c.y - rInner),
+            size = Size(rInner * 2f, rInner * 2f),
+            style = innerStroke,
+        )
+        drawCircle(tone, r * 0.24f, c)
+        if (active) {
+            val ang = Math.toRadians(-35.0)
+            val sat = Offset(c.x + (r * cos(ang)).toFloat(), c.y + (r * sin(ang)).toFloat())
+            drawCircle(tone, (w * 0.075f).coerceAtLeast(1.8f), sat)
+        }
+    }
+}
+
+/** 5-bar geometric telemetry waveform — crisp on screen, instant idle in Robolectric. */
+@Composable
+fun NeuralWaveform(color: Color, active: Boolean = true, width: Dp = 22.dp, height: Dp = 13.dp) {
+    val tone by animateColorAsState(color, tween(220), label = "waveColor")
+    val gain by animateFloatAsState(if (active) 1f else 0.45f, tween(220), label = "waveGain")
+    Canvas(Modifier.width(width).height(height)) {
+        val levels = floatArrayOf(0.42f, 0.82f, 1.0f, 0.68f, 0.46f)
+        val sw = (size.width * 0.11f).coerceAtLeast(1.6f)
+        val gap = (size.width - sw) / (levels.size - 1).coerceAtLeast(1)
+        for (i in levels.indices) {
+            val x = sw * 0.5f + i * gap
+            val hBar = (size.height * 0.45f * levels[i] * gain).coerceAtLeast(sw * 0.6f)
+            drawLine(
+                color = if (i == 2) tone else tone.copy(alpha = 0.78f),
+                start = Offset(x, size.height * 0.5f - hBar),
+                end = Offset(x, size.height * 0.5f + hBar),
+                strokeWidth = sw,
+                cap = StrokeCap.Round,
+            )
+        }
+    }
 }
 
 @Composable
-fun BackendBadge(backend: String, compact: Boolean = false, onClick: (() -> Unit)? = null) {
+fun BackendBadge(backend: String, compact: Boolean = false, showDot: Boolean = false, onClick: (() -> Unit)? = null) {
     val p = LocalPalette.current
     val tone = backendColor(p, backend)
     val label = backendShortLabel(backend)
     val shape = RoundedCornerShape(if (compact) 6.dp else 8.dp)
-    Box(
+    Row(
         Modifier
             .clip(shape)
-            .background(tone.copy(alpha = if (p.light) 0.11f else 0.15f))
-            .border(1.dp, tone.copy(alpha = 0.34f), shape)
+            .background(tone.copy(alpha = if (p.light) 0.12f else 0.16f))
+            .specularBorder(shape, tone.copy(alpha = 0.48f), tone.copy(alpha = 0.24f))
             .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
             .padding(horizontal = if (compact) 6.dp else 8.dp, vertical = if (compact) 2.dp else 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
+        if (showDot) {
+            Box(Modifier.size(if (compact) 5.dp else 6.dp).clip(CircleShape).background(tone))
+        }
         Label(label, if (compact) 10.5.sp else 11.5.sp, tone, FontWeight.SemiBold, maxLines = 1)
     }
 }
@@ -441,10 +646,10 @@ fun Label(
 @Composable
 fun IconButton(icon: ImageVector, hint: String, tint: Color = LocalPalette.current.muted, onClick: () -> Unit) {
     Box(
-        Modifier.size(38.dp).clip(RoundedCornerShape(11.dp)).clickable(onClick = onClick),
+        Modifier.size(36.dp).clip(RoundedCornerShape(11.dp)).clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        Icon(icon, contentDescription = hint, tint = tint, modifier = Modifier.size(20.dp))
+        Icon(icon, contentDescription = hint, tint = tint, modifier = Modifier.size(19.dp))
     }
 }
 
@@ -453,10 +658,11 @@ fun GlyphButton(glyph: Glyph, hint: String, tint: Color = LocalPalette.current.m
     val p = LocalPalette.current
     Box(
         Modifier
-            .size(38.dp)
+            .size(36.dp)
             .clip(RoundedCornerShape(11.dp))
             .background(if (highlighted) tint.copy(alpha = 0.14f) else Color.Transparent)
-            .then(if (highlighted) Modifier.border(1.dp, tint.copy(alpha = 0.35f), RoundedCornerShape(11.dp)) else Modifier)
+            .then(if (highlighted) Modifier.border(1.dp, tint.copy(alpha = 0.38f), RoundedCornerShape(11.dp)) else Modifier)
+            .semantics { contentDescription = hint }
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
@@ -494,14 +700,14 @@ fun SecondaryPillButton(text: String, glyph: Glyph? = null, tint: Color = LocalP
         Modifier
             .clip(shape)
             .background(p.elevated)
-            .border(1.dp, p.borderSubtle, shape)
+            .specularBorder(shape, p.specularTop, p.borderSubtle)
             .clickable(enabled = enabled, onClick = onClick)
-            .padding(horizontal = 11.dp, vertical = 7.dp),
+            .padding(horizontal = 10.dp, vertical = 6.5.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(5.dp),
     ) {
-        if (glyph != null) VectorGlyph(glyph, if (enabled) tint else p.muted, size = 14.dp)
-        Label(text, 12.5.sp, if (enabled) tint else p.muted, FontWeight.Medium, maxLines = 1)
+        if (glyph != null) VectorGlyph(glyph, if (enabled) tint else p.muted, size = 13.5.dp)
+        Label(text, 12.sp, if (enabled) tint else p.muted, FontWeight.Medium, maxLines = 1)
     }
 }
 
@@ -584,7 +790,7 @@ fun TopBar(
     actions: @Composable () -> Unit = {},
 ) {
     val p = LocalPalette.current
-    Column(Modifier.fillMaxWidth().background(p.mix(p.rail, p.side, 0.5f))) {
+    Column(Modifier.fillMaxWidth().background(p.mix(p.rail, p.side, 0.55f).copy(alpha = 0.92f))) {
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 7.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -611,21 +817,17 @@ fun TopBar(
     }
 }
 
+/** Finite telemetry indicator — settles in <250ms in Robolectric with zero infinite transitions! */
 @Composable
 fun Dots(color: Color) {
-    val t = rememberInfiniteTransition(label = "dots")
-    Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-        for (i in 0 until 3) {
-            val a by t.animateFloat(0.3f, 1f, infiniteRepeatable(tween(520, delayMillis = i * 140), RepeatMode.Reverse), label = "dot$i")
-            Box(Modifier.size(6.dp).alpha(a).clip(CircleShape).background(color))
-        }
-    }
+    NeuralWaveform(color = color, active = true, width = 18.dp, height = 12.dp)
 }
 
 /** Bottom-anchored modal sheet built on standard `Dialog` so Robolectric tests stay fast and reliable. */
 @Composable
 fun Sheet(onDismiss: () -> Unit, content: @Composable () -> Unit) {
     val p = LocalPalette.current
+    val sheetShape = RoundedCornerShape(24.dp)
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false),
@@ -645,9 +847,9 @@ fun Sheet(onDismiss: () -> Unit, content: @Composable () -> Unit) {
                 Modifier
                     .fillMaxWidth()
                     .widthIn(max = 520.dp)
-                    .clip(RoundedCornerShape(24.dp))
+                    .clip(sheetShape)
                     .background(p.elevated)
-                    .border(1.dp, p.line, RoundedCornerShape(24.dp))
+                    .specularBorder(sheetShape, p.specularTop, p.line)
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,
@@ -681,130 +883,143 @@ fun ServersScreen(vm: RelayViewModel) {
     var apiEditing by remember { mutableStateOf<ServerProfile?>(null) }
     var agentsSheet by remember { mutableStateOf(false) }
 
-    Column(Modifier.fillMaxSize()) {
-        TopBar("Relay", "Claude Code · Codex · Antigravity · API") {
-            IconButton(Icons.Default.Settings, "Настройки") { vm.screen = Screen.Settings }
-        }
-        if (vm.notice.isNotEmpty()) Notice(vm.notice) { vm.notice = "" }
-        if (vm.crash.isNotEmpty()) CrashCard(vm.crash) { vm.crash = "" }
+    Box(Modifier.fillMaxSize()) {
+        AtmosphericHorizon(p.accent)
+        Column(Modifier.fillMaxSize()) {
+            TopBar("Relay", "Claude Code · Codex · Antigravity · API") {
+                IconButton(Icons.Default.Settings, "Настройки") { vm.screen = Screen.Settings }
+            }
+            if (vm.notice.isNotEmpty()) Notice(vm.notice) { vm.notice = "" }
+            if (vm.crash.isNotEmpty()) CrashCard(vm.crash) { vm.crash = "" }
 
-        LazyColumn(
-            Modifier.weight(1f),
-            contentPadding = PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            if (vm.servers.isEmpty()) {
-                item {
-                    Column(
-                        Modifier
-                            .fillMaxWidth()
-                            .padding(top = 18.dp)
-                            .clip(RoundedCornerShape(22.dp))
-                            .background(p.surface)
-                            .border(1.dp, p.borderSubtle, RoundedCornerShape(22.dp))
-                            .padding(24.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                    ) {
-                        Box(
+            LazyColumn(
+                Modifier.weight(1f),
+                contentPadding = PaddingValues(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                if (vm.servers.isEmpty()) {
+                    item {
+                        val heroShape = RoundedCornerShape(24.dp)
+                        Column(
                             Modifier
-                                .size(60.dp)
-                                .clip(RoundedCornerShape(18.dp))
-                                .background(p.subtleAccent)
-                                .border(1.dp, p.accent.copy(alpha = 0.35f), RoundedCornerShape(18.dp)),
-                            contentAlignment = Alignment.Center,
+                                .fillMaxWidth()
+                                .padding(top = 14.dp)
+                                .clip(heroShape)
+                                .background(
+                                    Brush.verticalGradient(
+                                        listOf(p.mix(p.surface, p.accent, 0.08f), p.surface)
+                                    )
+                                )
+                                .specularBorder(heroShape, p.accent.copy(alpha = 0.42f), p.borderSubtle)
+                                .padding(24.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
                         ) {
-                            VectorGlyph(Glyph.RelayMark, p.accent, size = 32.dp)
-                        }
-                        Spacer(Modifier.height(18.dp))
-                        Label("Все проекты. Одно пространство.", 20.sp, p.text, FontWeight.SemiBold)
-                        Spacer(Modifier.height(8.dp))
-                        Label(
-                            "Подключи свой сервер по SSH и продолжай общие сессии с ПК — процессы работают на сервере даже без приложения.",
-                            13.5.sp,
-                            p.muted,
-                        )
-                        Spacer(Modifier.height(16.dp))
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            for (b in BACKENDS) BackendBadge(b)
-                        }
-                        Spacer(Modifier.height(18.dp))
-                        SecondaryPillButton("Посмотреть без сервера — демо", Glyph.Spark, p.accent) { vm.startDemo() }
-                    }
-                }
-            } else {
-                items(vm.servers, key = { it.id }) { s ->
-                    val online = vm.current?.id == s.id && vm.link == Link.Online
-                    val cardShape = RoundedCornerShape(18.dp)
-                    Column(
-                        Modifier
-                            .fillMaxWidth()
-                            .clip(cardShape)
-                            .background(p.surface)
-                            .border(1.dp, if (online) p.accent.copy(alpha = 0.5f) else p.line, cardShape)
-                            .clickable {
-                                if (online) vm.screen = Screen.Sessions
-                                else vm.savedPassword(s)?.let { vm.connect(s, it) } ?: run { asking = s }
-                            }
-                            .padding(15.dp),
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
                             Box(
                                 Modifier
-                                    .size(44.dp)
-                                    .clip(RoundedCornerShape(13.dp))
+                                    .size(66.dp)
+                                    .clip(RoundedCornerShape(20.dp))
                                     .background(p.subtleAccent)
-                                    .border(1.dp, p.accent.copy(alpha = 0.25f), RoundedCornerShape(13.dp)),
+                                    .specularBorder(RoundedCornerShape(20.dp), p.accent.copy(alpha = 0.5f), p.accent.copy(alpha = 0.2f)),
                                 contentAlignment = Alignment.Center,
                             ) {
-                                VectorGlyph(Glyph.Server, p.accent, size = 21.dp)
+                                OrbitalEmblem(p.accent, active = true, size = 40.dp)
                             }
-                            Column(Modifier.weight(1f).padding(horizontal = 13.dp)) {
-                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                                    Label(s.name.ifEmpty { s.host }, 16.sp, p.text, FontWeight.SemiBold, maxLines = 1, modifier = Modifier.weight(1f, fill = false))
-                                    BackendBadge(s.effectiveBackend(), compact = true)
-                                }
-                                Spacer(Modifier.height(2.dp))
-                                Text(
-                                    "${s.user}@${s.host}" + (if (s.port != 22) ":${s.port}" else "") + " · ${s.cwd}",
-                                    color = p.muted,
-                                    fontSize = 12.sp,
-                                    fontFamily = FontFamily.Monospace,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
+                            Spacer(Modifier.height(18.dp))
+                            Label("Все проекты. Одно пространство.", 20.sp, p.text, FontWeight.SemiBold)
+                            Spacer(Modifier.height(8.dp))
+                            Label(
+                                "Подключи свой сервер по SSH и продолжай общие сессии с ПК — процессы работают на сервере даже без приложения.",
+                                13.5.sp,
+                                p.muted,
+                            )
+                            Spacer(Modifier.height(16.dp))
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                for (b in BACKENDS) BackendBadge(b, showDot = true)
                             }
-                            if (online) StatusDot(Link.Online)
-                            IconButton(Icons.Default.MoreVert, "Изменить") { editing = s }
-                        }
-                        Spacer(Modifier.height(10.dp))
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            SecondaryPillButton("API", Glyph.Key, p.accent) { apiEditing = s }
-                            if (online) {
-                                SecondaryPillButton("Агенты", Glyph.Terminal, p.text) { agentsSheet = true }
-                            }
-                            Spacer(Modifier.weight(1f))
-                            Label(if (online) "Открыть сессии →" else "Подключиться →", 12.5.sp, if (online) p.green else p.accent, FontWeight.Medium)
+                            Spacer(Modifier.height(18.dp))
+                            SecondaryPillButton("Посмотреть без сервера — демо", Glyph.Spark, p.accent) { vm.startDemo() }
                         }
                     }
-                }
-                item {
-                    Box(Modifier.fillMaxWidth().padding(top = 4.dp), contentAlignment = Alignment.Center) {
-                        GhostButton("Посмотреть без сервера — демо", p.accent) { vm.startDemo() }
+                } else {
+                    items(vm.servers, key = { it.id }) { s ->
+                        val online = vm.current?.id == s.id && vm.link == Link.Online
+                        val tone = backendColor(p, s.effectiveBackend())
+                        val cardShape = RoundedCornerShape(18.dp)
+                        Column(
+                            Modifier
+                                .fillMaxWidth()
+                                .clip(cardShape)
+                                .background(p.surface)
+                                .specularBorder(
+                                    cardShape,
+                                    if (online) p.accent.copy(alpha = 0.58f) else p.specularTop,
+                                    if (online) p.accent.copy(alpha = 0.28f) else p.line,
+                                )
+                                .clickable {
+                                    if (online) vm.screen = Screen.Sessions
+                                    else vm.savedPassword(s)?.let { vm.connect(s, it) } ?: run { asking = s }
+                                }
+                                .padding(15.dp),
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Box(
+                                    Modifier
+                                        .size(44.dp)
+                                        .clip(RoundedCornerShape(13.dp))
+                                        .background(tone.copy(alpha = 0.14f))
+                                        .border(1.dp, tone.copy(alpha = 0.32f), RoundedCornerShape(13.dp)),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    VectorGlyph(Glyph.Server, tone, size = 21.dp)
+                                }
+                                Column(Modifier.weight(1f).padding(horizontal = 13.dp)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                                        Label(s.name.ifEmpty { s.host }, 16.sp, p.text, FontWeight.SemiBold, maxLines = 1, modifier = Modifier.weight(1f, fill = false))
+                                        BackendBadge(s.effectiveBackend(), compact = true, showDot = true)
+                                    }
+                                    Spacer(Modifier.height(2.dp))
+                                    Text(
+                                        "${s.user}@${s.host}" + (if (s.port != 22) ":${s.port}" else "") + " · ${s.cwd}",
+                                        color = p.muted,
+                                        fontSize = 12.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                                if (online) StatusDot(Link.Online)
+                                IconButton(Icons.Default.MoreVert, "Изменить") { editing = s }
+                            }
+                            Spacer(Modifier.height(10.dp))
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                SecondaryPillButton("API", Glyph.Key, p.accent) { apiEditing = s }
+                                if (online) {
+                                    SecondaryPillButton("Агенты", Glyph.Terminal, p.text) { agentsSheet = true }
+                                }
+                                Spacer(Modifier.weight(1f))
+                                Label(if (online) "Открыть сессии →" else "Подключиться →", 12.5.sp, if (online) p.green else p.accent, FontWeight.Medium)
+                            }
+                        }
+                    }
+                    item {
+                        Box(Modifier.fillMaxWidth().padding(top = 4.dp), contentAlignment = Alignment.Center) {
+                            GhostButton("Посмотреть без сервера — демо", p.accent) { vm.startDemo() }
+                        }
                     }
                 }
             }
-        }
-        Column(Modifier.fillMaxWidth().background(p.mix(p.rail, p.base, 0.5f))) {
-            HorizontalDivider(thickness = 1.dp, color = p.borderSubtle)
-            Box(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
-                PrimaryButton("Добавить сервер", modifier = Modifier.fillMaxWidth()) { editing = ServerProfile() }
+            Column(Modifier.fillMaxWidth().background(p.mix(p.rail, p.base, 0.5f))) {
+                HorizontalDivider(thickness = 1.dp, color = p.borderSubtle)
+                Box(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
+                    PrimaryButton("Добавить сервер", modifier = Modifier.fillMaxWidth()) { editing = ServerProfile() }
+                }
             }
         }
     }
@@ -1075,120 +1290,139 @@ fun SessionsScreen(vm: RelayViewModel) {
     var naming by remember { mutableStateOf<Pair<Folder?, Session?>?>(null) }
     var locking by remember { mutableStateOf<Session?>(null) }
     var agentsSheet by remember { mutableStateOf(false) }
+    var radarSheet by remember { mutableStateOf(false) }
 
     BackHandler { if (vm.demo) vm.leaveDemo() else vm.screen = Screen.Servers }
 
-    Column(Modifier.fillMaxSize().background(p.side)) {
-        val status = when (vm.link) {
-            Link.Online -> "на связи"
-            Link.Connecting -> "подключаемся…"
-            Link.Off -> "нет связи"
-        }
-        TopBar(
-            title = server?.name?.ifEmpty { server.host } ?: "Сессии",
-            subtitle = status,
-            link = vm.link,
-            onBack = { if (vm.demo) vm.leaveDemo() else vm.screen = Screen.Servers },
-        ) {
-            SecondaryPillButton("Агенты", Glyph.Terminal, p.accent, enabled = vm.link == Link.Online) { agentsSheet = true }
-            IconButton(Icons.Default.Search, "Поиск") { searching = !searching; if (!searching) query = "" }
-            IconButton(Icons.Default.Refresh, "Обновить") { vm.refresh() }
-            IconButton(Icons.Default.Settings, "Настройки") { vm.screen = Screen.Settings }
-        }
-        if (vm.notice.isNotEmpty()) Notice(vm.notice) { vm.notice = "" }
-        AnimatedVisibility(searching) {
-            Box(Modifier.padding(horizontal = 12.dp, vertical = 6.dp)) {
-                Field(query, { query = it }, "Поиск по названию и папке")
-            }
-        }
-        if (vm.link == Link.Off && server != null) {
-            Box(Modifier.padding(14.dp)) {
-                PrimaryButton("Подключиться снова", modifier = Modifier.fillMaxWidth()) {
-                    vm.savedPassword(server)?.let { vm.connect(server, it) } ?: run { vm.screen = Screen.Servers }
-                }
-            }
-        }
-        val q = query.lowercase()
-        val matches = { s: Session -> q.isEmpty() || s.title.lowercase().contains(q) || s.autoTitle.lowercase().contains(q) || s.cwd.lowercase().contains(q) }
-        val known = vm.folders.map { it.id }.toSet()
-        val pinned = vm.sessions.filter { it.pinned > 0 && matches(it) }.sortedByDescending { it.pinned }
-        val loose = vm.sessions.filter { it.pinned == 0.0 && it.folder !in known && matches(it) }
+    val activeSessions = vm.sessions.filter { s ->
+        s.running || s.id in vm.running || vm.chats[s.id]?.let { it.version >= 0 && it.transcript.busy } == true
+    }
+    val horizonTone = activeSessions.firstOrNull()?.let { backendColor(p, it.backend.ifBlank { server?.effectiveBackend() ?: "claude" }) } ?: p.accent
 
-        LazyColumn(
-            Modifier.weight(1f),
-            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            if (pinned.isNotEmpty()) {
-                item(key = "h-pinned") { Heading(Glyph.Pin, "Закреплённые", pinned.size) }
-                items(pinned, key = { "p" + it.id }) { s ->
-                    SessionRow(vm, s, { renaming = s }, { moving = s }, { locking = s }, Modifier.animateItem())
+    Box(Modifier.fillMaxSize().background(p.side)) {
+        AtmosphericHorizon(horizonTone)
+        Column(Modifier.fillMaxSize()) {
+            val status = when (vm.link) {
+                Link.Online -> "на связи"
+                Link.Connecting -> "подключаемся…"
+                Link.Off -> "нет связи"
+            }
+            TopBar(
+                title = server?.name?.ifEmpty { server.host } ?: "Сессии",
+                subtitle = status,
+                link = vm.link,
+                onBack = { if (vm.demo) vm.leaveDemo() else vm.screen = Screen.Servers },
+            ) {
+                GlyphButton(
+                    glyph = Glyph.Radar,
+                    hint = "Радар агентов",
+                    tint = if (activeSessions.isNotEmpty()) p.green else p.accent,
+                    highlighted = activeSessions.isNotEmpty(),
+                ) { radarSheet = true }
+                SecondaryPillButton("Агенты", Glyph.Terminal, p.accent, enabled = vm.link == Link.Online) { agentsSheet = true }
+                IconButton(Icons.Default.Search, "Поиск") { searching = !searching; if (!searching) query = "" }
+                IconButton(Icons.Default.Refresh, "Обновить") { vm.refresh() }
+                IconButton(Icons.Default.Settings, "Настройки") { vm.screen = Screen.Settings }
+            }
+            if (vm.notice.isNotEmpty()) Notice(vm.notice) { vm.notice = "" }
+            AnimatedVisibility(searching) {
+                Box(Modifier.padding(horizontal = 12.dp, vertical = 6.dp)) {
+                    Field(query, { query = it }, "Поиск по названию и папке")
                 }
             }
-            for (folder in vm.folders) {
-                val inside = vm.sessions.filter { it.pinned == 0.0 && it.folder == folder.id && matches(it) }
-                if (q.isNotEmpty() && inside.isEmpty()) continue
-                val open = folder.id !in vm.collapsed || q.isNotEmpty()
-                item(key = "f-" + folder.id) {
-                    FolderHeading(folder, inside.size, open, { vm.toggleFolder(folder) }, { naming = folder to null }, { vm.deleteFolder(folder) })
-                }
-                if (open) {
-                    if (inside.isEmpty()) {
-                        item(key = "e-" + folder.id) {
-                            Label("Пусто — перенеси сюда сессию через «⋮»", 12.sp, p.muted, modifier = Modifier.padding(start = 36.dp, top = 2.dp, bottom = 6.dp))
-                        }
+            if (vm.link == Link.Off && server != null) {
+                Box(Modifier.padding(14.dp)) {
+                    PrimaryButton("Подключиться снова", modifier = Modifier.fillMaxWidth()) {
+                        vm.savedPassword(server)?.let { vm.connect(server, it) } ?: run { vm.screen = Screen.Servers }
                     }
-                    items(inside, key = { "s" + it.id }) { s ->
+                }
+            }
+            if (activeSessions.isNotEmpty() && vm.link == Link.Online) {
+                ActiveAgentsBanner(activeSessions, onClick = { radarSheet = true })
+            }
+            val q = query.lowercase()
+            val matches = { s: Session -> q.isEmpty() || s.title.lowercase().contains(q) || s.autoTitle.lowercase().contains(q) || s.cwd.lowercase().contains(q) }
+            val known = vm.folders.map { it.id }.toSet()
+            val pinned = vm.sessions.filter { it.pinned > 0 && matches(it) }.sortedByDescending { it.pinned }
+            val loose = vm.sessions.filter { it.pinned == 0.0 && it.folder !in known && matches(it) }
+
+            LazyColumn(
+                Modifier.weight(1f),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(5.dp),
+            ) {
+                if (pinned.isNotEmpty()) {
+                    item(key = "h-pinned") { Heading(Glyph.Pin, "Закреплённые", pinned.size) }
+                    items(pinned, key = { "p" + it.id }) { s ->
                         SessionRow(vm, s, { renaming = s }, { moving = s }, { locking = s }, Modifier.animateItem())
                     }
                 }
-            }
-            var group = ""
-            for (s in loose) {
-                val heading = dayGroup(s.modified)
-                if (heading != group) {
-                    group = heading
-                    item(key = "d-$heading") { Heading(null, heading, 0) }
+                for (folder in vm.folders) {
+                    val inside = vm.sessions.filter { it.pinned == 0.0 && it.folder == folder.id && matches(it) }
+                    if (q.isNotEmpty() && inside.isEmpty()) continue
+                    val open = folder.id !in vm.collapsed || q.isNotEmpty()
+                    item(key = "f-" + folder.id) {
+                        FolderHeading(folder, inside.size, open, { vm.toggleFolder(folder) }, { naming = folder to null }, { vm.deleteFolder(folder) })
+                    }
+                    if (open) {
+                        if (inside.isEmpty()) {
+                            item(key = "e-" + folder.id) {
+                                Label("Пусто — перенеси сюда сессию через «⋮»", 12.sp, p.muted, modifier = Modifier.padding(start = 36.dp, top = 2.dp, bottom = 6.dp))
+                            }
+                        }
+                        items(inside, key = { "s" + it.id }) { s ->
+                            SessionRow(vm, s, { renaming = s }, { moving = s }, { locking = s }, Modifier.animateItem())
+                        }
+                    }
                 }
-                item(key = "l" + s.id) {
-                    SessionRow(vm, s, { renaming = s }, { moving = s }, { locking = s }, Modifier.animateItem())
+                var group = ""
+                for (s in loose) {
+                    val heading = dayGroup(s.modified)
+                    if (heading != group) {
+                        group = heading
+                        item(key = "d-$heading") { Heading(null, heading, 0) }
+                    }
+                    item(key = "l" + s.id) {
+                        SessionRow(vm, s, { renaming = s }, { moving = s }, { locking = s }, Modifier.animateItem())
+                    }
                 }
-            }
-            if (vm.sessions.isEmpty()) {
-                item {
-                    Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
-                        when {
-                            vm.link == Link.Connecting || (vm.link == Link.Online && !vm.sessionsLoaded) -> Dots(p.muted)
-                            vm.link == Link.Online -> Label("Пока нет ни одной сессии", 13.5.sp, p.muted)
-                            else -> Label("Подключись, чтобы увидеть сессии", 13.5.sp, p.muted)
+                if (vm.sessions.isEmpty()) {
+                    item {
+                        Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
+                            when {
+                                vm.link == Link.Connecting || (vm.link == Link.Online && !vm.sessionsLoaded) -> Dots(p.muted)
+                                vm.link == Link.Online -> Label("Пока нет ни одной сессии", 13.5.sp, p.muted)
+                                else -> Label("Подключись, чтобы увидеть сессии", 13.5.sp, p.muted)
+                            }
                         }
                     }
                 }
             }
-        }
 
-        Column(Modifier.fillMaxWidth().background(p.mix(p.rail, p.side, 0.55f))) {
-            HorizontalDivider(thickness = 1.dp, color = p.borderSubtle)
-            Row(Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Row(
-                    Modifier
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(p.surface)
-                        .border(1.dp, p.line, RoundedCornerShape(12.dp))
-                        .clickable(enabled = vm.link == Link.Online) { naming = null to null }
-                        .padding(horizontal = 15.dp, vertical = 11.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    VectorGlyph(Glyph.Folder, p.muted, size = 15.dp)
-                    Label("+ Папка", 14.sp, p.text, FontWeight.Medium)
+            Column(Modifier.fillMaxWidth().background(p.mix(p.rail, p.side, 0.55f))) {
+                HorizontalDivider(thickness = 1.dp, color = p.borderSubtle)
+                Row(Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(
+                        Modifier
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(p.surface)
+                            .specularBorder(RoundedCornerShape(12.dp), p.specularTop, p.line)
+                            .clickable(enabled = vm.link == Link.Online) { naming = null to null }
+                            .padding(horizontal = 15.dp, vertical = 11.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        VectorGlyph(Glyph.Folder, p.muted, size = 15.dp)
+                        Label("+ Папка", 14.sp, p.text, FontWeight.Medium)
+                    }
+                    PrimaryButton("Новая сессия", vm.link == Link.Online, Modifier.weight(1f)) { vm.newChat() }
                 }
-                PrimaryButton("Новая сессия", vm.link == Link.Online, Modifier.weight(1f)) { vm.newChat() }
             }
         }
     }
 
     if (agentsSheet) AgentsSheet(vm) { agentsSheet = false }
+    if (radarSheet) AgentRadarSheet(vm) { radarSheet = false }
     renaming?.let { s ->
         NameDialog("Название сессии", s.title, "Пусто — вернуть название от агента", { renaming = null }) {
             vm.rename(s, it)
@@ -1217,6 +1451,61 @@ fun SessionsScreen(vm: RelayViewModel) {
     }
     locking?.let { s ->
         SessionLockDialog(vm, s.id, currentlyLocked = s.locked, currentlyUnlocked = s.unlocked) { locking = null }
+    }
+}
+
+@Composable
+fun ActiveAgentsBanner(activeSessions: List<Session>, onClick: () -> Unit) {
+    val p = LocalPalette.current
+    val leadBackend = activeSessions.first().backend.ifBlank { "claude" }
+    val leadTone = backendColor(p, leadBackend)
+    val shape = RoundedCornerShape(16.dp)
+    val count = activeSessions.size
+    val word = when {
+        count % 10 == 1 && count % 100 != 11 -> "агент активен"
+        count % 10 in 2..4 && count % 100 !in 12..14 -> "агента активны"
+        else -> "агентов активны"
+    }
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 6.dp)
+            .clip(shape)
+            .background(
+                Brush.horizontalGradient(
+                    listOf(
+                        p.mix(p.elevated, leadTone, if (p.light) 0.10f else 0.15f),
+                        p.elevated,
+                    )
+                )
+            )
+            .specularBorder(shape, leadTone.copy(alpha = 0.55f), p.borderSubtle)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        OrbitalEmblem(leadTone, active = true, size = 30.dp)
+        Column(Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Label("$count $word на сервере", 13.sp, p.text, FontWeight.SemiBold, maxLines = 1)
+                NeuralWaveform(leadTone, active = true, width = 18.dp, height = 11.dp)
+            }
+            val names = activeSessions.joinToString(" · ") { if (it.isLockedGate()) "Защищённая сессия" else it.title }
+            Label(names, 11.5.sp, p.muted, maxLines = 1)
+        }
+        Row(
+            Modifier
+                .clip(RoundedCornerShape(9.dp))
+                .background(leadTone.copy(alpha = 0.15f))
+                .border(1.dp, leadTone.copy(alpha = 0.38f), RoundedCornerShape(9.dp))
+                .padding(horizontal = 9.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            VectorGlyph(Glyph.Radar, leadTone, size = 13.dp)
+            Label("Радар", 11.5.sp, leadTone, FontWeight.SemiBold, maxLines = 1)
+        }
     }
 }
 
@@ -1385,25 +1674,33 @@ fun SessionRow(
     val p = LocalPalette.current
     var menu by remember { mutableStateOf(false) }
     var confirm by remember { mutableStateOf(false) }
-    val busy = vm.chats[s.id]?.let { it.version >= 0 && it.transcript.busy } == true || s.id in vm.running
+    val busy = vm.chats[s.id]?.let { it.version >= 0 && it.transcript.busy } == true || s.id in vm.running || s.running
     val selected = vm.selected == s.id
-    val shape = RoundedCornerShape(14.dp)
+    val shape = RoundedCornerShape(15.dp)
     val lockedGate = s.isLockedGate()
+    val effectiveBackend = s.backend.takeIf { it in BACKENDS } ?: vm.chats[s.id]?.activeBackend() ?: vm.current?.effectiveBackend() ?: "claude"
+    val engineTone = backendColor(p, effectiveBackend)
 
     Box(modifier) {
         Row(
             Modifier
                 .fillMaxWidth()
                 .clip(shape)
-                .background(if (selected) p.elevated else p.surface.copy(alpha = 0.72f))
-                .border(
-                    width = 1.dp,
-                    color = when {
-                        selected -> p.accent.copy(alpha = 0.55f)
-                        lockedGate -> p.amber.copy(alpha = 0.35f)
+                .background(if (selected || busy) p.elevated else p.surface.copy(alpha = 0.80f))
+                .specularBorder(
+                    shape = shape,
+                    topColor = when {
+                        busy -> engineTone.copy(alpha = 0.55f)
+                        selected -> p.accent.copy(alpha = 0.58f)
+                        lockedGate -> p.amber.copy(alpha = 0.42f)
+                        else -> p.specularTop.copy(alpha = 0.7f)
+                    },
+                    bottomColor = when {
+                        busy -> engineTone.copy(alpha = 0.22f)
+                        selected -> p.accent.copy(alpha = 0.25f)
+                        lockedGate -> p.amber.copy(alpha = 0.22f)
                         else -> p.borderSubtle
                     },
-                    shape = shape,
                 )
                 .combinedClickable(onClick = { vm.open(s) }, onLongClick = { menu = true })
                 .padding(start = if (selected || busy) 0.dp else 12.dp, top = 10.dp, bottom = 10.dp, end = 4.dp),
@@ -1412,11 +1709,11 @@ fun SessionRow(
             if (selected || busy) {
                 Box(
                     Modifier
-                        .padding(start = 4.dp, end = 8.dp)
+                        .padding(start = 5.dp, end = 9.dp)
                         .width(3.dp)
                         .height(30.dp)
                         .clip(CircleShape)
-                        .background(if (busy) p.green else p.accent),
+                        .background(if (busy) engineTone else p.accent),
                 )
             }
             Column(Modifier.weight(1f)) {
@@ -1427,28 +1724,30 @@ fun SessionRow(
                             tint = if (s.unlocked) p.accent else p.amber,
                             size = 14.dp,
                         )
+                    } else {
+                        Box(Modifier.size(6.dp).clip(CircleShape).background(engineTone.copy(alpha = if (busy) 1f else 0.7f)))
                     }
                     Label(
                         text = if (lockedGate && s.title.isBlank()) "Защищённая сессия" else s.title,
                         size = 15.sp,
-                        color = if (selected) p.text else p.mix(p.text, p.muted, 0.14f),
-                        weight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                        color = if (selected || busy) p.text else p.mix(p.text, p.muted, 0.12f),
+                        weight = if (selected || busy) FontWeight.SemiBold else FontWeight.Medium,
                         maxLines = 1,
                         modifier = Modifier.weight(1f, fill = false),
                     )
-                    if (s.backend in setOf("codex", "agy", "api")) {
-                        BackendBadge(s.backend, compact = true)
+                    if (s.backend in setOf("codex", "agy", "api") || busy) {
+                        BackendBadge(effectiveBackend, compact = true)
                     }
                 }
                 Spacer(Modifier.height(2.dp))
                 when {
                     lockedGate -> Label("Защищённая сессия · нужен пароль", 12.sp, p.amber, maxLines = 1)
-                    busy -> Label("работает · ${folderName(s.cwd)}", 12.sp, p.accent, maxLines = 1)
+                    busy -> Label("работает · ${folderName(s.cwd)}", 12.sp, engineTone, maxLines = 1)
                     else -> Label("${folderName(s.cwd)} · ${relative(s.modified)}", 12.sp, p.muted, maxLines = 1)
                 }
             }
             if (busy) {
-                Dots(p.accent)
+                NeuralWaveform(engineTone, active = true, width = 20.dp, height = 12.dp)
                 Spacer(Modifier.width(4.dp))
             }
             IconButton(Icons.Default.MoreVert, "Меню") { menu = true }
@@ -1508,7 +1807,7 @@ sealed interface Item {
     data class Actions(val start: Int, val messages: List<Message>) : Item
 }
 
-/** Consecutive tool calls and their results collapse into one "Действия" group. */
+/** Consecutive tool calls and their results collapse into one Agent Pipeline group. */
 fun timeline(messages: List<Message>): List<Item> {
     val out = mutableListOf<Item>()
     var i = 0
@@ -1535,96 +1834,129 @@ fun ChatScreen(vm: RelayViewModel) {
 
     var lockDialog by remember { mutableStateOf(false) }
     var agentsSheet by remember { mutableStateOf(false) }
+    var radarSheet by remember { mutableStateOf(false) }
 
     val version = chat.version
     val items = remember(version, chat.sid) { timeline(chat.transcript.messages) }
     val busy = chat.transcript.busy
     val lockedGate = chat.isLockedGate()
+    val activeBackend = chat.activeBackend()
+    val engineTone = backendColor(p, activeBackend)
     val list = rememberLazyListState()
 
     LaunchedEffect(items.size, version) {
         if (items.isNotEmpty() && !lockedGate) list.animateScrollToItem(items.size + 1)
     }
 
-    Column(Modifier.fillMaxSize()) {
-        val folder = vm.sessions.firstOrNull { it.id == chat.sid }?.folder?.let { f -> vm.folders.firstOrNull { it.id == f }?.name }
-        TopBar(
-            title = if (lockedGate) "Защищённая сессия" else chat.title,
-            subtitle = listOfNotNull(folder, folderName(chat.cwd)).joinToString(" · "),
-            link = vm.link,
-            onBack = { vm.screen = Screen.Sessions },
-        ) {
-            BackendBadge(chat.activeBackend()) { agentsSheet = true }
-            GlyphButton(
-                glyph = if (chat.locked && !chat.unlocked) Glyph.Lock else if (chat.locked) Glyph.Unlock else Glyph.Lock,
-                hint = "Защита паролем",
-                tint = if (chat.locked) p.amber else p.muted,
-                highlighted = chat.locked,
+    Box(Modifier.fillMaxSize()) {
+        AtmosphericHorizon(engineTone)
+        Column(Modifier.fillMaxSize()) {
+            val folder = vm.sessions.firstOrNull { it.id == chat.sid }?.folder?.let { f -> vm.folders.firstOrNull { it.id == f }?.name }
+            TopBar(
+                title = if (lockedGate) "Защищённая сессия" else chat.title,
+                subtitle = listOfNotNull(folder, folderName(chat.cwd)).joinToString(" · "),
+                link = vm.link,
+                onBack = { vm.screen = Screen.Sessions },
             ) {
-                lockDialog = true
+                BackendBadge(activeBackend, showDot = true) { agentsSheet = true }
+                GlyphButton(
+                    glyph = Glyph.Radar,
+                    hint = "Радар агентов",
+                    tint = if (busy || vm.running.isNotEmpty()) engineTone else p.muted,
+                    highlighted = busy || vm.running.isNotEmpty(),
+                ) {
+                    radarSheet = true
+                }
+                GlyphButton(
+                    glyph = if (chat.locked && !chat.unlocked) Glyph.Lock else if (chat.locked) Glyph.Unlock else Glyph.Lock,
+                    hint = "Защита паролем",
+                    tint = if (chat.locked) p.amber else p.muted,
+                    highlighted = chat.locked,
+                ) {
+                    lockDialog = true
+                }
             }
-        }
-        if (vm.notice.isNotEmpty()) Notice(vm.notice) { vm.notice = "" }
+            if (vm.notice.isNotEmpty()) Notice(vm.notice) { vm.notice = "" }
 
-        if (lockedGate) {
-            LockedSessionCard(vm, chat, Modifier.weight(1f))
-        } else {
-            LazyColumn(
-                Modifier.weight(1f),
-                state = list,
-                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
-            ) {
-                if (chat.loading) {
-                    item {
-                        Row(Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Dots(p.accent)
-                            Spacer(Modifier.width(8.dp))
-                            Label("Открываем разговор", 13.sp, p.muted)
-                        }
-                    }
-                }
-                if (items.isEmpty() && !chat.loading) {
-                    item {
-                        ChatEmptyState(vm, chat)
-                    }
-                }
-                items(items, key = { when (it) { is Item.Text -> "m${it.index}"; is Item.Actions -> "a${it.start}" } }) { item ->
-                    Box(Modifier.animateItem()) {
-                        when (item) {
-                            is Item.Text -> if (item.message.role == "user") UserBubble(item.message) else AssistantText(item.message, busy && item.index == chat.transcript.messages.lastIndex) { path -> vm.download(path, chat.cwd) }
-                            is Item.Actions -> ActionsGroup(item, busy && item.start + item.messages.size == chat.transcript.messages.size)
-                        }
-                    }
-                }
-                item(key = "status") {
-                    Column {
-                        AnimatedVisibility(busy, enter = fadeIn(), exit = fadeOut()) {
-                            Row(Modifier.padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                                Dots(p.accent)
-                                Spacer(Modifier.width(10.dp))
-                                Label(chat.transcript.status.ifEmpty { "Работает" }, 13.sp, p.muted)
+            if (lockedGate) {
+                LockedSessionCard(vm, chat, Modifier.weight(1f))
+            } else {
+                LazyColumn(
+                    Modifier.weight(1f),
+                    state = list,
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
+                ) {
+                    if (chat.loading) {
+                        item {
+                            Row(Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Dots(engineTone)
+                                Spacer(Modifier.width(8.dp))
+                                Label("Открываем разговор", 13.sp, p.muted)
                             }
                         }
-                        if (chat.transcript.error.isNotEmpty()) {
-                            Box(
-                                Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 6.dp)
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(p.red.copy(alpha = 0.12f))
-                                    .border(1.dp, p.red.copy(alpha = 0.35f), RoundedCornerShape(12.dp))
-                                    .padding(12.dp),
-                            ) {
-                                Label(chat.transcript.error, 13.sp, p.text)
+                    }
+                    if (items.isEmpty() && !chat.loading) {
+                        item {
+                            ChatEmptyState(vm, chat)
+                        }
+                    }
+                    items(items, key = { when (it) { is Item.Text -> "m${it.index}"; is Item.Actions -> "a${it.start}" } }) { item ->
+                        Box(Modifier.animateItem()) {
+                            when (item) {
+                                is Item.Text -> if (item.message.role == "user") {
+                                    UserBubble(item.message)
+                                } else {
+                                    AssistantText(
+                                        m = item.message,
+                                        backend = activeBackend,
+                                        streaming = busy && item.index == chat.transcript.messages.lastIndex,
+                                    ) { path -> vm.download(path, chat.cwd) }
+                                }
+                                is Item.Actions -> ActionsGroup(
+                                    item = item,
+                                    running = busy && item.start + item.messages.size == chat.transcript.messages.size,
+                                    backend = activeBackend,
+                                )
                             }
                         }
-                        Spacer(Modifier.height(8.dp))
+                    }
+                    item(key = "status") {
+                        Column {
+                            if (chat.transcript.error.isNotEmpty()) {
+                                Box(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 6.dp)
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(p.red.copy(alpha = 0.12f))
+                                        .border(1.dp, p.red.copy(alpha = 0.35f), RoundedCornerShape(12.dp))
+                                        .padding(12.dp),
+                                ) {
+                                    Label(chat.transcript.error, 13.sp, p.text)
+                                }
+                            }
+                            Spacer(Modifier.height(6.dp))
+                        }
                     }
                 }
+                chat.permissions.firstOrNull()?.let { PermissionCard(it, vm) }
+                MissingCliBanner(vm, activeBackend)
+                AnimatedVisibility(
+                    visible = busy,
+                    enter = fadeIn(tween(180)) + expandVertically(tween(200)),
+                    exit = fadeOut(tween(140)) + shrinkVertically(tween(180)),
+                ) {
+                    val telemetry = remember(version, busy, chat.transcript.status) {
+                        analyzeTurnTelemetry(chat.transcript.messages, busy, chat.transcript.status)
+                    }
+                    AgentTelemetryPod(
+                        backend = activeBackend,
+                        telemetry = telemetry,
+                        onOpenRadar = { radarSheet = true },
+                    )
+                }
+                Composer(vm, chat, onOpenAgents = { agentsSheet = true })
             }
-            chat.permissions.firstOrNull()?.let { PermissionCard(it, vm) }
-            MissingCliBanner(vm, chat.activeBackend())
-            Composer(vm, chat, onOpenAgents = { agentsSheet = true })
         }
     }
 
@@ -1634,20 +1966,24 @@ fun ChatScreen(vm: RelayViewModel) {
     if (agentsSheet) {
         AgentsSheet(vm) { agentsSheet = false }
     }
+    if (radarSheet) {
+        AgentRadarSheet(vm) { radarSheet = false }
+    }
 }
 
 @Composable
 fun LockedSessionCard(vm: RelayViewModel, chat: Chat, modifier: Modifier = Modifier) {
     val p = LocalPalette.current
     var password by remember(chat.sid) { mutableStateOf("") }
+    val shape = RoundedCornerShape(22.dp)
     Box(modifier.fillMaxWidth().padding(20.dp), contentAlignment = Alignment.Center) {
         Column(
             Modifier
                 .fillMaxWidth()
                 .widthIn(max = 420.dp)
-                .clip(RoundedCornerShape(22.dp))
+                .clip(shape)
                 .background(p.surface)
-                .border(1.dp, p.amber.copy(alpha = 0.45f), RoundedCornerShape(22.dp))
+                .specularBorder(shape, p.amber.copy(alpha = 0.52f), p.amber.copy(alpha = 0.25f))
                 .padding(24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
@@ -1692,34 +2028,43 @@ fun LockedSessionCard(vm: RelayViewModel, chat: Chat, modifier: Modifier = Modif
     }
 }
 
+private data class StarterMission(val title: String, val subtitle: String, val prompt: String, val glyph: Glyph, val phase: ToolPhase)
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ChatEmptyState(vm: RelayViewModel, chat: Chat) {
     val p = LocalPalette.current
     val active = chat.activeBackend()
+    val activeTone = backendColor(p, active)
+    val crestShape = RoundedCornerShape(22.dp)
+
     Column(
-        Modifier.fillMaxWidth().padding(top = 36.dp, bottom = 16.dp),
+        Modifier.fillMaxWidth().padding(top = 24.dp, bottom = 14.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Box(
             Modifier
-                .size(50.dp)
-                .clip(RoundedCornerShape(15.dp))
-                .background(p.subtleAccent)
-                .border(1.dp, p.accent.copy(alpha = 0.3f), RoundedCornerShape(15.dp)),
+                .size(68.dp)
+                .clip(crestShape)
+                .background(
+                    Brush.radialGradient(
+                        listOf(activeTone.copy(alpha = if (p.light) 0.18f else 0.24f), p.surface)
+                    )
+                )
+                .specularBorder(crestShape, activeTone.copy(alpha = 0.55f), activeTone.copy(alpha = 0.20f)),
             contentAlignment = Alignment.Center,
         ) {
-            VectorGlyph(Glyph.RelayMark, backendColor(p, active), size = 26.dp)
+            OrbitalEmblem(activeTone, active = true, size = 44.dp)
         }
         Spacer(Modifier.height(14.dp))
         Label("С чего начнём?", 23.sp, p.text, FontWeight.SemiBold)
         Spacer(Modifier.height(6.dp))
         Row(
             Modifier
-                .clip(RoundedCornerShape(8.dp))
+                .clip(RoundedCornerShape(9.dp))
                 .background(p.side)
-                .border(1.dp, p.borderSubtle, RoundedCornerShape(8.dp))
-                .padding(horizontal = 10.dp, vertical = 4.dp),
+                .specularBorder(RoundedCornerShape(9.dp), p.specularTop, p.borderSubtle)
+                .padding(horizontal = 10.dp, vertical = 4.5.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
@@ -1728,45 +2073,77 @@ fun ChatEmptyState(vm: RelayViewModel, chat: Chat) {
         }
         Spacer(Modifier.height(16.dp))
         Row(
+            Modifier.horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            for (b in BACKENDS) {
+            val engineChoices = listOf(
+                "claude" to "Claude Code",
+                "codex" to "Codex",
+                "agy" to "Antigravity",
+                "api" to "API",
+            )
+            for ((b, title) in engineChoices) {
                 val chosen = active == b
                 val tone = backendColor(p, b)
-                Box(
+                val pillShape = RoundedCornerShape(999.dp)
+                Row(
                     Modifier
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(if (chosen) tone.copy(alpha = 0.18f) else p.surface)
-                        .border(1.dp, if (chosen) tone.copy(alpha = 0.6f) else p.borderSubtle, RoundedCornerShape(10.dp))
+                        .clip(pillShape)
+                        .background(if (chosen) tone.copy(alpha = if (p.light) 0.15f else 0.20f) else p.surface)
+                        .specularBorder(
+                            pillShape,
+                            if (chosen) tone.copy(alpha = 0.72f) else p.specularTop,
+                            if (chosen) tone.copy(alpha = 0.35f) else p.borderSubtle,
+                        )
                         .clickable { vm.setBackend(chat, b) }
-                        .padding(horizontal = 11.dp, vertical = 6.dp),
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
                 ) {
-                    Label(backendShortLabel(b), 12.sp, if (chosen) tone else p.muted, FontWeight.SemiBold)
+                    Box(Modifier.size(6.5.dp).clip(CircleShape).background(if (chosen) tone else tone.copy(alpha = 0.55f)))
+                    Label(title, 12.sp, if (chosen) tone else p.muted, FontWeight.SemiBold, maxLines = 1)
                 }
             }
         }
         Spacer(Modifier.height(18.dp))
-        val starters = listOf(
-            "Разобрать архитектуру проекта",
-            "Найти ошибку и предложить фикс",
-            "Проверить git status и запустить тесты",
+        val missions = listOf(
+            StarterMission("Архитектура", "Карта модулей и связей", "Разобрать архитектуру проекта и ключевые модули", Glyph.Layers, ToolPhase.Research),
+            StarterMission("Найти и починить", "Диагностика и патч", "Найти ошибку и предложить чистый фикс", Glyph.Bolt, ToolPhase.Edit),
+            StarterMission("Сборка и тесты", "Git status и прогон", "Проверить git status и запустить тесты", Glyph.Terminal, ToolPhase.Terminal),
+            StarterMission("Рой субагентов", "Параллельный аудит", "Разделить задачу между субагентами и свести отчёт", Glyph.Orbit, ToolPhase.Subagent),
         )
-        Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-            for (prompt in starters) {
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(p.surface.copy(alpha = 0.7f))
-                        .border(1.dp, p.borderSubtle, RoundedCornerShape(12.dp))
-                        .clickable { chat.draft = prompt }
-                        .padding(horizontal = 12.dp, vertical = 9.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    VectorGlyph(Glyph.Spark, p.accent, size = 14.dp)
-                    Label(prompt, 13.sp, p.text, maxLines = 1)
+        Column(Modifier.fillMaxWidth().padding(horizontal = 4.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            for (row in missions.chunked(2)) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    for (m in row) {
+                        val mColor = phaseColor(m.phase, p.light)
+                        val cardShape = RoundedCornerShape(15.dp)
+                        Column(
+                            Modifier
+                                .weight(1f)
+                                .clip(cardShape)
+                                .background(p.surface.copy(alpha = 0.88f))
+                                .specularBorder(cardShape, mColor.copy(alpha = 0.38f), p.borderSubtle)
+                                .clickable { chat.draft = m.prompt }
+                                .padding(horizontal = 12.dp, vertical = 11.dp),
+                            verticalArrangement = Arrangement.spacedBy(5.dp),
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Box(
+                                    Modifier
+                                        .size(24.dp)
+                                        .clip(RoundedCornerShape(7.dp))
+                                        .background(mColor.copy(alpha = 0.15f)),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    VectorGlyph(m.glyph, mColor, size = 13.5.dp)
+                                }
+                                Label(m.title, 13.sp, p.text, FontWeight.SemiBold, maxLines = 1)
+                            }
+                            Label(m.subtitle, 11.5.sp, p.muted, maxLines = 1)
+                        }
+                    }
                 }
             }
         }
@@ -1788,7 +2165,7 @@ fun MissingCliBanner(vm: RelayViewModel, activeBackend: String) {
             .padding(horizontal = 10.dp, vertical = 4.dp)
             .clip(RoundedCornerShape(14.dp))
             .background(p.elevated)
-            .border(1.dp, p.amber.copy(alpha = 0.45f), RoundedCornerShape(14.dp))
+            .specularBorder(RoundedCornerShape(14.dp), p.amber.copy(alpha = 0.5f), p.amber.copy(alpha = 0.25f))
             .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -1831,8 +2208,8 @@ fun UserBubble(m: Message) {
             Modifier
                 .widthIn(max = 324.dp)
                 .clip(bubbleShape)
-                .background(p.mix(p.surface, p.accent, 0.12f))
-                .border(1.dp, p.mix(p.line, p.accent, 0.28f), bubbleShape)
+                .background(p.mix(p.surface, p.accent, 0.13f))
+                .specularBorder(bubbleShape, p.mix(p.line, p.accent, 0.45f), p.mix(p.line, p.accent, 0.22f))
                 .padding(horizontal = 14.dp, vertical = 10.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
@@ -1853,21 +2230,51 @@ fun UserBubble(m: Message) {
     }
 }
 
+fun engineSignatureTitle(backend: String): String = when (backend) {
+    "codex" -> "OpenAI Codex"
+    "agy" -> "Antigravity"
+    "api" -> "API"
+    else -> "Claude Code"
+}
+
 @Composable
-fun AssistantText(m: Message, streaming: Boolean = false, onFile: ((String) -> Unit)? = null) {
+fun AssistantText(m: Message, backend: String = "claude", streaming: Boolean = false, onFile: ((String) -> Unit)? = null) {
     val p = LocalPalette.current
+    val engineTone = backendColor(p, backend)
     Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+        Row(
+            Modifier.padding(bottom = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Box(Modifier.size(6.dp).clip(CircleShape).background(engineTone))
+            VectorGlyph(
+                glyph = when (backend) {
+                    "codex" -> Glyph.Bolt
+                    "agy" -> Glyph.Orbit
+                    "api" -> Glyph.Layers
+                    else -> Glyph.Spark
+                },
+                tint = engineTone,
+                size = 12.5.dp,
+            )
+            Label(engineSignatureTitle(backend), 11.5.sp, engineTone, FontWeight.SemiBold, maxLines = 1)
+            if (streaming) {
+                NeuralWaveform(engineTone, active = true, width = 16.dp, height = 10.dp)
+            }
+        }
         MarkdownText(m.text, p, Modifier.fillMaxWidth(), streaming, onFile)
         val files = remember(m.text, streaming) { if (streaming) emptyList() else mentionedFiles(m.text) }
         if (onFile != null && files.isNotEmpty()) {
             Column(Modifier.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 for (path in files) {
+                    val dlShape = RoundedCornerShape(12.dp)
                     Row(
                         Modifier
                             .fillMaxWidth()
-                            .clip(RoundedCornerShape(12.dp))
+                            .clip(dlShape)
                             .background(p.side)
-                            .border(1.dp, p.line, RoundedCornerShape(12.dp))
+                            .specularBorder(dlShape, p.specularTop, p.line)
                             .clickable { onFile(path) }
                             .padding(horizontal = 12.dp, vertical = 9.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -1886,55 +2293,216 @@ fun AssistantText(m: Message, streaming: Boolean = false, onFile: ((String) -> U
     }
 }
 
+fun stepsWord(count: Int): String = when {
+    count % 10 == 1 && count % 100 != 11 -> "шаг"
+    count % 10 in 2..4 && count % 100 !in 12..14 -> "шага"
+    else -> "шагов"
+}
+
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun ActionsGroup(item: Item.Actions, running: Boolean) {
+fun ActionsGroup(item: Item.Actions, running: Boolean, backend: String = "claude") {
     val p = LocalPalette.current
     var open by rememberSaveable(item.start) { mutableStateOf(running) }
     LaunchedEffect(running) { if (running) open = true }
     val calls = item.messages.filter { it.role == "tool" }
-    val failed = item.messages.any { it.role == "tool_result" && it.failed }
+    val resultsById = remember(item.messages) {
+        item.messages.filter { it.role == "tool_result" && it.toolId.isNotEmpty() }.associateBy { it.toolId }
+    }
+    val telemetry = remember(item.messages, running) { analyzeTurnTelemetry(item.messages, running) }
+    val failed = telemetry.failedActions > 0
+    val engineTone = backendColor(p, backend)
+    val badgeTone = when {
+        failed -> p.red
+        running -> engineTone
+        else -> p.accent
+    }
     val turn by animateFloatAsState(if (open) 90f else 0f, tween(200), label = "turn")
-    val shape = RoundedCornerShape(14.dp)
+    val shape = RoundedCornerShape(16.dp)
 
     Column(
         Modifier
             .fillMaxWidth()
             .padding(vertical = 6.dp)
             .clip(shape)
-            .background(p.surface)
-            .border(1.dp, if (failed) p.red.copy(alpha = 0.5f) else p.line, shape)
-            .animateContentSize(tween(240)),
-    ) {
-        Row(
-            Modifier.fillMaxWidth().clickable { open = !open }.padding(horizontal = 12.dp, vertical = 11.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            if (running) {
-                Dots(p.accent)
-                Spacer(Modifier.width(8.dp))
-            } else {
-                VectorGlyph(Glyph.Terminal, if (failed) p.red else p.accent, size = 16.dp)
-                Spacer(Modifier.width(8.dp))
-            }
-            val count = calls.size
-            val word = when { count % 10 == 1 && count % 100 != 11 -> "действие"; count % 10 in 2..4 && count % 100 !in 12..14 -> "действия"; else -> "действий" }
-            Label(
-                "Действия · $count $word" + if (failed) " · есть ошибки" else "",
-                13.sp,
-                if (failed) p.red else p.muted,
-                FontWeight.Medium,
-                modifier = Modifier.weight(1f),
+            .background(
+                Brush.verticalGradient(
+                    listOf(p.mix(p.surface, badgeTone, if (p.light) 0.05f else 0.07f), p.surface)
+                )
             )
-            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = p.muted, modifier = Modifier.size(20.dp).rotate(turn))
-        }
-        AnimatedVisibility(open, enter = expandVertically(tween(240)) + fadeIn(tween(240)), exit = shrinkVertically(tween(200)) + fadeOut(tween(160))) {
-            Column(Modifier.padding(start = 12.dp, end = 12.dp, bottom = 10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                for (call in calls) {
-                    val result = item.messages.firstOrNull { it.role == "tool_result" && it.toolId == call.toolId && call.toolId.isNotEmpty() }
-                    ToolCall(call, result, running)
+            .specularBorder(
+                shape = shape,
+                topColor = when {
+                    failed -> p.red.copy(alpha = 0.58f)
+                    running -> engineTone.copy(alpha = 0.55f)
+                    else -> p.specularTop
+                },
+                bottomColor = if (failed) p.red.copy(alpha = 0.28f) else p.line,
+            )
+            .animateContentSize(tween(220)),
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .clickable { open = !open }
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                OrbitalEmblem(badgeTone, active = running, size = 24.dp)
+                Spacer(Modifier.width(9.dp))
+                val count = calls.size
+                Column(Modifier.weight(1f)) {
+                    if (running) {
+                        Label(
+                            "Выполняется · ${telemetry.activeHeadline}",
+                            13.sp,
+                            p.text,
+                            FontWeight.SemiBold,
+                            maxLines = 1,
+                        )
+                        Label(
+                            "Конвейер агента · ${telemetry.doneActions}/$count ${stepsWord(count)}",
+                            11.sp,
+                            p.muted,
+                            maxLines = 1,
+                        )
+                    } else {
+                        Label(
+                            "Конвейер агента · $count ${stepsWord(count)}" + if (failed) " · есть ошибки" else "",
+                            13.sp,
+                            if (failed) p.red else p.text,
+                            FontWeight.SemiBold,
+                            maxLines = 1,
+                        )
+                    }
+                }
+                Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = p.muted, modifier = Modifier.size(20.dp).rotate(turn))
+            }
+
+            if (calls.isNotEmpty()) {
+                // Proportional segmented color-coded phase bar
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(4.5.dp)
+                        .clip(CircleShape)
+                        .background(p.base),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    for (call in calls) {
+                        val res = resultsById[call.toolId]
+                        val phase = classifyToolPhase(call.tool)
+                        val segTone = when {
+                            res?.failed == true -> p.red
+                            res == null && running -> phaseColor(phase, p.light).copy(alpha = 0.55f)
+                            else -> phaseColor(phase, p.light)
+                        }
+                        Box(Modifier.weight(1f).fillMaxHeight().clip(CircleShape).background(segTone))
+                    }
+                }
+
+                // Compact phase counter pills
+                val pills = buildList {
+                    if (telemetry.reads > 0) add(ToolPhase.Research to telemetry.reads)
+                    if (telemetry.delegations > 0) add(ToolPhase.Subagent to telemetry.delegations)
+                    if (telemetry.edits > 0) add(ToolPhase.Edit to telemetry.edits)
+                    if (telemetry.commands > 0) add(ToolPhase.Terminal to telemetry.commands)
+                    if (telemetry.desktopOps > 0) add(ToolPhase.Desktop to telemetry.desktopOps)
+                }
+                if (pills.isNotEmpty()) {
+                    FlowRow(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        for ((phase, cnt) in pills) {
+                            val cTone = phaseColor(phase, p.light)
+                            Row(
+                                Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(cTone.copy(alpha = if (p.light) 0.11f else 0.14f))
+                                    .padding(horizontal = 6.dp, vertical = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                Box(Modifier.size(5.dp).clip(CircleShape).background(cTone))
+                                Label("${phase.label} $cnt", 9.5.sp, cTone, FontWeight.SemiBold, maxLines = 1)
+                            }
+                        }
+                    }
                 }
             }
         }
+
+        AnimatedVisibility(
+            open,
+            enter = expandVertically(tween(220)) + fadeIn(tween(220)),
+            exit = shrinkVertically(tween(180)) + fadeOut(tween(140)),
+        ) {
+            Column(Modifier.padding(start = 10.dp, end = 12.dp, bottom = 11.dp)) {
+                for ((idx, call) in calls.withIndex()) {
+                    val result = resultsById[call.toolId]
+                    val stepState = when {
+                        result == null && running -> 0
+                        result?.failed == true -> 2
+                        else -> 1
+                    }
+                    val phase = classifyToolPhase(call.tool)
+                    val nodeColor = when (stepState) {
+                        2 -> p.red
+                        0 -> phaseColor(phase, p.light)
+                        else -> phaseColor(phase, p.light)
+                    }
+                    val spineColor = p.line.copy(alpha = 0.85f)
+                    val isFirst = idx == 0
+                    val isLast = idx == calls.lastIndex
+
+                    Box(
+                        Modifier
+                            .fillMaxWidth()
+                            .drawBehind {
+                                val x = 10.dp.toPx()
+                                val nodeY = 20.dp.toPx()
+                                val r = 5.dp.toPx()
+                                val strokeW = 1.8.dp.toPx()
+                                if (!isFirst) {
+                                    drawLine(spineColor, Offset(x, 0f), Offset(x, nodeY - r - 2.dp.toPx()), strokeW)
+                                }
+                                if (!isLast) {
+                                    drawLine(spineColor, Offset(x, nodeY + r + 2.dp.toPx()), Offset(x, size.height), strokeW)
+                                }
+                                drawCircle(nodeColor.copy(alpha = 0.22f), r * 1.7f, Offset(x, nodeY))
+                                drawCircle(p.surface, r, Offset(x, nodeY))
+                                drawCircle(nodeColor, r, Offset(x, nodeY), style = Stroke(width = 1.7.dp.toPx()))
+                                if (stepState == 1) {
+                                    drawCircle(nodeColor, r * 0.45f, Offset(x, nodeY))
+                                } else if (stepState == 2) {
+                                    drawCircle(p.red, r * 0.5f, Offset(x, nodeY))
+                                }
+                            }
+                            .padding(start = 24.dp, bottom = if (isLast) 0.dp else 7.dp),
+                    ) {
+                        ToolCall(call, result, running)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun PhaseBadge(phase: ToolPhase, failed: Boolean = false) {
+    val p = LocalPalette.current
+    val tone = if (failed) p.red else phaseColor(phase, p.light)
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(5.dp))
+            .background(tone.copy(alpha = if (p.light) 0.13f else 0.17f))
+            .border(1.dp, tone.copy(alpha = 0.34f), RoundedCornerShape(5.dp))
+            .padding(horizontal = 5.5.dp, vertical = 1.5.dp),
+    ) {
+        Label(phase.label, 9.5.sp, tone, FontWeight.Bold, maxLines = 1)
     }
 }
 
@@ -1943,70 +2511,180 @@ fun ToolCall(call: Message, result: Message?, running: Boolean = false) {
     val p = LocalPalette.current
     var full by remember { mutableStateOf(false) }
     val appear = remember { MutableTransitionState(false).apply { targetState = true } }
-    val shape = RoundedCornerShape(11.dp)
-    AnimatedVisibility(appear, enter = fadeIn(tween(240)) + slideInVertically(tween(240)) { it / 3 }) {
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .clip(shape)
-                .background(p.base)
-                .border(
-                    1.dp,
-                    when {
-                        result?.failed == true -> p.red.copy(alpha = 0.45f)
-                        result == null && running -> p.accent.copy(alpha = 0.45f)
-                        else -> p.line
-                    },
-                    shape,
-                )
-                .clickable { full = !full }
-                .padding(10.dp)
-                .animateContentSize(tween(220)),
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                StatusMark(when { result == null && running -> 0; result?.failed == true -> 2; else -> 1 })
-                Spacer(Modifier.width(9.dp))
-                val heading = call.input.optString("description").trim().takeIf { it.isNotEmpty() && !call.tool.startsWith("mcp__relay_cluster__") } ?: toolName(call.tool)
-                Label(heading, 13.5.sp, if (result?.failed == true) p.red else p.text, FontWeight.Medium, maxLines = 2)
-            }
-            val line = commandLine(call)
-            if (line.isNotEmpty()) {
-                Text(
-                    line,
-                    color = p.mix(p.text, p.muted, 0.42f),
-                    fontSize = 12.sp,
-                    fontFamily = FontFamily.Monospace,
-                    maxLines = if (full) 20 else 2,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(start = 27.dp, top = 3.dp),
-                )
-            }
-            Column(Modifier.padding(start = 27.dp, top = 6.dp)) {
-                if (call.tool == "Edit" || call.tool == "MultiEdit") {
-                    val pairs = if (call.tool == "MultiEdit") call.input.optJSONArray("edits")?.let { a -> (0 until a.length()).mapNotNull { a.optJSONObject(it) }.map { it.optString("old_string") to it.optString("new_string") } }.orEmpty()
-                    else listOf(call.input.optString("old_string") to call.input.optString("new_string"))
-                    val lines = pairs.flatMap { (old, new) -> old.lines().filter { it.isNotBlank() }.take(if (full) 40 else 3).map { "−" to it } + new.lines().filter { it.isNotBlank() }.take(if (full) 40 else 3).map { "+" to it } }
-                    for ((sign, text) in lines.take(if (full) 200 else 8)) {
-                        val color = if (sign == "+") p.green else p.red
+    val phase = classifyToolPhase(call.tool)
+    val pTone = phaseColor(phase, p.light)
+    val state = when {
+        result == null && running -> 0
+        result?.failed == true -> 2
+        else -> 1
+    }
+    val shape = RoundedCornerShape(12.dp)
+
+    AnimatedVisibility(appear, enter = fadeIn(tween(200)) + slideInVertically(tween(200)) { it / 4 }) {
+        if (phase == ToolPhase.Subagent) {
+            val trace = extractSubagentTrace(call, result, running)
+            val violet = phaseColor(ToolPhase.Subagent, p.light)
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(shape)
+                    .background(
+                        Brush.horizontalGradient(
+                            listOf(violet.copy(alpha = if (p.light) 0.10f else 0.16f), p.base)
+                        )
+                    )
+                    .specularBorder(
+                        shape = shape,
+                        topColor = if (result?.failed == true) p.red.copy(alpha = 0.55f) else violet.copy(alpha = 0.58f),
+                        bottomColor = violet.copy(alpha = 0.25f),
+                    )
+                    .clickable { full = !full }
+                    .padding(10.dp)
+                    .animateContentSize(tween(200)),
+                verticalArrangement = Arrangement.spacedBy(5.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                    VectorGlyph(Glyph.Orbit, violet, size = 15.dp)
+                    PhaseBadge(ToolPhase.Subagent, failed = result?.failed == true)
+                    Label(trace.role, 13.sp, p.text, FontWeight.SemiBold, maxLines = 1, modifier = Modifier.weight(1f))
+                    if (trace.model.isNotEmpty()) {
+                        Box(
+                            Modifier
+                                .clip(RoundedCornerShape(5.dp))
+                                .background(violet.copy(alpha = 0.15f))
+                                .padding(horizontal = 5.dp, vertical = 1.dp),
+                        ) {
+                            Label(trace.model, 9.5.sp, violet, FontWeight.Medium, maxLines = 1)
+                        }
+                    }
+                    StatusMark(state, accentOverride = violet)
+                }
+                if (trace.summary.isNotEmpty()) {
+                    Label(trace.summary, 12.sp, p.mix(p.text, p.muted, 0.22f), maxLines = if (full) 12 else 2)
+                }
+                if (result == null && running) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        NeuralWaveform(violet, active = true, width = 16.dp, height = 10.dp)
+                        Label("субагент работает…", 11.5.sp, violet, FontWeight.Medium)
+                    }
+                } else if (result != null && result.text.isNotBlank()) {
+                    val lines = result.text.trimEnd().lines().filter { it.isNotBlank() }
+                    val shown = if (full) lines.takeLast(80) else lines.takeLast(2)
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(7.dp))
+                            .background(if (result.failed) p.red.copy(alpha = 0.08f) else p.side.copy(alpha = 0.85f))
+                            .padding(horizontal = 8.dp, vertical = 5.dp),
+                    ) {
                         Text(
-                            "$sign ${text.trimEnd()}",
-                            color = color,
+                            shown.joinToString("\n"),
+                            color = if (result.failed) p.red else p.mix(p.text, p.muted, 0.25f),
                             fontSize = 11.5.sp,
                             fontFamily = FontFamily.Monospace,
-                            maxLines = 1,
+                            maxLines = if (full) 40 else 3,
                             overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp).clip(RoundedCornerShape(4.dp)).background(color.copy(alpha = 0.1f)).padding(horizontal = 6.dp, vertical = 1.dp),
                         )
                     }
-                } else if (result == null && running) {
-                    val dots by rememberInfiniteTransition(label = "run").animateFloat(0f, 3f, infiniteRepeatable(tween(1200, easing = LinearEasing)), label = "dots")
-                    Label("выполняется" + ".".repeat(1 + dots.toInt().coerceAtMost(2)), 12.sp, p.accent)
-                } else if (result != null && result.text.isNotBlank() && call.tool != "Read") {
-                    val all = result.text.trimEnd().lines().filter { it.isNotBlank() }
-                    val shown = if (full) all.takeLast(400) else all.takeLast(4)
-                    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(7.dp)).background(if (result.failed) p.red.copy(alpha = 0.08f) else p.side).padding(horizontal = 9.dp, vertical = 6.dp)) {
-                        if (all.size > shown.size) Label("… ещё ${lines(all.size - shown.size)} выше · нажми, чтобы раскрыть", 10.5.sp, p.muted)
-                        Text(shown.joinToString("\n"), color = if (result.failed) p.red else p.mix(p.text, p.muted, 0.3f), fontSize = 11.5.sp, fontFamily = FontFamily.Monospace)
+                }
+            }
+        } else {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(shape)
+                    .background(p.base)
+                    .specularBorder(
+                        shape = shape,
+                        topColor = when {
+                            result?.failed == true -> p.red.copy(alpha = 0.50f)
+                            result == null && running -> pTone.copy(alpha = 0.52f)
+                            else -> p.specularTop.copy(alpha = 0.65f)
+                        },
+                        bottomColor = when {
+                            result?.failed == true -> p.red.copy(alpha = 0.28f)
+                            else -> p.line
+                        },
+                    )
+                    .clickable { full = !full }
+                    .padding(10.dp)
+                    .animateContentSize(tween(200)),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                    PhaseBadge(phase, failed = result?.failed == true)
+                    val heading = call.input.optString("description").trim()
+                        .takeIf { it.isNotEmpty() && !call.tool.startsWith("mcp__relay_cluster__") }
+                        ?: toolName(call.tool)
+                    Label(heading, 13.sp, if (result?.failed == true) p.red else p.text, FontWeight.Medium, maxLines = 1, modifier = Modifier.weight(1f))
+                    StatusMark(state, accentOverride = pTone)
+                }
+                val line = commandLine(call)
+                if (line.isNotEmpty()) {
+                    Text(
+                        line,
+                        color = p.mix(p.text, p.muted, 0.38f),
+                        fontSize = 11.5.sp,
+                        fontFamily = FontFamily.Monospace,
+                        maxLines = if (full) 20 else 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
+                Column(Modifier.padding(top = 5.dp)) {
+                    if (call.tool in setOf("Edit", "MultiEdit", "edit_file")) {
+                        val pairs = if (call.tool == "MultiEdit") {
+                            call.input.optJSONArray("edits")?.let { a ->
+                                (0 until a.length()).mapNotNull { a.optJSONObject(it) }.map { it.optString("old_string") to it.optString("new_string") }
+                            }.orEmpty()
+                        } else {
+                            val old = call.input.optString("old_string").ifEmpty { call.input.optString("Target") }
+                            val new = call.input.optString("new_string").ifEmpty { call.input.optString("Replacement") }
+                            listOf(old to new)
+                        }
+                        val lines = pairs.flatMap { (old, new) ->
+                            old.lines().filter { it.isNotBlank() }.take(if (full) 40 else 3).map { "−" to it } +
+                                new.lines().filter { it.isNotBlank() }.take(if (full) 40 else 3).map { "+" to it }
+                        }
+                        for ((sign, text) in lines.take(if (full) 200 else 8)) {
+                            val color = if (sign == "+") p.green else p.red
+                            Text(
+                                "$sign ${text.trimEnd()}",
+                                color = color,
+                                fontSize = 11.5.sp,
+                                fontFamily = FontFamily.Monospace,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 1.dp)
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(color.copy(alpha = 0.11f))
+                                    .padding(horizontal = 6.dp, vertical = 1.dp),
+                            )
+                        }
+                    } else if (result == null && running) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            NeuralWaveform(pTone, active = true, width = 16.dp, height = 10.dp)
+                            Label("выполняется…", 11.5.sp, pTone, FontWeight.Medium)
+                        }
+                    } else if (result != null && result.text.isNotBlank() && call.tool !in setOf("Read", "read_file")) {
+                        val all = result.text.trimEnd().lines().filter { it.isNotBlank() }
+                        val shown = if (full) all.takeLast(400) else all.takeLast(4)
+                        Column(
+                            Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(7.dp))
+                                .background(if (result.failed) p.red.copy(alpha = 0.08f) else p.side)
+                                .padding(horizontal = 9.dp, vertical = 6.dp),
+                        ) {
+                            if (all.size > shown.size) Label("… ещё ${lines(all.size - shown.size)} выше · нажми, чтобы раскрыть", 10.5.sp, p.muted)
+                            Text(
+                                shown.joinToString("\n"),
+                                color = if (result.failed) p.red else p.mix(p.text, p.muted, 0.3f),
+                                fontSize = 11.5.sp,
+                                fontFamily = FontFamily.Monospace,
+                            )
+                        }
                     }
                 }
             }
@@ -2014,21 +2692,24 @@ fun ToolCall(call: Message, result: Message?, running: Boolean = false) {
     }
 }
 
-/** 0 — spinning arc while running, 1 — green tick, 2 — red cross. Infinite transition runs ONLY when state == 0! */
+/** 0 — orbital active arc (static/finite so Robolectric never hangs!), 1 — green tick, 2 — red cross. */
 @Composable
-fun StatusMark(state: Int) {
+fun StatusMark(state: Int, accentOverride: Color? = null) {
     val p = LocalPalette.current
-    val spin = if (state == 0) {
-        rememberInfiniteTransition(label = "spin").animateFloat(0f, 360f, infiniteRepeatable(tween(900, easing = LinearEasing)), label = "angle").value
-    } else 0f
-    val color = when (state) { 0 -> p.accent; 1 -> p.green; else -> p.red }
+    val targetColor = when (state) {
+        0 -> accentOverride ?: p.accent
+        1 -> p.green
+        else -> p.red
+    }
+    val color by animateColorAsState(targetColor, tween(220), label = "statusColor")
     Canvas(Modifier.size(18.dp)) {
         val r = size.minDimension / 2f - 1.5f
         val stroke = Stroke(width = 1.7.dp.toPx(), cap = StrokeCap.Round)
         when (state) {
             0 -> {
-                drawCircle(color.copy(alpha = 0.2f), r, style = stroke)
-                drawArc(color, spin, 250f, false, topLeft = center - Offset(r, r), size = Size(r * 2, r * 2), style = stroke)
+                drawCircle(color.copy(alpha = 0.18f), r)
+                drawArc(color, -55f, 220f, false, topLeft = center - Offset(r, r), size = Size(r * 2, r * 2), style = stroke)
+                drawCircle(color, r * 0.32f, center)
             }
             1 -> {
                 drawCircle(color.copy(alpha = 0.18f), r)
@@ -2049,16 +2730,111 @@ fun StatusMark(state: Int) {
     }
 }
 
+/** Live Agent Neural Telemetry Pod shown above the Composer whenever `busy` is true. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun AgentTelemetryPod(
+    backend: String,
+    telemetry: TurnTelemetry,
+    onOpenRadar: () -> Unit,
+) {
+    val p = LocalPalette.current
+    val engineTone = backendColor(p, backend)
+    val podShape = RoundedCornerShape(18.dp)
+    val violet = phaseColor(ToolPhase.Subagent, p.light)
+
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 10.dp)
+            .padding(top = 6.dp)
+            .clip(podShape)
+            .background(
+                Brush.horizontalGradient(
+                    listOf(
+                        p.mix(p.elevated, engineTone, if (p.light) 0.09f else 0.14f),
+                        p.elevated,
+                    )
+                )
+            )
+            .specularBorder(podShape, engineTone.copy(alpha = 0.55f), p.line)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(7.dp),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            OrbitalEmblem(engineTone, active = true, size = 32.dp)
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Label(engineSignatureTitle(backend), 11.sp, engineTone, FontWeight.Bold, maxLines = 1)
+                    NeuralWaveform(engineTone, active = true, width = 20.dp, height = 11.dp)
+                    if (telemetry.totalActions > 0) {
+                        PhaseBadge(telemetry.activePhase)
+                        Label("${telemetry.doneActions}/${telemetry.totalActions}", 11.sp, p.muted, FontWeight.SemiBold, maxLines = 1)
+                    } else {
+                        Box(
+                            Modifier
+                                .clip(RoundedCornerShape(5.dp))
+                                .background(engineTone.copy(alpha = 0.16f))
+                                .padding(horizontal = 5.dp, vertical = 1.dp),
+                        ) {
+                            Label("LIVE", 9.5.sp, engineTone, FontWeight.Bold)
+                        }
+                    }
+                }
+                Label(telemetry.activeHeadline, 13.sp, p.text, FontWeight.SemiBold, maxLines = 1)
+                if (telemetry.activeTarget.isNotEmpty()) {
+                    Text(
+                        telemetry.activeTarget,
+                        color = p.muted,
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            GlyphButton(Glyph.Radar, "Радар агентов", tint = engineTone, highlighted = true, onClick = onOpenRadar)
+        }
+
+        if (telemetry.subagents.isNotEmpty()) {
+            FlowRow(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                for (sub in telemetry.subagents.take(4)) {
+                    Row(
+                        Modifier
+                            .clip(RoundedCornerShape(999.dp))
+                            .background(violet.copy(alpha = if (p.light) 0.12f else 0.18f))
+                            .border(1.dp, violet.copy(alpha = 0.38f), RoundedCornerShape(999.dp))
+                            .padding(horizontal = 8.dp, vertical = 3.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        VectorGlyph(Glyph.Orbit, violet, size = 11.dp)
+                        Label(sub.role, 10.5.sp, violet, FontWeight.SemiBold, maxLines = 1)
+                    }
+                }
+            }
+        }
+    }
+}
+
 fun lines(n: Int) = "$n " + when { n % 10 == 1 && n % 100 != 11 -> "строка"; n % 10 in 2..4 && n % 100 !in 12..14 -> "строки"; else -> "строк" }
 
 fun commandLine(call: Message): String {
     val i = call.input
     return when (call.tool) {
         "Bash", "shell", "command_execution", "run_command", "mcp__relay_desktop__run_local_command" ->
-            "$ " + i.optString("command").trim().lines().joinToString(" ⏎ ")
+            "$ " + i.optString("command").ifEmpty { i.optString("CommandLine") }.trim().lines().joinToString(" ⏎ ")
         "Grep", "grep_search" -> "«${i.optString("pattern")}»" + i.optString("path").let { if (it.isEmpty()) "" else " в $it" }
-        "Read", "Write", "Edit", "MultiEdit", "read_file", "write_file", "edit_file" -> i.optString("file_path").ifEmpty { i.optString("path") }
-        "Glob" -> i.optString("pattern")
+        "Read", "Write", "Edit", "MultiEdit", "read_file", "write_file", "edit_file" ->
+            i.optString("file_path").ifEmpty { i.optString("path") }.ifEmpty { i.optString("Path") }
+        "Glob", "find_by_name" -> i.optString("pattern").ifEmpty { i.optString("Pattern") }
         "SlashCommand" -> i.optString("command")
         "WebSearch", "web_search" -> i.optString("query")
         "WebFetch" -> i.optString("url")
@@ -2069,13 +2845,14 @@ fun commandLine(call: Message): String {
 @Composable
 fun PermissionCard(permission: Permission, vm: RelayViewModel) {
     val p = LocalPalette.current
+    val shape = RoundedCornerShape(16.dp)
     Column(
         Modifier
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 6.dp)
-            .clip(RoundedCornerShape(16.dp))
+            .clip(shape)
             .background(p.elevated)
-            .border(1.dp, p.accent.copy(alpha = 0.6f), RoundedCornerShape(16.dp))
+            .specularBorder(shape, p.accent.copy(alpha = 0.65f), p.accent.copy(alpha = 0.30f))
             .padding(14.dp),
     ) {
         Label("Агент запрашивает разрешение", 12.5.sp, p.accent, FontWeight.Medium)
@@ -2149,6 +2926,7 @@ fun Composer(vm: RelayViewModel, chat: Chat, onOpenAgents: () -> Unit = {}) {
     val p = LocalPalette.current
     val busy = chat.version >= 0 && chat.transcript.busy
     val activeBackend = chat.activeBackend()
+    val engineTone = backendColor(p, activeBackend)
     for (t in vm.transfers.take(3)) key(t.id) { TransferCard(vm, t) }
     val online = vm.link == Link.Online
     var apiSettings by remember { mutableStateOf(false) }
@@ -2179,7 +2957,7 @@ fun Composer(vm: RelayViewModel, chat: Chat, onOpenAgents: () -> Unit = {}) {
                 .heightIn(max = 260.dp)
                 .clip(RoundedCornerShape(14.dp))
                 .background(p.elevated)
-                .border(1.dp, p.line, RoundedCornerShape(14.dp))
+                .specularBorder(RoundedCornerShape(14.dp), p.specularTop, p.line)
                 .verticalScroll(rememberScrollState())
                 .padding(4.dp),
         ) {
@@ -2215,7 +2993,11 @@ fun Composer(vm: RelayViewModel, chat: Chat, onOpenAgents: () -> Unit = {}) {
             .padding(horizontal = 10.dp, vertical = 8.dp)
             .clip(containerShape)
             .background(p.surface)
-            .border(1.dp, if (chat.draft.isNotEmpty()) p.mix(p.line, p.accent, 0.35f) else p.line, containerShape)
+            .specularBorder(
+                shape = containerShape,
+                topColor = if (chat.draft.isNotEmpty() || busy) engineTone.copy(alpha = 0.48f) else p.specularTop,
+                bottomColor = if (chat.draft.isNotEmpty()) p.mix(p.line, engineTone, 0.25f) else p.line,
+            )
             .padding(start = 14.dp, end = 10.dp, top = 11.dp, bottom = 8.dp),
     ) {
         if (chat.picked.isNotEmpty()) {
@@ -2253,7 +3035,7 @@ fun Composer(vm: RelayViewModel, chat: Chat, onOpenAgents: () -> Unit = {}) {
             value = chat.draft,
             onValueChange = { chat.draft = it },
             textStyle = TextStyle(color = p.text, fontSize = 15.sp),
-            cursorBrush = SolidColor(p.accent),
+            cursorBrush = SolidColor(engineTone),
             modifier = Modifier.fillMaxWidth().heightIn(min = 26.dp, max = 160.dp),
             decorationBox = { inner ->
                 Box {
@@ -2307,7 +3089,7 @@ fun Composer(vm: RelayViewModel, chat: Chat, onOpenAgents: () -> Unit = {}) {
                         "settings" to "Настроить API…",
                     ),
                     accent = true,
-                    accentColor = backendColor(p, activeBackend),
+                    accentColor = engineTone,
                 ) { source ->
                     when (source) {
                         "agents" -> onOpenAgents()
@@ -2679,8 +3461,294 @@ fun SettingsScreen(vm: RelayViewModel) {
                     Label(vm.notice, 12.sp, p.accent)
                     Spacer(Modifier.height(6.dp))
                 }
-                Label("Relay для Android 0.4.0 · SSH и общие сессии с ПК", 12.sp, p.muted)
+                Label("Relay для Android 0.5.0 · SSH и общие сессии с ПК", 12.sp, p.muted)
                 Spacer(Modifier.height(8.dp))
+            }
+        }
+    }
+}
+
+// --- Live Agent Observatory Sheet ("Радар агентов") ------------------------------------
+
+private data class RadarNode(
+    val sid: String,
+    val title: String,
+    val cwd: String,
+    val backend: String,
+    val active: Boolean,
+    val lockedGate: Boolean,
+    val modified: Double,
+    val session: Session?,
+    val telemetry: TurnTelemetry?,
+)
+
+@Composable
+fun AgentRadarSheet(vm: RelayViewModel, close: () -> Unit) {
+    val p = LocalPalette.current
+    val server = vm.current
+    val defaultBackend = server?.effectiveBackend() ?: "claude"
+
+    val nodes = remember(vm.sessions, vm.running, vm.selected, vm.chats.size) {
+        val fromSessions = vm.sessions.map { s ->
+            val chat = vm.chats[s.id]
+            val isBusy = s.running || s.id in vm.running || (chat != null && chat.version >= 0 && chat.transcript.busy)
+            val b = s.backend.takeIf { it in BACKENDS } ?: chat?.activeBackend() ?: defaultBackend
+            val tel = if (chat != null && !s.isLockedGate() && chat.transcript.messages.isNotEmpty()) {
+                analyzeTurnTelemetry(chat.transcript.messages, isBusy, chat.transcript.status)
+            } else null
+            RadarNode(
+                sid = s.id,
+                title = if (s.isLockedGate() && s.title.isBlank()) "Защищённая сессия" else s.title,
+                cwd = s.cwd,
+                backend = b,
+                active = isBusy,
+                lockedGate = s.isLockedGate(),
+                modified = s.modified,
+                session = s,
+                telemetry = tel,
+            )
+        }
+        val extraCurrent = vm.chat()?.takeIf { cur -> fromSessions.none { it.sid == cur.sid } }?.let { cur ->
+            val isBusy = cur.version >= 0 && cur.transcript.busy
+            listOf(
+                RadarNode(
+                    sid = cur.sid,
+                    title = cur.title,
+                    cwd = cur.cwd,
+                    backend = cur.activeBackend(),
+                    active = isBusy,
+                    lockedGate = cur.isLockedGate(),
+                    modified = System.currentTimeMillis() / 1000.0,
+                    session = null,
+                    telemetry = if (!cur.isLockedGate() && cur.transcript.messages.isNotEmpty()) {
+                        analyzeTurnTelemetry(cur.transcript.messages, isBusy, cur.transcript.status)
+                    } else null,
+                )
+            )
+        }.orEmpty()
+        (extraCurrent + fromSessions)
+            .sortedWith(compareByDescending<RadarNode> { it.active }.thenByDescending { it.modified })
+            .take(6)
+    }
+
+    val activeCount = nodes.count { it.active }
+
+    Sheet(close) {
+        Column(
+            Modifier.heightIn(max = 580.dp).verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                OrbitalEmblem(if (activeCount > 0) p.green else p.accent, active = activeCount > 0, size = 30.dp)
+                Column(Modifier.weight(1f)) {
+                    Label("Радар агентов", 18.sp, p.text, FontWeight.SemiBold)
+                    Label(
+                        "${server?.name?.ifBlank { server.host } ?: "Сервер"} · живая топология сессий",
+                        12.sp,
+                        p.muted,
+                        maxLines = 1,
+                    )
+                }
+                Box(
+                    Modifier
+                        .clip(RoundedCornerShape(999.dp))
+                        .background((if (activeCount > 0) p.green else p.muted).copy(alpha = 0.15f))
+                        .padding(horizontal = 9.dp, vertical = 4.dp),
+                ) {
+                    Label(
+                        if (activeCount > 0) "LIVE · $activeCount" else "Ожидание",
+                        11.sp,
+                        if (activeCount > 0) p.green else p.muted,
+                        FontWeight.Bold,
+                    )
+                }
+            }
+
+            // Visual Server -> Active/Recent Agents Topology Graph
+            val graphShape = RoundedCornerShape(16.dp)
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(126.dp)
+                    .clip(graphShape)
+                    .background(
+                        Brush.horizontalGradient(
+                            listOf(p.base, p.mix(p.base, p.side, 0.6f))
+                        )
+                    )
+                    .specularBorder(graphShape, p.specularTop, p.line)
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+            ) {
+                val graphNodes = nodes.take(5)
+                val violet = phaseColor(ToolPhase.Subagent, p.light)
+                Canvas(Modifier.fillMaxSize()) {
+                    val w = size.width
+                    val h = size.height
+                    val hub = Offset(w * 0.14f, h * 0.50f)
+
+                    // Radar background grid rings around Server Hub
+                    drawCircle(p.accent.copy(alpha = 0.08f), h * 0.46f, hub)
+                    drawCircle(p.line.copy(alpha = 0.5f), h * 0.44f, hub, style = Stroke(width = 1.dp.toPx()))
+                    drawCircle(p.line.copy(alpha = 0.35f), h * 0.27f, hub, style = Stroke(width = 1.dp.toPx()))
+
+                    if (graphNodes.isNotEmpty()) {
+                        val count = graphNodes.size
+                        for ((idx, node) in graphNodes.withIndex()) {
+                            val ny = if (count == 1) h * 0.5f else h * (0.14f + 0.72f * idx / (count - 1).toFloat())
+                            val target = Offset(w * 0.76f, ny)
+                            val nTone = backendColor(node.backend, p.light)
+                            val curve = Path().apply {
+                                moveTo(hub.x + 12.dp.toPx(), hub.y)
+                                cubicTo(
+                                    w * 0.42f, hub.y,
+                                    w * 0.48f, target.y,
+                                    target.x - 10.dp.toPx(), target.y,
+                                )
+                            }
+                            drawPath(
+                                path = curve,
+                                color = nTone.copy(alpha = if (node.active) 0.78f else 0.32f),
+                                style = Stroke(width = if (node.active) 2.2.dp.toPx() else 1.3.dp.toPx(), cap = StrokeCap.Round),
+                            )
+
+                            val nr = if (node.active) 7.5.dp.toPx() else 5.5.dp.toPx()
+                            if (node.active) {
+                                drawCircle(nTone.copy(alpha = 0.22f), nr * 1.9f, target)
+                                drawArc(
+                                    color = nTone,
+                                    startAngle = -50f,
+                                    sweepAngle = 220f,
+                                    useCenter = false,
+                                    topLeft = target - Offset(nr * 1.35f, nr * 1.35f),
+                                    size = Size(nr * 2.7f, nr * 2.7f),
+                                    style = Stroke(width = 1.5.dp.toPx(), cap = StrokeCap.Round),
+                                )
+                            }
+                            drawCircle(p.elevated, nr, target)
+                            drawCircle(nTone, nr, target, style = Stroke(width = 1.8.dp.toPx()))
+                            drawCircle(nTone, nr * 0.45f, target)
+
+                            // Subagent satellite branch when delegations exist
+                            val subs = node.telemetry?.delegations ?: 0
+                            if (subs > 0) {
+                                val sat = Offset(w * 0.91f, (target.y - 6.dp.toPx()).coerceIn(8.dp.toPx(), h - 8.dp.toPx()))
+                                drawLine(violet.copy(alpha = 0.65f), Offset(target.x + nr, target.y), sat, 1.4.dp.toPx(), StrokeCap.Round)
+                                drawCircle(violet.copy(alpha = 0.25f), 6.5.dp.toPx(), sat)
+                                drawCircle(violet, 3.8.dp.toPx(), sat)
+                            }
+                        }
+                    }
+
+                    // Draw Server Hub Node on top
+                    val hr = 11.dp.toPx()
+                    drawCircle(p.accent.copy(alpha = 0.24f), hr * 1.55f, hub)
+                    drawCircle(p.elevated, hr, hub)
+                    drawCircle(p.accent, hr, hub, style = Stroke(width = 2.dp.toPx()))
+                    drawCircle(if (vm.link == Link.Online) p.green else p.amber, 4.dp.toPx(), hub)
+                }
+                Label(
+                    server?.name?.ifBlank { server.host } ?: "SSH Hub",
+                    10.5.sp,
+                    p.muted,
+                    FontWeight.SemiBold,
+                    maxLines = 1,
+                    modifier = Modifier.align(Alignment.BottomStart),
+                )
+                Label(
+                    if (graphNodes.isEmpty()) "Нет сессий" else "Узлов: ${graphNodes.size}",
+                    10.5.sp,
+                    p.muted,
+                    maxLines = 1,
+                    modifier = Modifier.align(Alignment.BottomEnd),
+                )
+            }
+
+            if (nodes.isEmpty()) {
+                Box(Modifier.fillMaxWidth().padding(vertical = 16.dp), contentAlignment = Alignment.Center) {
+                    Label("Пока нет активных или недавних сессий на сервере.", 13.sp, p.muted)
+                }
+            } else {
+                Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                    for ((idx, node) in nodes.withIndex()) {
+                        val nTone = backendColor(p, node.backend)
+                        val cardShape = RoundedCornerShape(14.dp)
+                        val isLast = idx == nodes.lastIndex
+                        Box(
+                            Modifier
+                                .fillMaxWidth()
+                                .drawBehind {
+                                    val x = 8.dp.toPx()
+                                    val midY = size.height * 0.5f
+                                    drawLine(p.line, Offset(x, 0f), Offset(x, if (isLast) midY else size.height), 1.5.dp.toPx())
+                                    drawLine(nTone.copy(alpha = 0.7f), Offset(x, midY), Offset(18.dp.toPx(), midY), 1.5.dp.toPx())
+                                    drawCircle(nTone, 3.2.dp.toPx(), Offset(x, midY))
+                                }
+                                .padding(start = 20.dp),
+                        ) {
+                            Column(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clip(cardShape)
+                                    .background(if (node.active) p.mix(p.surface, nTone, 0.08f) else p.surface)
+                                    .specularBorder(
+                                        cardShape,
+                                        if (node.active) nTone.copy(alpha = 0.55f) else p.specularTop,
+                                        if (node.active) nTone.copy(alpha = 0.25f) else p.borderSubtle,
+                                    )
+                                    .clickable {
+                                        if (node.session != null) {
+                                            vm.open(node.session)
+                                        } else {
+                                            vm.screen = Screen.Chat
+                                        }
+                                        close()
+                                    }
+                                    .padding(horizontal = 12.dp, vertical = 9.dp),
+                                verticalArrangement = Arrangement.spacedBy(5.dp),
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                                    BackendBadge(node.backend, compact = true, showDot = true)
+                                    Label(node.title, 13.5.sp, p.text, FontWeight.SemiBold, maxLines = 1, modifier = Modifier.weight(1f))
+                                    if (node.active) {
+                                        NeuralWaveform(nTone, active = true, width = 16.dp, height = 10.dp)
+                                    } else {
+                                        Label(relative(node.modified), 11.sp, p.muted, maxLines = 1)
+                                    }
+                                }
+                                val tel = node.telemetry
+                                when {
+                                    node.lockedGate -> Label("Защищена паролем · нажми для входа", 11.5.sp, p.amber, maxLines = 1)
+                                    tel != null && tel.totalActions > 0 -> {
+                                        Label(
+                                            "${tel.activeHeadline} · ${tel.doneActions}/${tel.totalActions} ${stepsWord(tel.totalActions)}",
+                                            11.5.sp,
+                                            if (node.active) nTone else p.muted,
+                                            maxLines = 1,
+                                        )
+                                        Row(
+                                            Modifier.fillMaxWidth().height(3.5.dp).clip(CircleShape).background(p.base),
+                                            horizontalArrangement = Arrangement.spacedBy(2.dp),
+                                        ) {
+                                            if (tel.reads > 0) Box(Modifier.weight(tel.reads.toFloat()).fillMaxHeight().background(phaseColor(ToolPhase.Research, p.light)))
+                                            if (tel.delegations > 0) Box(Modifier.weight(tel.delegations.toFloat()).fillMaxHeight().background(phaseColor(ToolPhase.Subagent, p.light)))
+                                            if (tel.edits > 0) Box(Modifier.weight(tel.edits.toFloat()).fillMaxHeight().background(phaseColor(ToolPhase.Edit, p.light)))
+                                            if (tel.commands > 0) Box(Modifier.weight(tel.commands.toFloat()).fillMaxHeight().background(phaseColor(ToolPhase.Terminal, p.light)))
+                                            if (tel.desktopOps > 0) Box(Modifier.weight(tel.desktopOps.toFloat()).fillMaxHeight().background(phaseColor(ToolPhase.Desktop, p.light)))
+                                            val rest = (tel.totalActions - tel.reads - tel.delegations - tel.edits - tel.commands - tel.desktopOps).coerceAtLeast(0)
+                                            if (rest > 0) Box(Modifier.weight(rest.toFloat()).fillMaxHeight().background(phaseColor(ToolPhase.Other, p.light)))
+                                        }
+                                    }
+                                    node.active -> Label("Выполняется в ${folderName(node.cwd)} · открыть →", 11.5.sp, nTone, maxLines = 1)
+                                    else -> Label("Папка ${folderName(node.cwd)} · открыть →", 11.5.sp, p.muted, maxLines = 1)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                GhostButton("Закрыть", onClick = close)
             }
         }
     }

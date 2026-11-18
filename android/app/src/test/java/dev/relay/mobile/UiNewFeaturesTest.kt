@@ -2,10 +2,12 @@ package dev.relay.mobile
 
 import androidx.activity.ComponentActivity
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -55,5 +57,66 @@ class UiNewFeaturesTest {
         rule.waitForIdle()
         rule.onNodeWithText("Сессия защищена паролем").assertExists()
         rule.onNodeWithText("Разблокировать").assertExists()
+    }
+
+    @Test fun liveAgentTelemetryPodPipelineAndAgentRadarSheet() {
+        val vm = RelayViewModel(ApplicationProvider.getApplicationContext())
+        vm.attach(ServerProfile(name = "Cluster", host = "10.0.0.2", defaultBackend = "agy"))
+        vm.handle(JSONObject().put("type", "hello").put("home", "/root").put("protocol", 4))
+        val now = System.currentTimeMillis() / 1000.0
+        vm.handle(
+            JSONObject().put("type", "sessions").put(
+                "sessions",
+                JSONArray(
+                    listOf(
+                        JSONObject().put("id", "s-live").put("title", "Оптимизация рендера").put("cwd", "/srv/engine").put("modified", now - 20).put("running", true).put("backend", "agy"),
+                        JSONObject().put("id", "s-codex").put("title", "Миграция БД").put("cwd", "/srv/db").put("modified", now - 180).put("running", true).put("backend", "codex"),
+                    )
+                ),
+            )
+        )
+
+        rule.setContent { RelayApp(vm) }
+        rule.waitForIdle()
+
+        // Active Agents Banner is shown on SessionsScreen when >=1 session is running
+        rule.onNodeWithText("2 агента активны на сервере").assertExists()
+        rule.onNodeWithText("Радар").performClick()
+        rule.waitForIdle()
+
+        // AgentRadarSheet ("Радар агентов") opens and displays active topology nodes
+        rule.onNodeWithText("Радар агентов").assertExists()
+        rule.onNodeWithText("Выполняется в engine · открыть →").performClick()
+        rule.waitForIdle()
+
+        // 1-tap jump opens the selected session in ChatScreen
+        assertEquals(Screen.Chat, vm.screen)
+        assertEquals("s-live", vm.selected)
+
+        // Feed live pipeline events with a subagent + running command and ensure Compose settles cleanly!
+        val chat = vm.chat()!!
+        vm.handle(
+            JSONObject().put("type", "history").put("sid", "s-live").put(
+                "messages",
+                JSONArray(
+                    listOf(
+                        JSONObject().put("role", "user").put("text", "Ускорь шейдеры"),
+                        JSONObject().put("role", "tool").put("tool", "invoke_subagent").put("tool_id", "sub1")
+                            .put("input", JSONObject().put("Role", "Шейдер-аудитор").put("Prompt", "Проверь матричные проекции")),
+                        JSONObject().put("role", "tool_result").put("tool_id", "sub1").put("text", "Найдено 2 узких места"),
+                        JSONObject().put("role", "tool").put("tool", "run_command").put("tool_id", "cmd1")
+                            .put("input", JSONObject().put("CommandLine", "./gradlew benchmark").put("description", "Замер FPS")),
+                    )
+                ),
+            )
+        )
+        rule.waitForIdle()
+        assertEquals(true, chat.transcript.busy)
+        rule.onNodeWithText("Конвейер агента", substring = true).assertExists()
+        rule.onAllNodesWithContentDescription("Радар агентов")[0].performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Радар агентов").assertExists()
+        rule.onNodeWithText("Закрыть").performClick()
+        rule.waitForIdle()
     }
 }

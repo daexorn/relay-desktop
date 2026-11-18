@@ -178,15 +178,21 @@ impl RelayApp {
         let mut pause = false;
         let mut stop = false;
         egui::CentralPanel::default().frame(egui::Frame::new().fill(p.base).inner_margin(24)).show(ctx,|ui| {
+            design::ambient_horizon(ui.painter(), ui.max_rect().expand(24.), accent(), self.settings.light);
             ui.horizontal_wrapped(|ui| {
+                let (orb, _) = ui.allocate_exact_size(Vec2::splat(26.), egui::Sense::hover());
+                let any_active = run.as_ref().is_some_and(|r| {
+                    !r.paused && (r.tasks.iter().any(|t| t.state.active()) || self.chats.get(&key(&r.config.leader.server, &r.leader_sid)).is_some_and(|c| c.busy))
+                });
+                design::orbital_core(ui, orb, accent(), any_active);
                 label(ui,"Команда агентов",23.,p.text);
-                if self.demo{label(ui,"Предпросмотр",11.,p.muted);}
+                if self.demo{design::mini_pill(ui, Some(Icon::Spark), "Предпросмотр", accent(), p);}
                 if design::button(ui,"Новая команда",Some(Icon::Plus),Kind::Secondary,p,Vec2::ZERO).clicked(){new_config=true;}
                 if config.is_some()&&design::button(ui,"Настроить",Some(Icon::Settings),Kind::Ghost,p,Vec2::ZERO).clicked(){edit=true;}
             });
-            label(ui,"Один руководитель распределяет работу, исполнители возвращают ему результаты",12.,p.muted);
+            label(ui,"Живая оркестрация: руководитель распределяет задачи по серверам и движкам, исполнители возвращают результаты",12.,p.muted);
             if !self.notice.is_empty(){egui::Frame::new().fill(p.surface).corner_radius(9.).inner_margin(10).show(ui,|ui|{ui.horizontal_wrapped(|ui|{label(ui,&self.notice,12.,p.text);if ui.small_button("Закрыть").clicked(){self.notice.clear();}});});}
-            ui.add_space(14.);
+            ui.add_space(12.);
             ui.horizontal_wrapped(|ui| {
                 egui::ComboBox::from_id_salt("cluster-config").icon(design::combo_icon)
                     .selected_text(config.as_ref().map(|c|c.name.as_str()).unwrap_or("Выбрать команду"))
@@ -196,12 +202,57 @@ impl RelayApp {
                     .show_ui(ui,|ui| {for r in self.cluster_store.runs.iter().rev(){ui.selectable_value(&mut self.cluster_store.selected,Some(r.id.clone()),format!("{} · {}",r.config.name,model::shorten(&r.title,52)));}});
                 if design::button(ui,"Новая сессия",Some(Icon::Plus),Kind::Ghost,p,Vec2::ZERO).clicked(){new_session=true;}
             });
-            ui.add_space(14.);
+            ui.add_space(12.);
             egui::ScrollArea::vertical().id_salt("orchestrator-dashboard").show(ui,|ui| {
                 if let Some(c)=config {
-                    let statuses:Vec<_>=c.workers.iter().filter(|w|w.enabled).map(|a|node_status(self,run.as_deref(),a)).collect();
-                    let leader_status:String=run.as_ref().map(|r|if r.paused{"Пауза".into()}else{match self.chats.get(&key(&r.config.leader.server,&r.leader_sid)){Some(chat) if !chat.permissions.is_empty()=>"Ждёт ответа пользователя".into(),Some(chat) if chat.busy=>"Работает".into(),_ if r.tasks.iter().any(|t|!t.state.terminal())=>"Ждёт исполнителей".into(),_=>"Ожидает указаний".into()}}).unwrap_or_else(||"Отдельная сессия Claude".into());
-                    if let Some(clicked)=draw_graph(ui,c,run.as_deref(),&statuses,&leader_status,p){
+                    let light = self.settings.light;
+                    let enabled_workers = c.workers.iter().filter(|w| w.enabled).count();
+                    let active_tasks = run.as_ref().map(|r| r.tasks.iter().filter(|t| t.state.active()).count()).unwrap_or(0);
+                    let done_tasks = run.as_ref().map(|r| r.tasks.iter().filter(|t| t.state == TaskState::Done).count()).unwrap_or(0);
+                    let total_tasks = run.as_ref().map(|r| r.tasks.len()).unwrap_or(0);
+
+                    // Mission Telemetry Ribbon
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(8., 6.);
+                        design::mini_pill(
+                            ui,
+                            Some(Icon::Cluster),
+                            &format!("Исполнителей: {enabled_workers}"),
+                            accent(),
+                            p,
+                        );
+                        design::mini_pill(
+                            ui,
+                            Some(Icon::Pulse),
+                            &format!("Активно: {active_tasks} / {}", c.max_parallel),
+                            if active_tasks > 0 { accent() } else { p.muted },
+                            p,
+                        );
+                        design::mini_pill(
+                            ui,
+                            Some(Icon::Check),
+                            &format!("Завершено: {done_tasks} из {total_tasks}"),
+                            if done_tasks > 0 { GREEN } else { p.muted },
+                            p,
+                        );
+                        design::mini_pill(
+                            ui,
+                            Some(Icon::Layers),
+                            &format!("Режим: {}", mode_label(&c.mode)),
+                            p.muted,
+                            p,
+                        );
+                    });
+                    ui.add_space(10.);
+
+                    let worker_nodes: Vec<_> = c
+                        .workers
+                        .iter()
+                        .filter(|w| w.enabled)
+                        .map(|a| build_node_telemetry(self, run.as_deref(), a, false, light))
+                        .collect();
+                    let leader_node = build_node_telemetry(self, run.as_deref(), &c.leader, true, light);
+                    if let Some(clicked) = draw_graph(ui, &leader_node, &worker_nodes, light, p) {
                         if clicked=="leader" {if let Some(r)=&run{open=Some((r.config.leader.server.clone(),r.leader_sid.clone()));}}
                         else if let Some(r)=&run{if let Some(t)=r.tasks.iter().rev().find(|t|t.agent.id==clicked){open=Some((t.agent.server.clone(),t.sid.clone()));}}
                     }
@@ -226,30 +277,54 @@ impl RelayApp {
                         ui.add_enabled_ui(!self.cluster_prompt.trim().is_empty(),|ui| {
                             if design::button(ui,if run.is_some(){"Отправить руководителю"}else{"Запустить сессию кластера"},Some(Icon::Send),Kind::Primary,p,Vec2::ZERO).clicked(){start=true;}
                         });
-                        label(ui,format!("До {} задач одновременно · до {} назначений · {} исполнителей",c.max_parallel,c.max_tasks,c.workers.iter().filter(|a|a.enabled).count()),11.,p.muted);
+                        label(ui,format!("До {} задач одновременно · до {} назначений · {} исполнителей",c.max_parallel,c.max_tasks,enabled_workers),11.,p.muted);
                     });
                     if let Some(r)=&run {
                         ui.add_space(20.);label(ui,"Задачи и результаты",16.,p.text);
                         if r.tasks.is_empty(){label(ui,"Задачи появятся, когда руководитель распределит работу.",12.,p.muted);}
                         for t in r.tasks.iter().rev() {
-                            egui::Frame::new().fill(p.surface).stroke(Stroke::new(1.0_f32,p.line)).corner_radius(12.).inner_margin(12).show(ui,|ui| {
-                                ui.set_width(ui.available_width());
-                                ui.horizontal_wrapped(|ui| {
-                                    label(ui,t.state.label(),11.5,state_color(t.state,p));label(ui,&t.agent.name,12.,p.muted);
-                                    if design::button(ui,"Открыть",Some(Icon::Arrow),Kind::Ghost,p,Vec2::ZERO).clicked(){open=Some((t.agent.server.clone(),t.sid.clone()));}
+                            let eff_b = if t.agent.backend.is_empty() {
+                                self.settings.servers.iter().find(|s| s.id == t.agent.server).map(|s| s.effective_backend()).unwrap_or("claude")
+                            } else {
+                                t.agent.backend.as_str()
+                            };
+                            let b_col = design::backend_color(eff_b, light);
+                            let st_col = state_color(t.state, p);
+                            egui::Frame::new()
+                                .fill(design::mix(p.surface, st_col, if t.state.active() { 0.06 } else { 0.02 }))
+                                .stroke(Stroke::new(1.0_f32, design::mix(p.line, st_col, if t.state.active() { 0.45 } else { 0.15 })))
+                                .corner_radius(12.)
+                                .inner_margin(13)
+                                .show(ui,|ui| {
+                                    ui.set_width(ui.available_width());
+                                    ui.horizontal_wrapped(|ui| {
+                                        design::mini_pill(ui, Some(if t.state == TaskState::Done { Icon::Check } else { Icon::Pulse }), t.state.label(), st_col, p);
+                                        design::mini_pill(ui, Some(design::backend_icon(eff_b)), crate::model::backend_short_label(eff_b), b_col, p);
+                                        label(ui,&t.agent.name,12.5,p.text);
+                                        if t.delivered {
+                                            design::mini_pill(ui, Some(Icon::Check), "Передано руководителю", GREEN, p);
+                                        }
+                                        if design::button(ui,"Открыть сессию",Some(Icon::Arrow),Kind::Ghost,p,Vec2::ZERO).clicked(){open=Some((t.agent.server.clone(),t.sid.clone()));}
+                                    });
+                                    ui.add_space(4.);
+                                    ui.add(egui::Label::new(RichText::new(&t.title).size(14.).color(p.text)).wrap());
+                                    if !t.error.is_empty(){label(ui,model::shorten(&t.error,240),12.,Color32::from_rgb(228,126,136));}
+                                    if !t.result.is_empty(){label(ui,model::shorten(&t.result,350),12.,p.muted);}
                                 });
-                                ui.add(egui::Label::new(RichText::new(&t.title).size(14.)).wrap());
-                                if !t.error.is_empty(){label(ui,model::shorten(&t.error,240),12.,Color32::from_rgb(222,143,151));}
-                                if !t.result.is_empty(){label(ui,model::shorten(&t.result,350),12.,p.muted);}
-                                if t.delivered{label(ui,"Результат передан руководителю",10.5,GREEN);}
-                            });ui.add_space(7.);
+                            ui.add_space(7.);
                         }
-                        ui.add_space(18.);label(ui,"Журнал команды",15.,p.text);
-                        for entry in r.journal.iter().rev().take(12) {label(ui,&entry.message,12.,p.muted);}
+                        ui.add_space(18.);label(ui,"Журнал оркестрации",15.,p.text);
+                        for entry in r.journal.iter().rev().take(12) {
+                            ui.horizontal(|ui| {
+                                let (dr, _) = ui.allocate_exact_size(Vec2::splat(10.), egui::Sense::hover());
+                                ui.painter().circle_filled(dr.center(), 2.5, accent().gamma_multiply(0.7));
+                                label(ui,&entry.message,12.,p.muted);
+                            });
+                        }
                     }
                 }else{
                     ui.add_space(40.);label(ui,"Создай команду и выбери её руководителя",21.,p.text);
-                    label(ui,"У каждого исполнителя может быть свой хост, папка, модель и промпт.",13.,p.muted);
+                    label(ui,"У каждого исполнителя может быть свой хост, папка, движок (Claude, Codex, AGY, API) и промпт.",13.,p.muted);
                 }
             });
         });
@@ -506,34 +581,99 @@ impl RelayApp {
     fn seed_cluster_demo(&mut self) {
         let mut c = self.default_cluster_config();
         c.name = "Команда Relay".into();
+        c.leader.name = "Архитектор".into();
+        c.leader.backend = "claude".into();
         c.workers = vec![
             Agent {
                 id: "ui-worker".into(),
-                name: "Интерфейс".into(),
+                name: "Интерфейс ПК".into(),
                 server: "demo".into(),
+                backend: "codex".into(),
+                model: "gpt-5.4".into(),
                 ..Default::default()
             },
             Agent {
                 id: "review-worker".into(),
-                name: "Проверка".into(),
+                name: "Проверка ядра".into(),
                 server: "stage".into(),
+                backend: "claude".into(),
+                model: "sonnet".into(),
+                ..Default::default()
+            },
+            Agent {
+                id: "mobile-worker".into(),
+                name: "Android и TUI".into(),
+                server: "demo".into(),
+                backend: "agy".into(),
+                model: "gemini-3.1-pro-preview".into(),
                 ..Default::default()
             },
         ];
         let mut r = Run::new(
             c.clone(),
-            "Обновить приложение и проверить результат".into(),
+            "Собрать визуализацию конвейера агентов и проверить совместимость".into(),
         );
         r.dispatch(
             "one",
-            &json!({"worker":"ui-worker","title":"Новый интерфейс","task":"Обновить интерфейс"}),
+            &json!({"worker":"ui-worker","title":"Топология и конвейер шагов","task":"Отрисовать узлы агентов и потоки"}),
         )
         .unwrap();
-        r.dispatch("two",&json!({"worker":"review-worker","title":"Проверить совместимость","task":"Проверить старые настройки"})).unwrap();
+        r.dispatch(
+            "two",
+            &json!({"worker":"review-worker","title":"Проверить совместимость","task":"Проверить старые настройки и тесты"}),
+        )
+        .unwrap();
+        r.dispatch(
+            "three",
+            &json!({"worker":"mobile-worker","title":"Радар агентов на Android","task":"Обновить экраны и шторку радара"}),
+        )
+        .unwrap();
         r.tasks[0].state = TaskState::Running;
         r.tasks[1].state = TaskState::Done;
-        r.tasks[1].result = "Старые профили загружаются. Проверки пройдены.".into();
+        r.tasks[1].result = "Старые профили загружаются. 142 проверки пройдены.".into();
         r.tasks[1].delivered = true;
+        r.tasks[2].state = TaskState::Running;
+
+        // Populate live tool telemetry on demo workers so topology cards show real actions
+        let mut w1_chat = Chat::new(r.tasks[0].sid.clone(), "/opt/relay".into(), "Интерфейс ПК".into());
+        w1_chat.busy = true;
+        w1_chat.loaded = true;
+        w1_chat.messages = vec![
+            Message {
+                role: "tool".into(),
+                tool: "Edit".into(),
+                tool_id: "w1-t1".into(),
+                input: json!({"file_path": "/opt/relay/src/timeline.rs", "description": "Конвейер шагов"}),
+                ..Default::default()
+            },
+            Message {
+                role: "tool_result".into(),
+                tool_id: "w1-t1".into(),
+                text: "ok".into(),
+                ..Default::default()
+            },
+            Message {
+                role: "tool".into(),
+                tool: "Bash".into(),
+                tool_id: "w1-t2".into(),
+                input: json!({"command": "cargo test --locked", "description": "Проверка Rust-тестов"}),
+                ..Default::default()
+            },
+        ];
+        self.chats.insert(key("demo", &r.tasks[0].sid), w1_chat);
+
+        let mut w3_chat = Chat::new(r.tasks[2].sid.clone(), "/opt/relay/android".into(), "Android и TUI".into());
+        w3_chat.busy = true;
+        w3_chat.loaded = true;
+        w3_chat.messages = vec![Message {
+            role: "tool".into(),
+            tool: "Edit".into(),
+            tool_id: "w3-t1".into(),
+            input: json!({"file_path": "/opt/relay/android/app/src/main/java/dev/relay/mobile/Ui.kt", "description": "Шторка радара агентов"}),
+            ..Default::default()
+        }];
+        self.chats.insert(key("demo", &r.tasks[2].sid), w3_chat);
+
         self.settings.orchestrators = vec![c];
         self.cluster_store.selected = Some(r.id.clone());
         self.cluster_store.runs.push(r);
@@ -728,89 +868,276 @@ fn variable_picker(
                 });
         });
 }
-fn node_status(app: &RelayApp, run: Option<&Run>, agent: &Agent) -> String {
-    if let Some(t) = run.and_then(|r| r.tasks.iter().rev().find(|t| t.agent.id == agent.id)) {
-        return t.state.label().into();
+struct NodeTelemetry {
+    id: String,
+    name: String,
+    host: String,
+    backend: String,
+    status: String,
+    detail: String,
+    tel: crate::model::TurnTelemetry,
+    active: bool,
+    done: bool,
+    delivered: bool,
+    failed: bool,
+    assigned_count: usize,
+    done_count: usize,
+}
+
+fn build_node_telemetry(
+    app: &RelayApp,
+    run: Option<&Run>,
+    agent: &Agent,
+    leader: bool,
+    _light: bool,
+) -> NodeTelemetry {
+    let srv = app.settings.servers.iter().find(|s| s.id == agent.server);
+    let host = srv
+        .map(|s| s.name.clone())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "хост".into());
+    let backend = if crate::model::valid_backend(&agent.backend) {
+        agent.backend.clone()
+    } else {
+        srv.map(|s| s.effective_backend().to_owned())
+            .unwrap_or_else(|| "claude".into())
+    };
+
+    if leader {
+        let (status, active, sid_opt) = if let Some(r) = run {
+            let k = key(&r.config.leader.server, &r.leader_sid);
+            let st = if r.paused {
+                ("На паузе".into(), false)
+            } else {
+                match app.chats.get(&k) {
+                    Some(chat) if !chat.permissions.is_empty() => {
+                        ("Ждёт подтверждения".into(), true)
+                    }
+                    Some(chat) if chat.busy => ("Координирует команду".into(), true),
+                    _ if r.tasks.iter().any(|t| !t.state.terminal()) => {
+                        ("Принимает отчёты".into(), true)
+                    }
+                    _ => ("Ожидает цель".into(), false),
+                }
+            };
+            (st.0, st.1, Some(k))
+        } else {
+            ("Готов к запуску".into(), false, None)
+        };
+        let tel = sid_opt
+            .as_ref()
+            .and_then(|k| app.chats.get(k))
+            .map(|c| crate::model::analyze_turn(&c.messages, c.user_at, c.busy, &c.status))
+            .unwrap_or_default();
+        let detail = if !tel.active_target.is_empty() {
+            tel.active_target.clone()
+        } else if let Some(r) = run {
+            model::shorten(&r.title, 42)
+        } else {
+            "Оркестрация и проверка результатов".into()
+        };
+        let assigned_count = run.map(|r| r.tasks.len()).unwrap_or(0);
+        let done_count = run
+            .map(|r| r.tasks.iter().filter(|t| t.state == TaskState::Done).count())
+            .unwrap_or(0);
+        return NodeTelemetry {
+            id: "leader".into(),
+            name: agent.name.clone(),
+            host,
+            backend,
+            status,
+            detail,
+            tel,
+            active,
+            done: assigned_count > 0 && done_count == assigned_count && !active,
+            delivered: false,
+            failed: false,
+            assigned_count,
+            done_count,
+        };
     }
-    if app.connected(&agent.server) {
+
+    let worker_tasks: Vec<_> = run
+        .map(|r| r.tasks.iter().filter(|t| t.agent.id == agent.id).collect())
+        .unwrap_or_default();
+    let assigned_count = worker_tasks.len();
+    let done_count = worker_tasks
+        .iter()
+        .filter(|t| t.state == TaskState::Done)
+        .count();
+    let latest = worker_tasks.last().copied();
+    let status = if let Some(t) = latest {
+        t.state.label().to_owned()
+    } else if app.connected(&agent.server) {
         "Готов".into()
     } else {
-        "Нет подключения".into()
+        "Нет связи".into()
+    };
+    let active = latest.is_some_and(|t| matches!(t.state, TaskState::Running | TaskState::Waiting));
+    let done = latest.is_some_and(|t| t.state == TaskState::Done);
+    let delivered = latest.is_some_and(|t| t.delivered);
+    let failed =
+        latest.is_some_and(|t| matches!(t.state, TaskState::Failed | TaskState::Interrupted));
+
+    let tel = latest
+        .and_then(|t| app.chats.get(&key(&t.agent.server, &t.sid)))
+        .map(|c| crate::model::analyze_turn(&c.messages, c.user_at, c.busy, &c.status))
+        .unwrap_or_default();
+    let detail = if active && !tel.active_target.is_empty() {
+        tel.active_target.clone()
+    } else if active && !tel.active_headline.is_empty() {
+        tel.active_headline.clone()
+    } else if let Some(t) = latest {
+        model::shorten(&t.title, 42)
+    } else {
+        "Свободный слот исполнителя".into()
+    };
+
+    NodeTelemetry {
+        id: agent.id.clone(),
+        name: agent.name.clone(),
+        host,
+        backend,
+        status,
+        detail,
+        tel,
+        active,
+        done,
+        delivered,
+        failed,
+        assigned_count,
+        done_count,
     }
 }
+
 fn state_color(state: TaskState, p: Palette) -> Color32 {
     match state {
         TaskState::Done => GREEN,
         TaskState::Running | TaskState::Waiting => accent(),
-        TaskState::Failed | TaskState::Interrupted => Color32::from_rgb(222, 143, 151),
+        TaskState::Failed | TaskState::Interrupted => Color32::from_rgb(228, 126, 136),
         _ => p.muted,
     }
 }
+
+fn bezier_point(p0: egui::Pos2, p1: egui::Pos2, p2: egui::Pos2, p3: egui::Pos2, t: f32) -> egui::Pos2 {
+    let q = 1.0 - t;
+    (p0.to_vec2() * (q * q * q)
+        + p1.to_vec2() * (3.0 * q * q * t)
+        + p2.to_vec2() * (3.0 * q * t * t)
+        + p3.to_vec2() * (t * t * t))
+    .to_pos2()
+}
+
 fn draw_graph(
     ui: &mut egui::Ui,
-    c: &Config,
-    _run: Option<&Run>,
-    statuses: &[String],
-    leader_status: &str,
+    leader: &NodeTelemetry,
+    workers: &[NodeTelemetry],
+    light: bool,
     p: Palette,
 ) -> Option<String> {
-    let workers: Vec<_> = c.workers.iter().filter(|w| w.enabled).collect();
     let width = ui.available_width();
-    let narrow = width < 580.;
+    let narrow = width < 640.;
+    let node_h = 104.;
+    let row_step = 116.;
     let height = if narrow {
-        140. + workers.len() as f32 * 82.
+        166. + workers.len() as f32 * row_step
     } else {
-        (workers.len() as f32 * 85. + 20.).max(230.)
+        (workers.len() as f32 * row_step + 34.).max(264.)
     };
     let (area, _) = ui.allocate_exact_size(Vec2::new(width, height), egui::Sense::hover());
-    ui.painter().rect_filled(area, 14., p.side);
+    ui.painter()
+        .rect_filled(area, 16., design::mix(p.side, p.base, 0.38));
     ui.painter().rect_stroke(
         area,
-        14.,
-        Stroke::new(1.0_f32, p.line),
+        16.,
+        Stroke::new(1.0_f32, design::mix(p.line, accent(), 0.22)),
         egui::StrokeKind::Inside,
     );
+    design::specular_rim(ui.painter(), area, 16., light);
+
+    // Subtle next-gen coordinate dot-matrix canvas
+    let grid_step = 24.0_f32;
+    let dot_col = p.line.gamma_multiply(if light { 0.55 } else { 0.42 });
+    let mut gx = area.left() + 18.0;
+    while gx < area.right() - 12.0 {
+        let mut gy = area.top() + 18.0;
+        while gy < area.bottom() - 12.0 {
+            ui.painter().circle_filled(egui::pos2(gx, gy), 0.95, dot_col);
+            gy += grid_step;
+        }
+        gx += grid_step;
+    }
+
     let w = if narrow {
-        (width - 44.).min(280.)
+        (width - 40.).min(320.)
     } else {
-        (width * 0.36).clamp(160., 255.)
+        (width * 0.38).clamp(186., 296.)
     };
-    let leader = egui::Rect::from_center_size(
+    let leader_rect = egui::Rect::from_center_size(
         egui::pos2(
             if narrow {
                 area.center().x
             } else {
-                area.left() + w / 2. + 22.
+                area.left() + w / 2. + 24.
             },
             if narrow {
-                area.top() + 58.
+                area.top() + 68.
             } else {
                 area.center().y
             },
         ),
-        Vec2::new(w, 86.),
+        Vec2::new(w, node_h + 6.),
     );
+
+    // Ambient radial aura behind leader node
+    let lead_col = design::backend_color(&leader.backend, light);
+    ui.painter().circle_filled(
+        leader_rect.center(),
+        w * 0.44,
+        lead_col.gamma_multiply(if leader.active { 0.08 } else { 0.04 }),
+    );
+
+    let animated = ui
+        .ctx()
+        .data(|d| d.get_temp::<bool>(egui::Id::new("relay-animations")))
+        .unwrap_or(true);
+    let now = ui.input(|i| i.time) as f32;
+    let mut any_anim = false;
     let mut clicked = None;
-    for (i, a) in workers.iter().enumerate() {
+
+    let total_workers_h = if workers.is_empty() {
+        0.
+    } else {
+        (workers.len() - 1) as f32 * row_step
+    };
+    let workers_start_y = if narrow {
+        area.top() + 190.
+    } else {
+        area.center().y - total_workers_h * 0.5
+    };
+
+    for (i, w_node) in workers.iter().enumerate() {
         let node = egui::Rect::from_center_size(
             egui::pos2(
                 if narrow {
                     area.center().x
                 } else {
-                    area.right() - w / 2. - 22.
+                    area.right() - w / 2. - 24.
                 },
-                if narrow {
-                    area.top() + 158. + i as f32 * 82.
-                } else {
-                    area.top() + 55. + i as f32 * 85.
-                },
+                workers_start_y + i as f32 * row_step,
             ),
-            Vec2::new(w, 74.),
+            Vec2::new(w, node_h),
         );
+        let w_col = design::backend_color(&w_node.backend, light);
+        if w_node.active {
+            ui.painter()
+                .circle_filled(node.center(), w * 0.38, w_col.gamma_multiply(0.075));
+        }
+
         let start = if narrow {
-            leader.center_bottom()
+            leader_rect.center_bottom()
         } else {
-            leader.right_center()
+            leader_rect.right_center()
         };
         let end = if narrow {
             node.center_top()
@@ -818,101 +1145,219 @@ fn draw_graph(
             node.left_center()
         };
         let d = if narrow {
-            Vec2::new(0., (end.y - start.y) * 0.5)
+            Vec2::new(0., (end.y - start.y) * 0.52)
         } else {
-            Vec2::new((end.x - start.x) * 0.5, 0.)
+            Vec2::new((end.x - start.x) * 0.52, 0.)
         };
-        let active = statuses.get(i).is_some_and(|s| s == "В работе");
+        let p1 = start + d;
+        let p2 = end - d;
+        let line_col = if w_node.failed {
+            Color32::from_rgb(228, 126, 136)
+        } else if w_node.active {
+            w_col
+        } else if w_node.done {
+            GREEN.gamma_multiply(0.75)
+        } else {
+            p.line
+        };
+
+        // Soft outer conduit glow + crisp inner conduit
+        if w_node.active || w_node.done {
+            ui.painter()
+                .add(egui::epaint::CubicBezierShape::from_points_stroke(
+                    [start, p1, p2, end],
+                    false,
+                    Color32::TRANSPARENT,
+                    Stroke::new(5.5_f32, line_col.gamma_multiply(0.14)),
+                ));
+        }
         ui.painter()
             .add(egui::epaint::CubicBezierShape::from_points_stroke(
-                [start, start + d, end - d, end],
+                [start, p1, p2, end],
                 false,
                 Color32::TRANSPARENT,
                 Stroke::new(
-                    if active { 2.0_f32 } else { 1.0_f32 },
-                    if active { accent() } else { p.line },
+                    if w_node.active { 2.0_f32 } else { 1.25_f32 },
+                    line_col,
                 ),
             ));
-        if active {
-            let t = (ui.input(|i| i.time) as f32 * 0.45) % 1.;
-            let q = 1. - t;
-            let pos = start.to_vec2() * (q * q * q)
-                + (start + d).to_vec2() * (3. * q * q * t)
-                + (end - d).to_vec2() * (3. * q * t * t)
-                + end.to_vec2() * (t * t * t);
-            ui.painter().circle_filled(pos.to_pos2(), 3., accent());
+        // Endpoint anchor sockets
+        ui.painter().circle_filled(start, 3.0, lead_col);
+        ui.painter().circle_filled(end, 3.0, line_col);
+
+        // Multi-particle forward stream while active; return telemetry pulse when delivered
+        if w_node.active {
+            any_anim = true;
+            for k in 0..3 {
+                let t = if animated {
+                    (now * 0.48 + k as f32 * 0.33 + i as f32 * 0.17) % 1.0
+                } else {
+                    0.25 + k as f32 * 0.28
+                };
+                let pt = bezier_point(start, p1, p2, end, t);
+                ui.painter()
+                    .circle_filled(pt, 5.2, w_col.gamma_multiply(0.22));
+                ui.painter().circle_filled(pt, 2.7, w_col);
+            }
+        } else if w_node.delivered {
+            let t = if animated {
+                any_anim = true;
+                1.0 - ((now * 0.30 + i as f32 * 0.25) % 1.0)
+            } else {
+                0.5
+            };
+            let pt = bezier_point(start, p1, p2, end, t);
+            ui.painter()
+                .circle_filled(pt, 4.6, GREEN.gamma_multiply(0.22));
+            ui.painter().circle_filled(pt, 2.3, GREEN);
         }
 
-        if graph_node(
-            ui,
-            node,
-            &a.name,
-            statuses.get(i).map(String::as_str).unwrap_or("Готов"),
-            p,
-            false,
-            a.id.as_str(),
-        )
-        .clicked()
-        {
-            clicked = Some(a.id.clone());
+        if graph_node(ui, node, w_node, false, light, p).clicked() {
+            clicked = Some(w_node.id.clone());
         }
     }
-    if graph_node(ui, leader, &c.leader.name, leader_status, p, true, "leader").clicked() {
+
+    if graph_node(ui, leader_rect, leader, true, light, p).clicked() {
         clicked = Some("leader".into());
+    }
+    if any_anim && animated {
+        ui.ctx()
+            .request_repaint_after(Duration::from_millis(28));
     }
     clicked
 }
+
 fn graph_node(
     ui: &mut egui::Ui,
     r: egui::Rect,
-    name: &str,
-    status: &str,
-    p: Palette,
+    n: &NodeTelemetry,
     leader: bool,
-    id: &str,
+    light: bool,
+    p: Palette,
 ) -> egui::Response {
-    let response = ui.interact(r, ui.id().with(("agent-graph", id)), egui::Sense::click());
+    let response = ui.interact(r, ui.id().with(("agent-graph", &n.id)), egui::Sense::click());
     let hover = ui.ctx().animate_bool_with_time(
         response.id.with("hover"),
         response.hovered(),
         design::duration(ui.ctx(), 0.18),
     );
-    ui.painter()
-        .rect_filled(r, 12., design::mix(p.surface, p.line, hover * 0.5));
+    let b_col = design::backend_color(&n.backend, light);
+    let status_col = if n.failed {
+        Color32::from_rgb(228, 126, 136)
+    } else if n.active {
+        b_col
+    } else if n.done {
+        GREEN
+    } else {
+        p.muted
+    };
+
+    ui.painter().rect_filled(
+        r,
+        13.,
+        design::mix(
+            p.surface,
+            design::mix(p.line, b_col, 0.25),
+            if n.active { 0.22 } else { 0.06 } + hover * 0.28,
+        ),
+    );
     ui.painter().rect_stroke(
         r,
-        12.,
+        13.,
         Stroke::new(
-            if leader { 1.5_f32 } else { 1.0_f32 },
-            if leader { accent() } else { p.line },
+            if leader || n.active { 1.45_f32 } else { 1.0_f32 },
+            if n.active || leader {
+                design::mix(p.line, b_col, 0.62)
+            } else {
+                design::mix(p.line, b_col, 0.22 + hover * 0.35)
+            },
         ),
         egui::StrokeKind::Inside,
     );
-    let painter = ui.painter().with_clip_rect(r.shrink(10.));
-    painter.text(
-        r.left_top() + Vec2::new(12., 12.),
-        egui::Align2::LEFT_TOP,
-        if leader {
-            "РУКОВОДИТЕЛЬ"
-        } else {
-            "ИСПОЛНИТЕЛЬ"
-        },
-        FontId::proportional(9.5),
-        if leader { accent() } else { p.muted },
+    // Signature top-left accent bar
+    ui.painter().line_segment(
+        [
+            egui::pos2(r.left() + 14., r.top() + 1.0),
+            egui::pos2(r.right() - 14., r.top() + 1.0),
+        ],
+        Stroke::new(1.6_f32, b_col.gamma_multiply(if n.active || leader { 0.65 } else { 0.28 })),
+    );
+
+    // Orbital / status emblem in top-right of card
+    let orb_rect = egui::Rect::from_center_size(
+        egui::pos2(r.right() - 22., r.top() + 22.),
+        Vec2::splat(20.),
+    );
+    if n.active {
+        design::orbital_core(ui, orb_rect, b_col, true);
+    } else if n.done {
+        ui.painter()
+            .circle_filled(orb_rect.center(), 9.5, GREEN.gamma_multiply(0.16));
+        design::icon(ui.painter(), orb_rect.shrink(4.), Icon::Check, GREEN);
+    } else {
+        ui.painter()
+            .circle_filled(orb_rect.center(), 9.5, b_col.gamma_multiply(0.13));
+        design::icon(
+            ui.painter(),
+            orb_rect.shrink(4.),
+            design::backend_icon(&n.backend),
+            b_col,
+        );
+    }
+
+    let painter = ui.painter().with_clip_rect(r.shrink2(Vec2::new(12., 8.)));
+    let role_tag = format!(
+        "{} · {} · @{}",
+        if leader { "ОРКЕСТРАТОР" } else { "ИСПОЛНИТЕЛЬ" },
+        crate::model::backend_short_label(&n.backend).to_uppercase(),
+        model::shorten(&n.host, 12),
     );
     painter.text(
-        r.left_top() + Vec2::new(12., 29.),
+        r.left_top() + Vec2::new(13., 11.),
         egui::Align2::LEFT_TOP,
-        name,
-        FontId::proportional(14.),
+        role_tag,
+        FontId::proportional(9.5),
+        b_col,
+    );
+    painter.text(
+        r.left_top() + Vec2::new(13., 28.),
+        egui::Align2::LEFT_TOP,
+        model::shorten(&n.name, 24),
+        FontId::proportional(14.5),
         p.text,
     );
     painter.text(
-        r.left_bottom() + Vec2::new(12., -11.),
-        egui::Align2::LEFT_BOTTOM,
-        status,
-        FontId::proportional(10.5),
-        p.muted,
+        r.left_top() + Vec2::new(13., 49.),
+        egui::Align2::LEFT_TOP,
+        model::shorten(&n.detail, 34),
+        FontId::monospace(10.8),
+        design::mix(p.text, p.muted, 0.35),
     );
+
+    // Bottom telemetry row: status + mini phase bar or task counter
+    painter.circle_filled(r.left_bottom() + Vec2::new(17., -15.), 3.0, status_col);
+    painter.text(
+        r.left_bottom() + Vec2::new(24., -9.),
+        egui::Align2::LEFT_BOTTOM,
+        &n.status,
+        FontId::proportional(10.8),
+        status_col,
+    );
+    if n.tel.total_actions > 0 && r.width() >= 210. {
+        let pb = egui::Rect::from_min_size(
+            egui::pos2(r.right() - 62., r.bottom() - 18.),
+            Vec2::new(48., 5.),
+        );
+        design::phase_bar(ui.painter(), pb, &n.tel, light, p);
+    } else if n.assigned_count > 0 && r.width() >= 210. {
+        painter.text(
+            r.right_bottom() + Vec2::new(-13., -9.),
+            egui::Align2::RIGHT_BOTTOM,
+            format!("{}/{}", n.done_count, n.assigned_count),
+            FontId::proportional(10.5),
+            p.muted,
+        );
+    }
+
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
