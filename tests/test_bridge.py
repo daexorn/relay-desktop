@@ -761,25 +761,31 @@ class UsageTests(unittest.TestCase):
                 'auth_method':'oauth-personal',
                 'token':{'access_token':'agy-fixture-secret','expiry':'2099-01-01T13:59:39.985059589Z','refresh_token':'do-not-leak'}
             }))
-            response={'groups':[{'displayName':'Claude and GPT models','buckets':[
-                {'bucketId':'3p-weekly','window':'weekly','displayName':'Weekly Limit Remaining','resetTime':'2099-01-07T10:00:00Z','remainingFraction':0.4992},
+            summary={'groups':[{'displayName':'Claude and GPT models','buckets':[
+                {'bucketId':'3p-weekly','window':'weekly','displayName':'Weekly Limit Remaining','resetTime':'2099-01-07T10:00:00Z','remainingFraction':0.0109},
                 {'bucketId':'3p-5h','window':'5h','displayName':'Five Hour Limit Remaining','resetTime':'2099-01-01T18:00:00Z','remainingFraction':1},
             ]}],'secret':'do-not-forward'}
+            buckets={'buckets':[
+                {'modelId':'gemini-2.5-pro','remainingFraction':0.1574,'resetTime':'2099-01-05T10:00:00Z'},
+                {'modelId':'claude-opus-5-5-high','remainingFraction':0.0109,'resetTime':'2099-01-07T10:00:00Z'},
+                {'modelId':'tab_jump_flash_lite_preview','remainingFraction':1},
+            ]}
             state=bridge.AgyUsageState()
             with mock.patch.dict(bridge.os.environ,{'AGY_DATA_DIR':folder}),mock.patch.object(bridge.urllib.request,'build_opener') as factory:
-                factory.return_value.open.return_value=io.BytesIO(json.dumps(response).encode())
+                factory.return_value.open.side_effect=[io.BytesIO(json.dumps(summary).encode()),io.BytesIO(json.dumps(buckets).encode())]
                 state.fetch_oauth()
-                request=factory.return_value.open.call_args.args[0]
-                self.assertEqual(request.full_url,bridge.AgyUsageState.QUOTA_URL)
-                self.assertEqual(factory.return_value.open.call_args.kwargs['timeout'],6)
+                urls=[call.args[0].full_url for call in factory.return_value.open.call_args_list]
+                self.assertEqual(urls,[bridge.AgyUsageState.QUOTA_URL,bridge.AgyUsageState.BUCKETS_URL])
+                self.assertEqual(factory.return_value.open.call_args_list[0].kwargs['timeout'],6)
             short_snap=state.snapshot(short=True)
             self.assertTrue(short_snap['available'])
             self.assertEqual(short_snap['backend'],'agy')
-            self.assertEqual([w['id'] for w in short_snap['windows']],['five_hour','seven_day'])
-            self.assertEqual([w['utilization'] for w in short_snap['windows']],[0.0,50.1])
-            self.assertEqual([w['label'] for w in short_snap['windows']],['5 часов','Неделя'])
+            self.assertEqual([w['id'] for w in short_snap['windows']],['agy_gemini_weekly','agy_3p_weekly','agy_3p_5h'])
+            self.assertEqual([w['utilization'] for w in short_snap['windows']],[84.3,98.9,0.0])
+            self.assertEqual([w['label'] for w in short_snap['windows']],['Gemini · нед','Claude/GPT · нед','Claude/GPT · 5ч'])
             full_snap=state.snapshot(short=False)
-            self.assertEqual(full_snap['windows'][1]['label'],'Claude and GPT models · Неделя')
+            self.assertEqual(full_snap['windows'][0]['label'],'Gemini · Неделя')
+            self.assertEqual(full_snap['windows'][1]['label'],'Claude и GPT · Неделя')
             dumped=json.dumps(short_snap)+json.dumps(full_snap)
             self.assertNotIn('agy-fixture-secret',dumped)
             self.assertNotIn('do-not-leak',dumped)
@@ -802,17 +808,17 @@ class UsageTests(unittest.TestCase):
                 'token':{'access_token':'agy-fixture','expiry':'2099-01-01T00:00:00Z'}
             }))
             models_resp={'models':{
-                'claude-opus':{'displayName':'Claude Opus','modelProvider':'MODEL_PROVIDER_ANTHROPIC','quotaInfo':{'remainingFraction':0.6,'resetTime':'2099-01-02T00:00:00Z'}},
-                'gemini-pro':{'displayName':'Gemini Pro','modelProvider':'MODEL_PROVIDER_GOOGLE','quotaInfo':{'remainingFraction':0.9,'resetTime':'2099-01-01T05:00:00Z'}},
+                'claude-opus':{'displayName':'Claude Opus','modelProvider':'MODEL_PROVIDER_ANTHROPIC','quotaInfo':{'remainingFraction':0.6,'resetTime':'2099-01-05T00:00:00Z'}},
+                'gemini-pro':{'displayName':'Gemini Pro','modelProvider':'MODEL_PROVIDER_GOOGLE','quotaInfo':{'remainingFraction':0.9,'resetTime':'2099-01-05T00:00:00Z'}},
             }}
             state=bridge.AgyUsageState()
             with mock.patch.dict(bridge.os.environ,{'AGY_DATA_DIR':folder}),mock.patch.object(bridge.urllib.request,'build_opener') as factory:
-                factory.return_value.open.side_effect=[io.BytesIO(b'{"groups":[]}'),io.BytesIO(json.dumps(models_resp).encode())]
+                factory.return_value.open.side_effect=[io.BytesIO(b'{"groups":[]}'),io.BytesIO(b'{"buckets":[]}'),io.BytesIO(json.dumps(models_resp).encode())]
                 state.fetch_oauth()
             snap=state.snapshot()
             self.assertTrue(snap['available'])
             self.assertEqual(snap['source'],'agy_available_models')
-            self.assertEqual([(w['id'],w['utilization']) for w in snap['windows']],[('agy_3p',40.0),('agy_gemini',10.0)])
+            self.assertEqual([(w['id'],w['utilization']) for w in snap['windows']],[('agy_gemini_weekly',10.0),('agy_3p_weekly',40.0)])
 
 
 if __name__=='__main__':unittest.main()

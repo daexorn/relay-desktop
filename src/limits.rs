@@ -111,7 +111,7 @@ pub fn show(ui: &mut egui::Ui, usage: &Usage, palette: Palette, connected: bool,
         }
 
         let mut needs_countdown = false;
-        for (index, window) in windows.iter().take(3).enumerate() {
+        for (index, window) in windows.iter().take(4).enumerate() {
             if index > 0 {
                 ui.add_space(4.);
             }

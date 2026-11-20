@@ -205,8 +205,11 @@ class UsageState:
 
 class AgyUsageState:
     """Whitelist-only Antigravity account usage, never credentials. No login/refresh actions."""
-    QUOTA_URL = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
-    MODELS_URL = "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels"
+    DAILY_BASE = "https://daily-cloudcode-pa.googleapis.com"
+    FALLBACK_BASE = "https://cloudcode-pa.googleapis.com"
+    QUOTA_URL = DAILY_BASE + "/v1internal:retrieveUserQuotaSummary"
+    BUCKETS_URL = DAILY_BASE + "/v1internal:retrieveUserQuota"
+    MODELS_URL = DAILY_BASE + "/v1internal:fetchAvailableModels"
 
     def __init__(self):
         self.lock = threading.Lock()
@@ -249,7 +252,7 @@ class AgyUsageState:
             headers={
                 "Authorization": "Bearer " + token,
                 "Content-Type": "application/json",
-                "User-Agent": "antigravity/1.5.11 linux/amd64",
+                "User-Agent": "antigravity/1.5.13 linux/amd64",
                 "Accept": "application/json",
             },
             method="POST",
@@ -262,16 +265,25 @@ class AgyUsageState:
         return parsed if isinstance(parsed, dict) else None
 
     @staticmethod
-    def _parse_summary(data, now):
+    def _group_tag(name, bucket_id=""):
+        text = f"{name} {bucket_id}".lower()
+        if "gemini" in text:
+            return "gemini", "Gemini", "Gemini"
+        if "3p" in text or "claude" in text or "gpt" in text:
+            return "3p", "Claude/GPT", "Claude и GPT"
+        clean = " ".join(str(name or "").split())[:24].replace("|", "/")
+        return clean.lower() or "other", clean[:12] or "AGY", clean or "Antigravity"
+
+    @classmethod
+    def _parse_summary(cls, data, now):
         groups = data.get("groups")
         if not isinstance(groups, list):
-            return [], []
-        valid_groups = [g for g in groups if isinstance(g, dict) and isinstance(g.get("buckets"), list) and g.get("buckets")]
-        single = len(valid_groups) == 1
-        short_windows, full_windows = [], []
-        for group in valid_groups:
+            return [], [], set()
+        short_windows, full_windows, seen_groups = [], [], set()
+        for group in groups:
+            if not isinstance(group, dict) or not isinstance(group.get("buckets"), list):
+                continue
             group_name = " ".join(str(group.get("displayName") or "").split())[:40].replace("|", "/")
-            short_group = group_name.replace(" models", "").replace("Claude and GPT", "Claude/GPT")[:14]
             for bucket in group.get("buckets", []):
                 if not isinstance(bucket, dict):
                     continue
@@ -280,25 +292,61 @@ class AgyUsageState:
                 reset = usage_time(bucket.get("resetTime"))
                 if (utilization is None and reset is None) or (reset is not None and reset <= now):
                     continue
-                kind = str(bucket.get("window") or "").lower()
+                kind = str(bucket.get("window") or bucket.get("refreshWindowLabel") or "").lower()
                 bid = " ".join(str(bucket.get("bucketId") or "").split())[:40]
+                tag, short_group, full_group = cls._group_tag(group_name, bid)
+                seen_groups.add(tag)
                 if kind == "5h" or bid.endswith("-5h"):
-                    win_id = "five_hour" if single else (bid or f"{short_group}:5h")
-                    base_label = "5 часов"
+                    win_id = f"agy_{tag}_5h"
+                    short_win, full_win = "5ч", "5 часов"
                 elif kind == "weekly" or bid.endswith("-weekly"):
-                    win_id = "seven_day" if single else (bid or f"{short_group}:weekly")
-                    base_label = "Неделя"
+                    win_id = f"agy_{tag}_weekly"
+                    short_win, full_win = "нед", "Неделя"
                 else:
-                    win_id = bid or kind or f"agy_{len(short_windows)}"
-                    base_label = " ".join(str(bucket.get("displayName") or kind or "Лимит").split())[:24].replace("|", "/")
-                short_label = base_label if single else (f"{short_group} · {base_label}" if short_group else base_label)[:24]
-                full_label = f"{group_name} · {base_label}" if group_name else base_label
-                short_windows.append({"id": win_id, "label": short_label, "utilization": utilization, "resets_at": reset})
-                full_windows.append({"id": win_id, "label": full_label, "utilization": utilization, "resets_at": reset})
-        order = {"five_hour": 0, "seven_day": 1}
-        short_windows.sort(key=lambda w: order.get(w["id"], 2))
-        full_windows.sort(key=lambda w: order.get(w["id"], 2))
-        return short_windows, full_windows
+                    win_id = bid or f"agy_{tag}_{len(short_windows)}"
+                    short_win = " ".join(str(bucket.get("displayName") or kind or "лимит").split())[:10].replace("|", "/")
+                    full_win = " ".join(str(bucket.get("displayName") or kind or "Лимит").split())[:24].replace("|", "/")
+                short_windows.append({"id": win_id, "label": f"{short_group} · {short_win}"[:24], "utilization": utilization, "resets_at": reset})
+                full_windows.append({"id": win_id, "label": f"{full_group} · {full_win}", "utilization": utilization, "resets_at": reset})
+        return short_windows, full_windows, seen_groups
+
+    @staticmethod
+    def _parse_quota_buckets(data, now, skip_groups=()):
+        buckets = data.get("buckets")
+        if not isinstance(buckets, list):
+            return [], []
+        grouped = {}
+        for bucket in buckets:
+            if not isinstance(bucket, dict):
+                continue
+            model_id = str(bucket.get("modelId") or "").lower()
+            if not model_id or model_id.startswith("tab_"):
+                continue
+            if model_id.startswith("gemini"):
+                tag, short_group, full_group = "gemini", "Gemini", "Gemini"
+            elif model_id.startswith(("claude", "gpt")):
+                tag, short_group, full_group = "3p", "Claude/GPT", "Claude и GPT"
+            else:
+                continue
+            if tag in skip_groups:
+                continue
+            remaining = usage_number(bucket.get("remainingFraction"), 1)
+            reset = usage_time(bucket.get("resetTime"))
+            if (remaining is None and reset is None) or (reset is not None and reset <= now):
+                continue
+            utilization = round((1.0 - remaining) * 100.0, 1) if remaining is not None else None
+            is_weekly = reset is not None and (reset - now) > 12 * 3600
+            win_id = f"agy_{tag}_{'weekly' if is_weekly else '5h'}"
+            short_win, full_win = ("нед", "Неделя") if is_weekly else ("5ч", "5 часов")
+            prev = grouped.get(tag)
+            if prev is None or (utilization is not None and (prev[0]["utilization"] is None or utilization > prev[0]["utilization"])):
+                grouped[tag] = (
+                    {"id": win_id, "label": f"{short_group} · {short_win}"[:24], "utilization": utilization, "resets_at": reset},
+                    {"id": win_id, "label": f"{full_group} · {full_win}", "utilization": utilization, "resets_at": reset},
+                )
+        short_w = [grouped[k][0] for k in ("gemini", "3p") if k in grouped]
+        full_w = [grouped[k][1] for k in ("gemini", "3p") if k in grouped]
+        return short_w, full_w
 
     @staticmethod
     def _parse_models(data, now):
@@ -306,8 +354,8 @@ class AgyUsageState:
         if not isinstance(models, dict):
             return [], []
         grouped = {}
-        for info in models.values():
-            if not isinstance(info, dict) or not info.get("displayName"):
+        for model_id, info in models.items():
+            if not isinstance(info, dict) or not info.get("displayName") or str(model_id).lower().startswith("tab_"):
                 continue
             quota = info.get("quotaInfo")
             if not isinstance(quota, dict):
@@ -318,17 +366,59 @@ class AgyUsageState:
                 continue
             provider = str(info.get("modelProvider") or "")
             if provider == "MODEL_PROVIDER_GOOGLE":
-                key, label = "agy_gemini", "Gemini"
+                tag, short_group, full_group = "gemini", "Gemini", "Gemini"
             elif provider in ("MODEL_PROVIDER_ANTHROPIC", "MODEL_PROVIDER_OPENAI"):
-                key, label = "agy_3p", "Claude и GPT"
+                tag, short_group, full_group = "3p", "Claude/GPT", "Claude и GPT"
             else:
                 continue
             utilization = round((1.0 - remaining) * 100.0, 1) if remaining is not None else None
-            prev = grouped.get(key)
-            if prev is None or (utilization is not None and (prev["utilization"] is None or utilization > prev["utilization"])):
-                grouped[key] = {"id": key, "label": label, "utilization": utilization, "resets_at": reset}
-        windows = [grouped[k] for k in ("agy_3p", "agy_gemini") if k in grouped]
-        return windows, list(windows)
+            is_weekly = reset is not None and (reset - now) > 12 * 3600
+            win_id = f"agy_{tag}_{'weekly' if is_weekly else '5h'}"
+            short_win, full_win = ("нед", "Неделя") if is_weekly else ("5ч", "5 часов")
+            prev = grouped.get(tag)
+            if prev is None or (utilization is not None and (prev[0]["utilization"] is None or utilization > prev[0]["utilization"])):
+                grouped[tag] = (
+                    {"id": win_id, "label": f"{short_group} · {short_win}"[:24], "utilization": utilization, "resets_at": reset},
+                    {"id": win_id, "label": f"{full_group} · {full_win}", "utilization": utilization, "resets_at": reset},
+                )
+        short_w = [grouped[k][0] for k in ("gemini", "3p") if k in grouped]
+        full_w = [grouped[k][1] for k in ("gemini", "3p") if k in grouped]
+        return short_w, full_w
+
+    @staticmethod
+    def _sort_windows(windows):
+        order = {"agy_gemini_weekly": 0, "agy_gemini_5h": 1, "agy_3p_weekly": 2, "agy_3p_5h": 3}
+        return sorted(windows, key=lambda w: order.get(w["id"], 9))
+
+    def _fetch_from_base(self, opener, base, token, now):
+        short_windows, full_windows, seen_groups = [], [], set()
+        source = None
+        try:
+            summary = self._post_json(opener, base + "/v1internal:retrieveUserQuotaSummary", token)
+            short_windows, full_windows, seen_groups = self._parse_summary(summary or {}, now)
+            if short_windows:
+                source = "agy_quota_summary"
+        except Exception:
+            pass
+        if not {"gemini", "3p"}.issubset(seen_groups):
+            try:
+                quota = self._post_json(opener, base + "/v1internal:retrieveUserQuota", token)
+                extra_short, extra_full = self._parse_quota_buckets(quota or {}, now, skip_groups=seen_groups)
+                if extra_short:
+                    short_windows.extend(extra_short)
+                    full_windows.extend(extra_full)
+                    source = source or "agy_user_quota"
+            except Exception:
+                pass
+        if not short_windows:
+            try:
+                models = self._post_json(opener, base + "/v1internal:fetchAvailableModels", token)
+                short_windows, full_windows = self._parse_models(models or {}, now)
+                if short_windows:
+                    source = "agy_available_models"
+            except Exception:
+                pass
+        return self._sort_windows(short_windows), self._sort_windows(full_windows), source
 
     def fetch_oauth(self):
         try:
@@ -354,13 +444,9 @@ class AgyUsageState:
                         self.message = "Токен Antigravity устарел — данные обновятся после ответа AGY."
                 return
             opener = urllib.request.build_opener(UsageNoRedirect())
-            summary = self._post_json(opener, self.QUOTA_URL, token)
-            short_windows, full_windows = self._parse_summary(summary or {}, now)
-            source = "agy_quota_summary"
+            short_windows, full_windows, source = self._fetch_from_base(opener, self.DAILY_BASE, token, now)
             if not short_windows:
-                models = self._post_json(opener, self.MODELS_URL, token)
-                short_windows, full_windows = self._parse_models(models or {}, now)
-                source = "agy_available_models"
+                short_windows, full_windows, source = self._fetch_from_base(opener, self.FALLBACK_BASE, token, now)
             if short_windows:
                 with self.lock:
                     self.windows = short_windows

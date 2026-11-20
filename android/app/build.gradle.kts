@@ -12,8 +12,8 @@ android {
         applicationId = "dev.relay.mobile"
         minSdk = 26
         targetSdk = 35
-        versionCode = 26
-        versionName = "0.7.0"
+        versionCode = 27
+        versionName = "0.7.1"
     }
     buildTypes {
         release {
