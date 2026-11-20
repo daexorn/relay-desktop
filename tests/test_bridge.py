@@ -766,7 +766,7 @@ class UsageTests(unittest.TestCase):
                 {'bucketId':'3p-5h','window':'5h','displayName':'Five Hour Limit Remaining','resetTime':'2099-01-01T18:00:00Z','remainingFraction':1},
             ]}],'secret':'do-not-forward'}
             buckets={'buckets':[
-                {'modelId':'gemini-2.5-pro','remainingFraction':0.1574,'resetTime':'2099-01-05T10:00:00Z'},
+                {'modelId':'gemini-2.5-pro','window':'weekly','remainingFraction':0.1574,'resetTime':'2099-01-05T10:00:00Z'},
                 {'modelId':'claude-opus-5-5-high','remainingFraction':0.0109,'resetTime':'2099-01-07T10:00:00Z'},
                 {'modelId':'tab_jump_flash_lite_preview','remainingFraction':1},
             ]}
@@ -780,9 +780,9 @@ class UsageTests(unittest.TestCase):
             short_snap=state.snapshot(short=True)
             self.assertTrue(short_snap['available'])
             self.assertEqual(short_snap['backend'],'agy')
-            self.assertEqual([w['id'] for w in short_snap['windows']],['agy_gemini_weekly','agy_3p_weekly','agy_3p_5h'])
-            self.assertEqual([w['utilization'] for w in short_snap['windows']],[84.3,98.9,0.0])
-            self.assertEqual([w['label'] for w in short_snap['windows']],['Gemini · нед','Claude/GPT · нед','Claude/GPT · 5ч'])
+            self.assertEqual([w['id'] for w in short_snap['windows']],['agy_gemini_weekly','agy_3p_weekly'])
+            self.assertEqual([w['utilization'] for w in short_snap['windows']],[84.3,98.9])
+            self.assertEqual([w['label'] for w in short_snap['windows']],['Gemini · нед','Claude/GPT · нед'])
             full_snap=state.snapshot(short=False)
             self.assertEqual(full_snap['windows'][0]['label'],'Gemini · Неделя')
             self.assertEqual(full_snap['windows'][1]['label'],'Claude и GPT · Неделя')
@@ -790,6 +790,11 @@ class UsageTests(unittest.TestCase):
             self.assertNotIn('agy-fixture-secret',dumped)
             self.assertNotIn('do-not-leak',dumped)
             self.assertNotIn('do-not-forward',dumped)
+
+    def test_unknown_quota_period_is_not_weekly(self):
+        windows, _ = bridge.AgyUsageState._parse_quota_buckets({"buckets": [
+            {"modelId": "gemini-pro", "remainingFraction": .2, "resetTime": "2099-01-05T10:00:00Z"}]}, time.time())
+        self.assertEqual(windows, [])
 
     def test_agy_expired_token_never_sends_request(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -808,8 +813,8 @@ class UsageTests(unittest.TestCase):
                 'token':{'access_token':'agy-fixture','expiry':'2099-01-01T00:00:00Z'}
             }))
             models_resp={'models':{
-                'claude-opus':{'displayName':'Claude Opus','modelProvider':'MODEL_PROVIDER_ANTHROPIC','quotaInfo':{'remainingFraction':0.6,'resetTime':'2099-01-05T00:00:00Z'}},
-                'gemini-pro':{'displayName':'Gemini Pro','modelProvider':'MODEL_PROVIDER_GOOGLE','quotaInfo':{'remainingFraction':0.9,'resetTime':'2099-01-05T00:00:00Z'}},
+                'claude-opus':{'displayName':'Claude Opus','modelProvider':'MODEL_PROVIDER_ANTHROPIC','quotaInfo':{'window':'weekly','remainingFraction':0.6,'resetTime':'2099-01-05T00:00:00Z'}},
+                'gemini-pro':{'displayName':'Gemini Pro','modelProvider':'MODEL_PROVIDER_GOOGLE','quotaInfo':{'window':'weekly','remainingFraction':0.9,'resetTime':'2099-01-05T00:00:00Z'}},
             }}
             state=bridge.AgyUsageState()
             with mock.patch.dict(bridge.os.environ,{'AGY_DATA_DIR':folder}),mock.patch.object(bridge.urllib.request,'build_opener') as factory:
@@ -822,6 +827,34 @@ class UsageTests(unittest.TestCase):
 
 
 if __name__=='__main__':unittest.main()
+
+class FolderAccessTests(unittest.TestCase):
+    def test_folder_password_is_connection_scoped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            meta = bridge.SessionMeta(Path(tmp) / "meta.json")
+            fid = meta.folder(name="Private")
+            sid = str(uuid.uuid4())
+            meta.session(sid, folder=fid)
+            rows = [{"id": sid, "title": "secret", "cwd": tmp, "modified": 0}]
+            grants = set()
+            meta.folder_access(fid, "set", "passphrase", grants)
+            with self.assertRaises(ValueError):
+                meta.folder_access(fid, "open", "bad", grants)
+            with self.assertRaises(ValueError):
+                meta.folder(fid, delete=True)
+            with self.assertRaises(ValueError):
+                meta.session(sid, folder="")
+            meta.folder_access(fid, "open", "passphrase", grants)
+            self.assertEqual(meta.apply(rows, grants)[0][0]["title"], "secret")
+            hidden, folders = meta.apply(rows, set())
+            self.assertNotIn("secret", json.dumps(hidden))
+            self.assertNotIn("password", folders[0])
+            self.assertTrue(folders[0]["closed"])
+            meta.folder_access(fid, "close", None, grants)
+            self.assertTrue(meta.apply(rows, grants)[1][0]["closed"])
+            meta.folder_access(fid, "remove", "passphrase", grants)
+            self.assertEqual(meta.apply(rows)[0][0]["title"], "secret")
+
 
 class LegacySessionTests(unittest.TestCase):
     def test_corrupt_rows_do_not_hide_other_sessions(self):

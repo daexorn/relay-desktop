@@ -160,8 +160,10 @@ fun RelayApp(vm: RelayViewModel) {
                 targetState = vm.screen,
                 transitionSpec = {
                     val forward = targetState.ordinal > initialState.ordinal
-                    (slideInHorizontally(tween(240)) { if (forward) it / 4 else -it / 4 } + fadeIn(tween(240))) togetherWith
-                        (slideOutHorizontally(tween(200)) { if (forward) -it / 6 else it / 6 } + fadeOut(tween(160)))
+                    (slideInHorizontally(tween(320)) { if (forward) it / 3 else -it / 8 } +
+                        androidx.compose.animation.scaleIn(tween(320), initialScale = if (forward) 0.94f else 1.03f) +
+                        fadeIn(tween(210))) togetherWith
+                        (slideOutHorizontally(tween(240)) { if (forward) -it / 8 else it / 3 } + fadeOut(tween(160)))
                 },
                 label = "screen",
             ) { screen ->
@@ -511,6 +513,10 @@ private data class AgentIcon(val colors: List<Color>, val rows: List<String>)
 /** Shared pixel artwork used by the agent picker and the chat. */
 @Composable
 fun PixelMascot(backend: String, size: Dp = 22.dp, modifier: Modifier = Modifier) {
+    if (backend == "agy") {
+        Image(androidx.compose.ui.res.painterResource(R.drawable.antigravity), null, modifier.size(size))
+        return
+    }
     val assets = androidx.compose.ui.platform.LocalContext.current.assets
     val icons = remember(assets) {
         assets.open("bridge/agent-icons.txt").bufferedReader().useLines { lines ->
@@ -523,12 +529,11 @@ fun PixelMascot(backend: String, size: Dp = 22.dp, modifier: Modifier = Modifier
             }
         }
     }
-    if (backend in setOf("claude", "pet", "codex", "agy")) {
+    if (backend in setOf("claude", "pet", "codex")) {
         val light = LocalPalette.current.light
         Canvas(modifier.size(size)) {
             when (backend) {
                 "codex" -> drawOpenAiMark(if (light) Color(0xFF141414) else Color(0xFFECECEC))
-                "agy" -> drawAntigravityMark()
                 else -> drawClaudeMark()
             }
         }
@@ -889,7 +894,9 @@ fun Sheet(onDismiss: () -> Unit, content: @Composable () -> Unit) {
         ) {
             AnimatedVisibility(
                 visibleState = visibility,
-                enter = slideInVertically(tween(220)) { it / 3 } + fadeIn(tween(160)),
+                enter = slideInVertically(androidx.compose.animation.core.spring(
+                    dampingRatio = 0.88f, stiffness = 470f,
+                )) { it } + fadeIn(tween(140)),
                 exit = slideOutVertically(tween(170)) { it / 3 } + fadeOut(tween(140)),
             ) {
                 Column(
@@ -1333,6 +1340,7 @@ fun SessionsScreen(vm: RelayViewModel) {
     var searching by rememberSaveable { mutableStateOf(false) }
     var renaming by remember { mutableStateOf<Session?>(null) }
     var moving by remember { mutableStateOf<Session?>(null) }
+    var folderPassword by remember { mutableStateOf<Pair<Folder, String>?>(null) }
     var iconEditing by remember { mutableStateOf<Folder?>(null) }
     var naming by remember { mutableStateOf<Pair<Folder?, Session?>?>(null) }
     var locking by remember { mutableStateOf<Session?>(null) }
@@ -1407,9 +1415,12 @@ fun SessionsScreen(vm: RelayViewModel) {
                 for (folder in vm.folders) {
                     val inside = vm.sessions.filter { it.pinned == 0.0 && it.folder == folder.id && matches(it) }
                     if (q.isNotEmpty() && inside.isEmpty()) continue
-                    val open = folder.id !in vm.collapsed || q.isNotEmpty()
+                    val open = !folder.closed && (folder.id !in vm.collapsed || q.isNotEmpty())
                     item(key = "f-" + folder.id) {
-                        FolderHeading(folder, inside.size, open, { vm.toggleFolder(folder) }, { naming = folder to null }, { iconEditing = folder }, { vm.deleteFolder(folder) })
+                        FolderHeading(folder, inside.size, open,
+                            { if (folder.closed) folderPassword = folder to "open" else vm.toggleFolder(folder) },
+                            { naming = folder to null }, { iconEditing = folder }, { vm.deleteFolder(folder) },
+                            { action -> if (action == "close") vm.folderAccess(folder, action) else folderPassword = folder to action })
                     }
                     if (open) {
                         if (inside.isEmpty()) {
@@ -1476,6 +1487,20 @@ fun SessionsScreen(vm: RelayViewModel) {
             if (locked) "Метка на этом устройстве" else "Пусто — вернуть название от агента", { renaming = null }) {
             vm.rename(s, it)
             renaming = null
+        }
+    }
+    folderPassword?.let { (folder, action) ->
+        var password by remember(folder.id, action) { mutableStateOf("") }
+        var confirm by remember(folder.id, action) { mutableStateOf("") }
+        val title = when (action) { "set" -> "Задать пароль"; "remove" -> "Снять пароль"; else -> "Открыть папку" }
+        Sheet({ folderPassword = null }) {
+            Label(folder.name, 18.sp, p.text, FontWeight.SemiBold)
+            Field(password, { password = it.take(256) }, "Пароль папки", password = true)
+            if (action == "set") Field(confirm, { confirm = it.take(256) }, "Повтори пароль", password = true)
+            PrimaryButton(title, enabled = password.isNotEmpty() && (action != "set" || password == confirm)) {
+                vm.folderAccess(folder, action, password)
+                folderPassword = null
+            }
         }
     }
     iconEditing?.let { folder ->
@@ -1680,7 +1705,7 @@ fun Heading(glyph: Glyph?, text: String, count: Int) {
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun FolderHeading(folder: Folder, count: Int, open: Boolean, toggle: () -> Unit, rename: () -> Unit, editIcon: () -> Unit, delete: () -> Unit) {
+fun FolderHeading(folder: Folder, count: Int, open: Boolean, toggle: () -> Unit, rename: () -> Unit, editIcon: () -> Unit, delete: () -> Unit, access: (String) -> Unit) {
     val p = LocalPalette.current
     var menu by remember { mutableStateOf(false) }
     val turn by animateFloatAsState(if (open) 90f else 0f, tween(180), label = "chevron")
@@ -1696,13 +1721,23 @@ fun FolderHeading(folder: Folder, count: Int, open: Boolean, toggle: () -> Unit,
         ) {
             Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = p.muted, modifier = Modifier.size(18.dp).rotate(turn))
             Spacer(Modifier.width(4.dp))
-            ProjectFolderIcon(folder, open)
+            if (folder.closed) VectorGlyph(Glyph.Lock, p.muted) else ProjectFolderIcon(folder, open)
             Spacer(Modifier.width(8.dp))
             Label(folder.name, 14.sp, p.text, FontWeight.SemiBold, 1, Modifier.weight(1f, fill = false))
             Spacer(Modifier.width(8.dp))
             Label(count.toString(), 12.sp, p.muted)
         }
         DropdownMenu(menu, { menu = false }, Modifier.background(p.elevated)) {
+            if (folder.closed) {
+                DropdownMenuItem({ Label("Открыть паролем…") }, { menu = false; access("open") })
+                return@DropdownMenu
+            }
+            if (folder.protectedByPassword) {
+                DropdownMenuItem({ Label("Закрыть папку") }, { menu = false; access("close") })
+                DropdownMenuItem({ Label("Снять пароль…") }, { menu = false; access("remove") })
+            } else {
+                DropdownMenuItem({ Label("Задать пароль…") }, { menu = false; access("set") })
+            }
             DropdownMenuItem({ Label("Значок проекта…") }, { menu = false; editIcon() })
             DropdownMenuItem({ Label("Переименовать папку") }, { menu = false; rename() })
             DropdownMenuItem({ Label("Удалить папку", color = p.red) }, { menu = false; delete() })
@@ -3289,12 +3324,15 @@ fun Composer(vm: RelayViewModel, chat: Chat, onOpenAgents: () -> Unit = {}) {
                     Box(Modifier.size(12.dp).clip(RoundedCornerShape(3.dp)).background(p.red))
                 }
             }
-            if (!busy || ready) {
+            val sendFill by animateColorAsState(if (ready) p.accent else p.elevated, tween(180), label = "sendFill")
+            AnimatedVisibility(visible = !busy || ready,
+                enter = androidx.compose.animation.scaleIn(tween(180)) + fadeIn(tween(120)),
+                exit = androidx.compose.animation.scaleOut(tween(140)) + fadeOut(tween(100))) {
                 Box(
                     Modifier
                         .size(42.dp)
                         .clip(CircleShape)
-                        .background(if (ready) p.accent else p.elevated)
+                        .background(sendFill)
                         .border(1.dp, if (ready) p.accent else p.borderSubtle, CircleShape)
                         .pressBounce()
                         .clickable { if (ready) vm.submit() else if (vm.link == Link.Off) vm.reconnectNow() },

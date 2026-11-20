@@ -235,7 +235,7 @@ fun builtinSlashCommands(): List<CommandInfo> = listOf(
     CommandInfo("help", "Показать список всех быстрых команд Relay", ""),
 )
 
-data class Folder(val id: String, val name: String, val icon: String = "")
+data class Folder(val id: String, val name: String, val icon: String = "", val protectedByPassword: Boolean = false, val closed: Boolean = false)
 
 data class Message(
     val role: String,

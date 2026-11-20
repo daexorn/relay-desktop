@@ -604,6 +604,10 @@ pub struct CommandInfo {
 /// A named group of sessions, shared by everyone who connects to the server.
 #[derive(Clone, Default, Deserialize, Debug)]
 pub struct SessionFolder {
+    #[serde(default)]
+    pub protected: bool,
+    #[serde(default)]
+    pub closed: bool,
     pub id: String,
     pub name: String,
     #[serde(default)]

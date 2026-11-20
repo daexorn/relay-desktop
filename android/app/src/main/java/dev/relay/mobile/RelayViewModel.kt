@@ -678,7 +678,13 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                 }.filter { it.id.isNotEmpty() }.distinctBy { it.id }
                 if (protocol >= 4) running = sessions.filter { it.running }.map { it.id }.toSet()
                 val f = value.optJSONArray("folders")
-                if (f != null) folders = (0 until f.length()).mapNotNull { f.optJSONObject(it) }.map { Folder(it.optString("id"), it.optString("name"), it.optString("icon")) }
+                if (f != null) folders = (0 until f.length()).mapNotNull { f.optJSONObject(it) }.map { Folder(it.optString("id"), it.optString("name"), it.optString("icon"), it.optBoolean("protected"), it.optBoolean("closed")) }
+                val closedFolders = folders.filter { it.closed }.map { it.id }.toSet()
+                sessions.filter { it.folder in closedFolders }.forEach {
+                    chats.remove(it.id)
+                    if (selected == it.id && screen == Screen.Chat) screen = Screen.Sessions
+                }
+                sessions = sessions.filter { it.folder !in closedFolders }
                 sessionsLoaded = true
                 sessions.forEach { s ->
                     chats[s.id]?.let { c ->
@@ -1419,6 +1425,9 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
     fun saveFolderIcon(folder: Folder, icon: String) = send(
         JSONObject().put("op", "session_folder").put("id", folder.id).put("icon", icon)
     )
+    fun folderAccess(folder: Folder, action: String, password: String = "") =
+        send(JSONObject().put("op", "folder_access").put("id", folder.id).put("action", action).put("password", password))
+
     fun deleteFolder(folder: Folder) = send(JSONObject().put("op", "session_folder").put("id", folder.id).put("delete", true))
     fun toggleFolder(folder: Folder) {
         collapsed = if (folder.id in collapsed) collapsed - folder.id else collapsed + folder.id

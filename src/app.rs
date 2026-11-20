@@ -203,7 +203,24 @@ struct Trust {
     fingerprint: String,
     answer: tokio::sync::oneshot::Sender<bool>,
 }
+struct FolderPassword {
+    server: String,
+    folder: String,
+    name: String,
+    action: &'static str,
+    password: String,
+    confirm: String,
+}
+
+impl Drop for FolderPassword {
+    fn drop(&mut self) {
+        self.password.zeroize();
+        self.confirm.zeroize();
+    }
+}
+
 pub struct RelayApp {
+    folder_password: Option<FolderPassword>,
     /// Drafts and queued messages from the last run, not yet put back into a chat.
     pending: crate::model::PendingStore,
     pending_saved: crate::model::PendingStore,
@@ -297,6 +314,7 @@ impl RelayApp {
             chats: HashMap::new(),
             selected_chat: HashMap::new(),
             delete_chat: None,
+            folder_password: None,
             lock_dialog: None,
             agents_open: None,
             radar_open: None,
@@ -1375,6 +1393,18 @@ impl RelayApp {
                     .filter(|s| !s.id.is_empty())
                     .filter(|s| !self.deleted_sessions.contains(&key(&server, &s.id)))
                     .collect();
+                let closed: std::collections::HashSet<_> = value["folders"].as_array().into_iter().flatten()
+                    .filter(|f| f["closed"] == true).filter_map(|f| f["id"].as_str()).collect();
+                sessions.retain(|s| {
+                    if !closed.contains(s.folder.as_str()) {
+                        return true;
+                    }
+                    self.chats.remove(&key(&server, &s.id));
+                    if self.selected_chat.get(&server) == Some(&s.id) {
+                        self.selected_chat.remove(&server);
+                    }
+                    false
+                });
                 if self.settings.restore_locked_titles(&server, &mut sessions) {
                     self.save();
                 }
@@ -2632,17 +2662,27 @@ impl RelayApp {
                                                 .collect();
                                             if !agents.is_empty() {
                                                 ui.add_space(8.);
-                                                label(ui, "Лимиты", 11., p.muted);
-                                                for (id, name) in agents {
-                                                    ui.add_space(4.);
-                                                    label(ui, name, 11.5, if id == active_backend { accent() } else { p.text });
-                                                    let usage = remote
-                                                        .usage_by
-                                                        .get(id)
-                                                        .cloned()
-                                                        .unwrap_or_else(|| if id == "claude" { remote.usage.clone() } else { Usage::default() });
-                                                    limits::show(ui, &usage, p, connected, name);
-                                                }
+                                                egui::CollapsingHeader::new("Лимиты")
+                                                    .id_salt(("quota-header", &server.id))
+                                                    .default_open(false)
+                                                    .show(ui, |ui| {
+                                                        egui::ScrollArea::vertical()
+                                                            .id_salt(("server-quotas", &server.id))
+                                                            .max_height((ui.ctx().screen_rect().height() * 0.19).clamp(72., 132.))
+                                                            .auto_shrink([false, true])
+                                                            .show(ui, |ui| {
+                                                                for (id, name) in agents {
+                                                                    ui.add_space(4.);
+                                                                    label(ui, name, 11.5, if id == active_backend { accent() } else { p.text });
+                                                                    let usage = remote
+                                                                        .usage_by
+                                                                        .get(id)
+                                                                        .cloned()
+                                                                        .unwrap_or_else(|| if id == "claude" { remote.usage.clone() } else { Usage::default() });
+                                                                    limits::show(ui, &usage, p, connected, name);
+                                                                }
+                                                            });
+                                                    });
                                             }
                                     }
                                     ui.add_space(8.);
@@ -2757,91 +2797,82 @@ impl RelayApp {
                 if !active_sessions.is_empty() {
                     let light = self.settings.light;
                     ui.add_space(4.);
-                    egui::Frame::new()
-                        .fill(design::mix(p.surface, accent(), 0.07))
-                        .stroke(Stroke::new(1.0_f32, design::mix(p.line, accent(), 0.38)))
-                        .corner_radius(11.)
-                        .inner_margin(egui::Margin::symmetric(10, 8))
+                    egui::CollapsingHeader::new(format!("Радар агентов · {}", active_sessions.len()))
+                        .id_salt(("radar-header", &server.id))
+                        .default_open(false)
                         .show(ui, |ui| {
-                            ui.set_width(ui.available_width());
-                            ui.horizontal(|ui| {
-                                let (orb, _) =
-                                    ui.allocate_exact_size(Vec2::splat(16.), egui::Sense::hover());
-                                design::orbital_core(ui, orb, accent(), true);
-                                label(
-                                    ui,
-                                    format!("Радар агентов · {}", active_sessions.len()),
-                                    11.5,
-                                    p.text,
-                                );
-                            });
-                            ui.add_space(4.);
-                            for act in active_sessions.iter().take(3) {
-                                let ak = key(&server.id, &act.id);
-                                let b = self.backend_for_chat(&server, &ak);
-                                let b_col = design::backend_color(&b, light);
-                                let step_hint = self
-                                    .chats
-                                    .get(&ak)
-                                    .map(|c| {
-                                        let t = crate::model::analyze_turn(
-                                            &c.messages,
-                                            c.user_at,
-                                            c.busy,
-                                            &c.status,
-                                        );
-                                        if !t.active_target.is_empty() {
-                                            t.active_target
-                                        } else {
-                                            t.active_headline
-                                        }
-                                    })
-                                    .filter(|s| !s.is_empty())
-                                    .unwrap_or_else(|| "В работе…".into());
-                                let r_resp = egui::Frame::new()
-                                    .fill(p.base.gamma_multiply(0.65))
-                                    .corner_radius(7.)
-                                    .inner_margin(egui::Margin::symmetric(7, 4))
-                                    .show(ui, |ui| {
-                                        ui.set_width(ui.available_width());
-                                        ui.horizontal(|ui| {
-                                            let (dot_r, _) = ui.allocate_exact_size(
-                                                Vec2::splat(8.),
-                                                egui::Sense::hover(),
-                                            );
-                                            ui.painter().circle_filled(dot_r.center(), 3.2, b_col);
-                                            ui.add(
-                                                egui::Label::new(
-                                                    RichText::new(model::shorten(&act.title, 22))
-                                                        .size(11.5)
-                                                        .color(p.text),
-                                                )
-                                                .truncate(),
-                                            );
-                                        });
-                                        ui.add(
-                                            egui::Label::new(
-                                                RichText::new(model::shorten(&step_hint, 28))
-                                                    .monospace()
-                                                    .size(10.2)
-                                                    .color(b_col),
+                            egui::ScrollArea::vertical()
+                                .id_salt(("radar-list", &server.id))
+                                .max_height((ui.ctx().screen_rect().height() * 0.18).clamp(64., 128.))
+                                .auto_shrink([false, true])
+                                .show(ui, |ui| {
+                                    for act in &active_sessions {
+                                        let ak = key(&server.id, &act.id);
+                                        let b = self.backend_for_chat(&server, &ak);
+                                        let b_col = design::backend_color(&b, light);
+                                        let step_hint = self
+                                            .chats
+                                            .get(&ak)
+                                            .map(|c| {
+                                                let t = crate::model::analyze_turn(
+                                                    &c.messages,
+                                                    c.user_at,
+                                                    c.busy,
+                                                    &c.status,
+                                                );
+                                                if !t.active_target.is_empty() {
+                                                    t.active_target
+                                                } else {
+                                                    t.active_headline
+                                                }
+                                            })
+                                            .filter(|s| !s.is_empty())
+                                            .unwrap_or_else(|| "В работе…".into());
+                                        let r_resp = egui::Frame::new()
+                                            .fill(p.base.gamma_multiply(0.65))
+                                            .corner_radius(7.)
+                                            .inner_margin(egui::Margin::symmetric(7, 4))
+                                            .show(ui, |ui| {
+                                                ui.set_width(ui.available_width());
+                                                ui.horizontal(|ui| {
+                                                    let (dot_r, _) = ui.allocate_exact_size(
+                                                        Vec2::splat(8.),
+                                                        egui::Sense::hover(),
+                                                    );
+                                                    ui.painter().circle_filled(dot_r.center(), 3.2, b_col);
+                                                    ui.add(
+                                                        egui::Label::new(
+                                                            RichText::new(model::shorten(&act.title, 22))
+                                                                .size(11.5)
+                                                                .color(p.text),
+                                                        )
+                                                        .truncate(),
+                                                    );
+                                                });
+                                                ui.add(
+                                                    egui::Label::new(
+                                                        RichText::new(model::shorten(&step_hint, 28))
+                                                            .monospace()
+                                                            .size(10.2)
+                                                            .color(b_col),
+                                                    )
+                                                    .truncate(),
+                                                );
+                                            })
+                                            .response;
+                                        if ui
+                                            .interact(
+                                                r_resp.rect,
+                                                ui.id().with(("radar-jump", &act.id)),
+                                                egui::Sense::click(),
                                             )
-                                            .truncate(),
-                                        );
-                                    })
-                                    .response;
-                                if ui
-                                    .interact(
-                                        r_resp.rect,
-                                        ui.id().with(("radar-jump", &act.id)),
-                                        egui::Sense::click(),
-                                    )
-                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                                    .clicked()
-                                {
-                                    radar_jump = Some(act.clone());
-                                }
-                            }
+                                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                            .clicked()
+                                        {
+                                            radar_jump = Some(act.clone());
+                                        }
+                                    }
+                                });
                         });
                 }
                 if let Some(target_sess) = radar_jump {
@@ -2916,13 +2947,19 @@ impl RelayApp {
                                 .iter()
                                 .filter(|s| s.pinned == 0. && s.folder == folder.id && matches(s))
                                 .collect();
-                            if !query.is_empty() && inside.is_empty() {
+                            if !folder.closed && !query.is_empty() && inside.is_empty() {
                                 continue;
                             }
-                            let collapsed = self.settings.collapsed_folders.contains(&folder.id) && query.is_empty();
+                            let collapsed = folder.closed || (self.settings.collapsed_folders.contains(&folder.id) && query.is_empty());
                             let texture = project_icon::folder_texture(ctx, &folder.icon);
-                            let header = section_heading(ui, Some(if collapsed { "📁" } else { "📂" }), &folder.name, inside.len(), Some(collapsed), p, texture.as_ref());
-                            if header.clicked() {
+                            let header = section_heading(ui, Some(if folder.closed { "🔒" } else if collapsed { "📁" } else { "📂" }), &folder.name, inside.len(), Some(collapsed), p, texture.as_ref());
+                            let password_dialog = |action| FolderPassword {
+                                server: server.id.clone(), folder: folder.id.clone(), name: folder.name.clone(),
+                                action, password: String::new(), confirm: String::new(),
+                            };
+                            if folder.closed && header.clicked() {
+                                self.folder_password = Some(password_dialog("open"));
+                            } else if header.clicked() {
                                 if collapsed {
                                     self.settings.collapsed_folders.retain(|f| f != &folder.id);
                                 } else {
@@ -2930,7 +2967,7 @@ impl RelayApp {
                                 }
                                 self.save();
                             }
-                            if header.double_clicked() {
+                            if !folder.closed && header.double_clicked() {
                                 self.folder_dialog = Some(session_actions::FolderDialog {
                                     server: server.id.clone(),
                                     name: folder.name.clone(),
@@ -2941,6 +2978,21 @@ impl RelayApp {
                                 });
                             }
                             header.context_menu(|ui| {
+                                if folder.closed {
+                                    if ui.button("Открыть паролем…").clicked() {
+                                        self.folder_password = Some(password_dialog("open"));
+                                        ui.close_menu();
+                                    }
+                                    return;
+                                }
+                                if folder.protected && ui.button("Закрыть папку").clicked() {
+                                    self.controller.send(&server.id, json!({"op":"folder_access","action":"close","id":folder.id}));
+                                    ui.close_menu();
+                                }
+                                if ui.button(if folder.protected { "Снять пароль…" } else { "Задать пароль…" }).clicked() {
+                                    self.folder_password = Some(password_dialog(if folder.protected { "remove" } else { "set" }));
+                                    ui.close_menu();
+                                }
                                 if ui.button("Значок проекта…").clicked() {
                                     self.icon_dialog = Some(project_icon::IconDialog::new(server.id.clone(), folder));
                                     ui.close_menu();
@@ -5429,6 +5481,32 @@ impl RelayApp {
         );
         self.deletion_dialog(ctx, p, modal_t);
         self.lock_dialog(ctx, p, modal_t);
+        if let Some(mut dialog) = self.folder_password.take() {
+            let mut open = true;
+            let mut submit = false;
+            let action = match dialog.action {
+                "set" => "Задать пароль",
+                "remove" => "Снять пароль",
+                _ => "Открыть папку",
+            };
+            egui::Window::new(format!("{action} · {}", dialog.name))
+                .id(egui::Id::new("folder-password"))
+                .open(&mut open).resizable(false).collapsible(false)
+                .show(ctx, |ui| {
+                    ui.add(egui::TextEdit::singleline(&mut dialog.password).password(true).hint_text("Пароль").char_limit(256));
+                    if dialog.action == "set" {
+                        ui.add(egui::TextEdit::singleline(&mut dialog.confirm).password(true).hint_text("Повтори пароль").char_limit(256));
+                    }
+                    let valid = !dialog.password.is_empty() && (dialog.action != "set" || dialog.password == dialog.confirm);
+                    submit = ui.add_enabled(valid, egui::Button::new(action)).clicked()
+                        || (valid && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+                });
+            if submit {
+                self.controller.send(&dialog.server, json!({"op":"folder_access","id":dialog.folder,"action":dialog.action,"password":dialog.password}));
+            } else if open {
+                self.folder_password = Some(dialog);
+            }
+        }
         self.folder_modal(ctx, p, modal_t);
         self.project_icon_modal(ctx, p);
         self.agents_dialog(ctx, p, modal_t);
@@ -5997,8 +6075,8 @@ impl RelayApp {
                     {"name":"code-review","description":"Проверить изменения","hint":""}
                 ])).unwrap_or_default(),
                 folders: vec![
-                    crate::model::SessionFolder { id: "f-ships".into(), name: "Корабли".into(), icon: String::new() },
-                    crate::model::SessionFolder { id: "f-site".into(), name: "Сайт и лаунчер".into(), icon: String::new() },
+                    crate::model::SessionFolder { id: "f-ships".into(), name: "Корабли".into(), icon: String::new(), ..Default::default() },
+                    crate::model::SessionFolder { id: "f-site".into(), name: "Сайт и лаунчер".into(), icon: String::new(), ..Default::default() },
                 ],
                 sessions: vec![
                     Session {

@@ -1261,6 +1261,7 @@ mod tests {
             chats: HashMap::new(),
             selected_chat: HashMap::new(),
             delete_chat: None,
+            folder_password: None,
             lock_dialog: None,
             agents_open: None,
             radar_open: None,

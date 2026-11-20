@@ -93,7 +93,7 @@ fun Modifier.pressBounce(scaleDown: Float = 0.9f): Modifier = composed {
         }
 }
 
-// --- Agent marks drawn as vectors (Claude spark, OpenAI blossom for Codex, Antigravity arch) ---
+// --- Agent marks drawn as vectors (Claude spark, OpenAI blossom for Codex) ---
 
 private val CLAUDE_RAYS = floatArrayOf(1.0f, 0.80f, 0.94f, 0.78f, 0.98f, 0.84f, 0.90f, 0.76f, 0.97f, 0.82f, 0.92f, 0.79f)
 
@@ -144,28 +144,5 @@ fun androidx.compose.ui.graphics.drawscope.DrawScope.drawOpenAiMark(color: andro
         }
         path.close()
         drawPath(path, color, style = stroke)
-    }
-}
-
-fun androidx.compose.ui.graphics.drawscope.DrawScope.drawAntigravityMark() {
-    val stops = listOf(0xFF3186FF, 0xFF9062FF, 0xFFFF4641, 0xFFFFA31A, 0xFFFFD314, 0xFF00B95C)
-        .map { androidx.compose.ui.graphics.Color(it) }
-    val c = center
-    val r = size.minDimension / 2f
-    val span = r * 0.58f; val top = c.y - r * 0.12f; val bottom = c.y + r * 0.78f
-    val points = mutableListOf<androidx.compose.ui.geometry.Offset>()
-    for (i in 0 until 8) points += androidx.compose.ui.geometry.Offset(c.x - span, bottom - (bottom - top) * i / 7f)
-    for (k in 1 until 24) {
-        val t = (Math.PI * (1.0 + k / 24.0)).toFloat()
-        points += androidx.compose.ui.geometry.Offset(c.x + span * kotlin.math.cos(t), top + span * kotlin.math.sin(t))
-    }
-    for (i in 0 until 8) points += androidx.compose.ui.geometry.Offset(c.x + span, top + (bottom - top) * i / 7f)
-    val width = (r * 0.36f).coerceAtLeast(1.5f)
-    val last = points.size - 1
-    for (i in 0 until last) {
-        val f = i.toFloat() / (last - 1).coerceAtLeast(1) * (stops.size - 1)
-        val j = f.toInt().coerceAtMost(stops.size - 2)
-        val color = androidx.compose.ui.graphics.lerp(stops[j], stops[j + 1], f - j)
-        drawLine(color, points[i], points[i + 1], strokeWidth = width, cap = androidx.compose.ui.graphics.StrokeCap.Round)
     }
 }

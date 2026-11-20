@@ -621,42 +621,21 @@ fn paint_openai_mark(painter: &egui::Painter, rect: Rect) {
     }
 }
 
-/// Antigravity mark: a rainbow arch.
 fn paint_antigravity_mark(painter: &egui::Painter, rect: Rect) {
-    const STOPS: [[u8; 3]; 6] =
-        [[49, 134, 255], [144, 98, 255], [255, 70, 65], [255, 163, 26], [255, 211, 20], [0, 185, 92]];
-    let c = rect.center();
-    let r = rect.width().min(rect.height()) * 0.5;
-    let (span, top, bottom) = (r * 0.58, c.y - r * 0.12, c.y + r * 0.78);
-    let mut points = vec![];
-    for i in 0..8 {
-        points.push(Pos2::new(c.x - span, bottom - (bottom - top) * i as f32 / 7.));
-    }
-    for k in 1..24 {
-        let t = std::f32::consts::PI * (1. + k as f32 / 24.);
-        points.push(Pos2::new(c.x + span * t.cos(), top + span * t.sin()));
-    }
-    for i in 0..8 {
-        points.push(Pos2::new(c.x + span, top + (bottom - top) * i as f32 / 7.));
-    }
-    let width = (r * 0.36).max(1.5);
-    let last = points.len() - 1;
-    for (i, pair) in points.windows(2).enumerate() {
-        let f = i as f32 / (last - 1).max(1) as f32 * (STOPS.len() - 1) as f32;
-        let j = (f as usize).min(STOPS.len() - 2);
-        let t = f - j as f32;
-        let mixc = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t) as u8;
-        let color = Color32::from_rgb(
-            mixc(STOPS[j][0], STOPS[j + 1][0]),
-            mixc(STOPS[j][1], STOPS[j + 1][1]),
-            mixc(STOPS[j][2], STOPS[j + 1][2]),
+    let ctx = painter.ctx();
+    let id = egui::Id::new("antigravity-brand-mark");
+    let texture = ctx.data(|data| data.get_temp::<egui::TextureHandle>(id)).unwrap_or_else(|| {
+        let bytes = include_bytes!("../android/app/src/main/res/drawable-nodpi/antigravity.png");
+        let image = image::load_from_memory(bytes).expect("bundled Antigravity PNG").into_rgba8();
+        let pixels = egui::ColorImage::from_rgba_unmultiplied(
+            [image.width() as usize, image.height() as usize], image.as_raw(),
         );
-        painter.line_segment([pair[0], pair[1]], Stroke::new(width, color));
-        painter.circle_filled(pair[0], width * 0.5, color);
-        if i + 1 == last {
-            painter.circle_filled(pair[1], width * 0.5, color);
-        }
-    }
+        let texture = ctx.load_texture("Antigravity", pixels, egui::TextureOptions::LINEAR);
+        ctx.data_mut(|data| data.insert_temp(id, texture.clone()));
+        texture
+    });
+    let square = Rect::from_center_size(rect.center(), Vec2::splat(rect.width().min(rect.height())));
+    painter.image(texture.id(), square, Rect::from_min_max(Pos2::ZERO, Pos2::new(1., 1.)), Color32::WHITE);
 }
 
 fn paint_engine_icon(painter: &egui::Painter, rect: Rect, backend: &str) {

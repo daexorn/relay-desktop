@@ -225,7 +225,9 @@ class AgyUsageState:
         now = time.time()
         with self.lock:
             source_windows = self.windows if short else (self.full_windows or self.windows)
-            windows = [dict(window) for window in source_windows if window["resets_at"] is None or window["resets_at"] > now]
+            windows = [dict(window) for window in source_windows
+                       if window["id"].endswith("_weekly") and
+                       (window["resets_at"] is None or window["resets_at"] > now)]
             return {"type": "usage", "backend": "agy", "available": bool(windows), "windows": windows, "status": None,
                     "source": self.source, "message": self.message, "updated_at": self.updated_at}
 
@@ -274,6 +276,11 @@ class AgyUsageState:
         clean = " ".join(str(name or "").split())[:24].replace("|", "/")
         return clean.lower() or "other", clean[:12] or "AGY", clean or "Antigravity"
 
+    @staticmethod
+    def _weekly(bucket):
+        kind = str(bucket.get("window") or bucket.get("refreshWindowLabel") or "").lower()
+        return kind in ("weekly", "week", "7d") or str(bucket.get("bucketId", "")).lower().endswith("-weekly")
+
     @classmethod
     def _parse_summary(cls, data, now):
         groups = data.get("groups")
@@ -292,20 +299,12 @@ class AgyUsageState:
                 reset = usage_time(bucket.get("resetTime"))
                 if (utilization is None and reset is None) or (reset is not None and reset <= now):
                     continue
-                kind = str(bucket.get("window") or bucket.get("refreshWindowLabel") or "").lower()
-                bid = " ".join(str(bucket.get("bucketId") or "").split())[:40]
-                tag, short_group, full_group = cls._group_tag(group_name, bid)
+                if not cls._weekly(bucket):
+                    continue
+                tag, short_group, full_group = cls._group_tag(group_name, bucket.get("bucketId", ""))
                 seen_groups.add(tag)
-                if kind == "5h" or bid.endswith("-5h"):
-                    win_id = f"agy_{tag}_5h"
-                    short_win, full_win = "5ч", "5 часов"
-                elif kind == "weekly" or bid.endswith("-weekly"):
-                    win_id = f"agy_{tag}_weekly"
-                    short_win, full_win = "нед", "Неделя"
-                else:
-                    win_id = bid or f"agy_{tag}_{len(short_windows)}"
-                    short_win = " ".join(str(bucket.get("displayName") or kind or "лимит").split())[:10].replace("|", "/")
-                    full_win = " ".join(str(bucket.get("displayName") or kind or "Лимит").split())[:24].replace("|", "/")
+                win_id = f"agy_{tag}_weekly"
+                short_win, full_win = "нед", "Неделя"
                 short_windows.append({"id": win_id, "label": f"{short_group} · {short_win}"[:24], "utilization": utilization, "resets_at": reset})
                 full_windows.append({"id": win_id, "label": f"{full_group} · {full_win}", "utilization": utilization, "resets_at": reset})
         return short_windows, full_windows, seen_groups
@@ -335,9 +334,10 @@ class AgyUsageState:
             if (remaining is None and reset is None) or (reset is not None and reset <= now):
                 continue
             utilization = round((1.0 - remaining) * 100.0, 1) if remaining is not None else None
-            is_weekly = reset is not None and (reset - now) > 12 * 3600
-            win_id = f"agy_{tag}_{'weekly' if is_weekly else '5h'}"
-            short_win, full_win = ("нед", "Неделя") if is_weekly else ("5ч", "5 часов")
+            if not AgyUsageState._weekly(bucket):
+                continue
+            win_id = f"agy_{tag}_weekly"
+            short_win, full_win = "нед", "Неделя"
             prev = grouped.get(tag)
             if prev is None or (utilization is not None and (prev[0]["utilization"] is None or utilization > prev[0]["utilization"])):
                 grouped[tag] = (
@@ -372,9 +372,10 @@ class AgyUsageState:
             else:
                 continue
             utilization = round((1.0 - remaining) * 100.0, 1) if remaining is not None else None
-            is_weekly = reset is not None and (reset - now) > 12 * 3600
-            win_id = f"agy_{tag}_{'weekly' if is_weekly else '5h'}"
-            short_win, full_win = ("нед", "Неделя") if is_weekly else ("5ч", "5 часов")
+            if not AgyUsageState._weekly(quota):
+                continue
+            win_id = f"agy_{tag}_weekly"
+            short_win, full_win = "нед", "Неделя"
             prev = grouped.get(tag)
             if prev is None or (utilization is not None and (prev[0]["utilization"] is None or utilization > prev[0]["utilization"])):
                 grouped[tag] = (
@@ -457,7 +458,7 @@ class AgyUsageState:
             else:
                 with self.lock:
                     if not self.windows:
-                        self.message = "Antigravity не передал окна лимитов для этого аккаунта."
+                        self.message = "Antigravity не передал недельную квоту."
         except Exception:
             # Neither HTTP response bodies nor exception text can reach the GUI.
             with self.lock:
@@ -963,10 +964,10 @@ class SessionMeta:
     def read(self):
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except FileNotFoundError:
             data = {}
         if not isinstance(data, dict):
-            data = {}
+            raise ValueError("Повреждены настройки папок.")
         data.setdefault("folders", [])
         data.setdefault("sessions", {})
         return data
@@ -982,10 +983,58 @@ class SessionMeta:
             os.chmod(temp, 0o664)
             temp.replace(self.path)
 
-    def session(self, sid, title=None, pinned=None, folder=None, actor=""):
+    @staticmethod
+    def folder_grant(folder):
+        lock = folder.get("password")
+        return f"folder:{folder['id']}:{lock['salt']}" if lock else None
+
+    @classmethod
+    def require_folder(cls, data, fid, grants):
+        folder = next((f for f in data["folders"] if f["id"] == fid), None)
+        grant = cls.folder_grant(folder) if folder else None
+        if grant and grant not in grants:
+            raise ValueError("Сначала открой папку паролем.")
+
+    def session_folder_grant(self, sid):
+        data = self.read()
+        fid = data["sessions"].get(sid.lower(), {}).get("folder")
+        folder = next((f for f in data["folders"] if f["id"] == fid), None)
+        return self.folder_grant(folder) if folder else None
+
+    def folder_access(self, fid, action, password, grants):
+        def change(data):
+            folder = next((f for f in data["folders"] if f["id"] == fid), None)
+            if folder is None:
+                raise ValueError("Папка не найдена.")
+            grant = self.folder_grant(folder)
+            if action == "close" and grant:
+                grants.discard(grant)
+                return
+            if not isinstance(password, str) or not password or len(password) > 256:
+                raise ValueError("Введи пароль длиной до 256 символов.")
+            if action == "set" and not grant:
+                salt = os.urandom(16)
+                folder["password"] = {"salt": salt.hex(), "hash": self._hash_lock(password, salt)}
+                return
+            if grant and action in ("open", "remove"):
+                lock = folder["password"]
+                if not hmac.compare_digest(self._hash_lock(password, bytes.fromhex(lock["salt"])), lock["hash"]):
+                    raise ValueError("Неверный пароль папки.")
+                if action == "remove":
+                    del folder["password"]
+                    grants.discard(grant)
+                else:
+                    grants.add(grant)
+                return
+            raise ValueError("Состояние папки изменилось. Обнови список.")
+        self.update(change)
+
+    def session(self, sid, title=None, pinned=None, folder=None, actor="", grants=()):
         def change(data):
             folders = {f["id"] for f in data["folders"]}
             meta = data["sessions"].setdefault(sid, {})
+            self.require_folder(data, meta.get("folder"), grants)
+            self.require_folder(data, folder, grants)
             if title is not None:
                 clean = " ".join(str(title).split())[:120]
                 if clean:
@@ -1009,7 +1058,7 @@ class SessionMeta:
                 data["sessions"].pop(sid, None)
         self.update(change)
 
-    def folder(self, ident=None, name=None, delete=False, order=None, icon=None):
+    def folder(self, ident=None, name=None, delete=False, order=None, icon=None, grants=()):
         if icon is not None:
             if not ident or not isinstance(icon, str) or len(icon) > 60_000:
                 raise ValueError("Некорректный значок проекта.")
@@ -1036,6 +1085,7 @@ class SessionMeta:
             target = next((f for f in folders if f["id"] == ident), None)
             if target is None:
                 raise ValueError("Такой папки нет. Обнови список сессий.")
+            self.require_folder(data, ident, grants)
             if delete:
                 folders.remove(target)
                 for meta in data["sessions"].values():
@@ -1360,6 +1410,16 @@ class SessionMeta:
         folders = sorted(data["folders"], key=lambda f: f.get("order", 0))
         known = {f["id"] for f in folders}
         unlocked = {str(x).lower() for x in (unlocked_ids or set())}
+        closed = set()
+        public_folders = []
+        for folder in folders:
+            grant = self.folder_grant(folder)
+            public = {k: v for k, v in folder.items() if k != "password"}
+            if grant:
+                public.update(protected=True, closed=grant not in unlocked)
+                if public["closed"]:
+                    closed.add(folder["id"])
+            public_folders.append(public)
         extra_titles = unlocked_titles or {}
         seen_low = {str(r["id"]).lower() for r in sessions}
         merged_sessions = list(sessions)
@@ -1404,8 +1464,11 @@ class SessionMeta:
             if has_lock and not is_open:
                 row["title"] = "Защищённая сессия"
                 row["auto_title"] = ""
+            if row["folder"] in closed:
+                row = {"id": sid, "folder": row["folder"], "title": "Закрытая папка", "cwd": "",
+                       "modified": 0, "messages": 0, "locked": True, "unlocked": False}
             rows.append(row)
-        return rows, folders
+        return rows, public_folders
 
     def forget(self, sid):
         low = str(sid or "").lower()
@@ -2158,7 +2221,9 @@ class Bridge:
     def is_locked_for_caller(self, sid, explicit_client=None):
         if not isinstance(sid, str) or not sid:
             return False
-        return self.meta.is_locked(sid) and sid.lower() not in self._caller_unlocked(explicit_client)
+        grants = self._caller_unlocked(explicit_client)
+        folder = self.meta.session_folder_grant(sid)
+        return bool(folder and folder not in grants) or (self.meta.is_locked(sid) and sid.lower() not in grants)
 
     def _require_unlocked(self, sid):
         if self.is_locked_for_caller(sid):
@@ -2713,7 +2778,7 @@ class Bridge:
             titles = self._unlocked_titles_for(unlocked_keys)
             sessions, folders = self.meta.apply(raw_sessions, unlocked_ids=unlocked_ids, unlocked_titles=titles)
         except OSError:
-            sessions = [dict(r) for r in raw_sessions]
+            sessions = []
             folders = []
         busy = self.running()
         for s in sessions:
@@ -2761,6 +2826,10 @@ class Bridge:
         op = req.get("op")
         claimed = False
         try:
+            if op in ("session_lock", "session_unlock", "session_relock"):
+                grant = self.meta.session_folder_grant(valid_id(req.get("sid")))
+                if grant and grant not in self._caller_unlocked():
+                    raise ValueError("Сначала открой папку паролем.")
             if op == "auth_start":
                 owner=getattr(CLIENT,'value',None)
                 provider = req.get('provider')
@@ -2788,6 +2857,9 @@ class Bridge:
                 self.browser['probe_browser'](owner.send if owner is not None else self.send,req.get('id'))
             elif op == "sessions":
                 self.send_sessions()
+            elif op == "folder_access":
+                self.meta.folder_access(req.get("id"), req.get("action"), req.get("password"), self._caller_unlocked())
+                self.send_sessions()
             elif op == "session_meta":
                 sid = valid_id(req.get("sid"))
                 self._require_unlocked(sid)
@@ -2801,16 +2873,16 @@ class Bridge:
                             self.meta.seal_vault(sid, keys[0], keys[1], payload)
                             req_title = None
                 self.meta.session(sid, title=req_title, pinned=req.get("pinned"),
-                                  folder=req.get("folder"), actor=req.get("actor") or "")
+                                  folder=req.get("folder"), actor=req.get("actor") or "", grants=self._caller_unlocked())
                 self.send_sessions()
             elif op == "session_folder":
                 target_sid = valid_id(req.get("sid")) if req.get("sid") else None
                 if target_sid:
                     self._require_unlocked(target_sid)
                 created = self.meta.folder(req.get("id"), name=req.get("name"), delete=bool(req.get("delete")),
-                                           order=req.get("order"), icon=req.get("icon"))
+                                           order=req.get("order"), icon=req.get("icon"), grants=self._caller_unlocked())
                 if target_sid and created:
-                    self.meta.session(target_sid, folder=created, actor=req.get("actor") or "")
+                    self.meta.session(target_sid, folder=created, actor=req.get("actor") or "", grants=self._caller_unlocked())
                 self.send_sessions()
             elif op == "session_lock":
                 sid = valid_id(req.get("sid"))
@@ -3491,6 +3563,10 @@ class Host:
         kind = event.get("type")
         with self.lock:
             clients = [c for c in self.clients if c.alive]
+        sid = event.get("sid")
+        folder_grant = self.bridge.meta.session_folder_grant(sid) if isinstance(sid, str) else None
+        if folder_grant:
+            clients = [c for c in clients if getattr(c, "peer", False) or folder_grant in c.unlocked]
         if kind in OWNED:
             owner = self.owners.get(event.get("sid"))
             if owner in clients:
@@ -3502,7 +3578,10 @@ class Host:
             return
         asking = getattr(CLIENT, "value", None)
         if asking is not None and kind not in BROADCAST:
-            asking.send(event)
+            if asking in clients:
+                asking.send(event)
+            elif folder_grant:
+                asking.send({"type": "session_locked", "sid": sid, "message": "Сначала открой папку паролем."})
             return
         sid = event.get("sid")
         locked_stream = (
@@ -3510,9 +3589,8 @@ class Host:
             and isinstance(sid, str)
             and self.bridge.meta.is_locked(sid)
         )
-        sid_low = sid.lower() if isinstance(sid, str) else ""
         for client in clients:
-            if locked_stream and not getattr(client, "peer", False) and sid_low not in client.unlocked:
+            if locked_stream and not getattr(client, "peer", False) and sid.lower() not in client.unlocked:
                 continue
             client.send(event)
 
@@ -3520,12 +3598,18 @@ class Host:
         """A returning app learns what is still running and what is waiting for an answer."""
         for peer in list(self.peers):
             for sid in list(peer.running):
+                grant = self.bridge.meta.session_folder_grant(sid)
+                if grant and not getattr(client, "peer", False) and grant not in client.unlocked:
+                    continue
                 client.send({"type": "run_state", "sid": sid, "busy": True, "queued": 0})
                 if getattr(client, "peer", False) or not self.bridge.is_locked_for_caller(sid, client):
                     for event in list(peer.pending.get(sid, {}).values()):
                         client.send(event)
         for run in list(self.bridge.runs.values()):
             if run.busy and not run.closed:
+                grant = self.bridge.meta.session_folder_grant(run.sid)
+                if grant and not getattr(client, "peer", False) and grant not in client.unlocked:
+                    continue
                 client.send({"type": "run_state", "sid": run.sid, "busy": True, "queued": max(0, run.turns - 1),
                              "background": list(run.background), "backend": getattr(run, "backend", "claude")})
                 if getattr(client, "peer", False) or not self.bridge.is_locked_for_caller(run.sid, client):
@@ -3583,7 +3667,8 @@ class Host:
                         pass
                     continue
                 if req.get("op") == "prompt" and isinstance(req.get("sid"), str):
-                    self.owners[req["sid"]] = client
+                    if not self.bridge.is_locked_for_caller(req["sid"], client):
+                        self.owners[req["sid"]] = client
                 if req.get("op") in ("desktop_upload", "desktop_upload_end", "desktop_result"):
                     self.bridge.dispatch(req)
                 else:
