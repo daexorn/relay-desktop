@@ -21,6 +21,12 @@ import java.util.concurrent.CompletableFuture
 enum class Screen { Servers, Sessions, Chat, Settings }
 enum class Link { Off, Connecting, Online }
 
+data class TurnSummary(
+    val backend: String = "",
+    val diff: Pair<Long, Long>? = null,
+    val context: Pair<Long, Long>? = null,
+)
+
 class Chat(val sid: String, cwd: String, title: String, model: String, mode: String, effort: String) {
     var backend by mutableStateOf("claude")
     var api by mutableStateOf(false)
@@ -31,8 +37,9 @@ class Chat(val sid: String, cwd: String, title: String, model: String, mode: Str
     var title by mutableStateOf(title)
     var model by mutableStateOf(model)
     var mode by mutableStateOf(mode)
-    var effort by mutableStateOf(effort)
+    var effort by mutableStateOf(concreteEffort(effort))
     var draft by mutableStateOf("")
+    var turnSummary by mutableStateOf(TurnSummary())
     var loading by mutableStateOf(false)
     var loaded by mutableStateOf(false)
     var locked by mutableStateOf(false)
@@ -45,6 +52,10 @@ class Chat(val sid: String, cwd: String, title: String, model: String, mode: Str
     val permissions = mutableStateListOf<Permission>()
     /** Sent while the agent was answering: answered in order, one after another. */
     val queued = mutableStateListOf<String>()
+    /** Written while there was no connection: sent by itself once the server is back. */
+    val outbox = mutableStateListOf<String>()
+    /** Server `modified` of the session when this chat last matched it. */
+    var syncedModified = 0.0
     val picked = mutableStateListOf<Picked>()
 
     fun isLockedGate(): Boolean = locked && !unlocked
@@ -79,6 +90,9 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
     private val main = Handler(Looper.getMainLooper())
     private var bridge: Bridge? = null
     private var poller: Runnable? = null
+    private var reconnector: Runnable? = null
+    private var reconnectAttempts = 0
+    private var lastPassword: String? = null
 
     var theme by mutableStateOf(store.theme)
         private set
@@ -175,6 +189,21 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         "agy" -> agyModels.ifEmpty { defaultBackendModels("agy") }
         else -> models.ifEmpty { defaultBackendModels("claude") }
     }
+
+    fun modelForChat(c: Chat): String =
+        concreteModel(c.selectedModel(current), catalogFor(c.activeBackend()), c.activeBackend())
+
+    private fun rememberLockedSessionName(sid: String, title: String) {
+        val server = current?.id ?: return
+        val oldAlias = "Сессия ${sid.take(8)}"
+        if (title.isNotBlank() && title !in setOf("Защищённая сессия", "Новая сессия", oldAlias)
+            && store.lockedSessionName(server, sid) in setOf(null, oldAlias)
+        ) store.setLockedSessionName(server, sid, title)
+    }
+
+    private fun lockListName(sid: String, modified: Double = sessions.firstOrNull { it.id == sid }?.modified ?: 0.0): String =
+        current?.let { store.lockedSessionName(it.id, sid) }?.takeUnless { it == "Сессия ${sid.take(8)}" }
+            ?: lockedSessionTitle(modified)
 
     fun commandsFor(backend: String): List<CommandInfo> {
         val base = when (backend) {
@@ -275,8 +304,17 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         trust = null
     }
 
-    fun connect(profile: ServerProfile, password: String) {
+    fun connect(profile: ServerProfile, password: String) = connect(profile, password, fresh = true)
+
+    private fun connect(profile: ServerProfile, password: String, fresh: Boolean) {
         disconnect()
+        lastPassword = password
+        if (!fresh) {
+            link = Link.Connecting
+            open(profile, password)
+            return
+        }
+        reconnectAttempts = 0
         current = profile
         apiModels = profile.api.models.map { ModelInfo(it, it, "") }
         apiError = ""
@@ -295,6 +333,10 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         chats.clear()
         selected = null
         screen = Screen.Sessions
+        open(profile, password)
+    }
+
+    private fun open(profile: ServerProfile, password: String) {
         lateinit var b: Bridge
         b = Bridge(
             getApplication(),
@@ -332,6 +374,8 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun disconnect() {
+        reconnector?.let { main.removeCallbacks(it) }
+        reconnector = null
         bridge?.close()
         bridge = null
         poller?.let { main.removeCallbacks(it) }
@@ -355,13 +399,59 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         authFlow = null
         link = Link.Off
         chats.values.forEach { c ->
+            c.loading = false
             if (c.transcript.busy) {
                 c.transcript.busy = false
-                c.transcript.error = "Подключение прервалось. Подключись снова, чтобы продолжить."
+                c.transcript.status = "Связь прервалась · переподключаемся"
                 c.changed()
             }
         }
-        if (!error.isNullOrBlank()) notice = error
+        scheduleReconnect(error)
+    }
+
+    /** A dropped connection comes back by itself; chats, drafts and the outbox stay as they are. */
+    private fun scheduleReconnect(error: String?) {
+        val profile = current ?: return
+        val password = lastPassword ?: store.password(profile.id)
+        if (password == null || demo) {
+            if (!error.isNullOrBlank()) notice = error
+            return
+        }
+        val delay = longArrayOf(1, 2, 3, 5, 8, 13, 20, 30)[reconnectAttempts.coerceAtMost(7)] * 1000
+        reconnectAttempts++
+        if (reconnectAttempts > 3 && !error.isNullOrBlank()) notice = "Нет связи: $error · пробуем снова"
+        reconnector?.let { main.removeCallbacks(it) }
+        val r = Runnable {
+            reconnector = null
+            if (bridge == null && current?.id == profile.id) connect(current ?: profile, password, fresh = false)
+        }
+        reconnector = r
+        main.postDelayed(r, delay)
+    }
+
+    /** Try at once, e.g. when the app comes back to the screen or the user presses send. */
+    fun reconnectNow() {
+        if (bridge != null || demo || current == null) return
+        reconnectAttempts = 0
+        val profile = current ?: return
+        val password = lastPassword ?: store.password(profile.id) ?: return
+        connect(profile, password, fresh = false)
+    }
+
+    private fun flushOutbox(c: Chat) {
+        if (link != Link.Online || c.outbox.isEmpty() || c.loading || c.isLockedGate()) return
+        if (c.transcript.busy && protocol < 4) return
+        val keep = c.draft
+        while (c.outbox.isNotEmpty() && link == Link.Online) {
+            c.draft = c.outbox.removeAt(0)
+            submitNow(c)
+            if (c.draft.isNotBlank()) {
+                c.outbox.add(0, c.draft)
+                break
+            }
+        }
+        c.draft = keep
+        c.changed()
     }
 
     /** Tests read what would go to the server. */
@@ -466,6 +556,7 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         when (value.optString("type")) {
             "hello" -> {
                 link = Link.Online
+                reconnectAttempts = 0
                 home = value.optString("home", "~")
                 protocol = value.optInt("protocol", 0)
                 claudeVersion = value.optString("version")
@@ -567,11 +658,15 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                 sessions = (0 until rows.length()).mapNotNull { rows.optJSONObject(it) }.map {
                     val locked = it.optBoolean("locked", false)
                     val unlocked = it.optBoolean("unlocked", !locked)
+                    val sid = it.optString("id")
+                    val title = it.optString("title")
+                    val modified = it.optDouble("modified", 0.0)
+                    if (locked && unlocked && sid.isNotEmpty()) rememberLockedSessionName(sid, title)
                     Session(
-                        id = it.optString("id"),
-                        title = it.optString("title"),
+                        id = sid,
+                        title = if (locked && !unlocked) lockListName(sid, modified) else title,
                         cwd = it.optString("cwd"),
-                        modified = it.optDouble("modified", 0.0),
+                        modified = modified,
                         pinned = it.optDouble("pinned", 0.0).let { p -> if (p.isNaN()) 0.0 else p },
                         folder = it.optString("folder"),
                         autoTitle = it.optString("auto_title"),
@@ -583,10 +678,18 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                 }.filter { it.id.isNotEmpty() }.distinctBy { it.id }
                 if (protocol >= 4) running = sessions.filter { it.running }.map { it.id }.toSet()
                 val f = value.optJSONArray("folders")
-                if (f != null) folders = (0 until f.length()).mapNotNull { f.optJSONObject(it) }.map { Folder(it.optString("id"), it.optString("name")) }
+                if (f != null) folders = (0 until f.length()).mapNotNull { f.optJSONObject(it) }.map { Folder(it.optString("id"), it.optString("name"), it.optString("icon")) }
                 sessionsLoaded = true
                 sessions.forEach { s ->
                     chats[s.id]?.let { c ->
+                        if (s.modified > c.syncedModified + 0.25) {
+                            // Written from another device or a terminal: pull it into the open chat.
+                            if (c.syncedModified > 0 && s.id == selected && c.loaded && !c.loading && !c.transcript.busy && !s.locked) {
+                                send(JSONObject().put("op", "history").put("sid", s.id))
+                            }
+                            c.syncedModified = s.modified
+                        }
+                        if (c.outbox.isNotEmpty() && s.id != selected) flushOutbox(c)
                         c.title = s.title
                         c.cwd = s.cwd
                         c.locked = s.locked
@@ -602,8 +705,10 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
             "session_locked" -> {
-                sessions = sessions.map { if (it.id == sid) it.copy(locked = true, unlocked = false) else it }
+                sessions.firstOrNull { it.id == sid && !it.isLockedGate() }?.let { rememberLockedSessionName(sid, it.title) }
+                sessions = sessions.map { if (it.id == sid) it.copy(title = lockListName(sid), locked = true, unlocked = false) else it }
                 chats[sid]?.let { c ->
+                    c.title = lockListName(sid)
                     c.locked = true
                     c.unlocked = false
                     c.unlocking = false
@@ -635,12 +740,19 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
             "session_lock_changed" -> {
                 val isLocked = value.optBoolean("locked", false)
                 val isUnlocked = value.optBoolean("unlocked", !isLocked)
-                sessions = sessions.map { if (it.id == sid) it.copy(locked = isLocked, unlocked = isUnlocked) else it }
+                if (isLocked && !isUnlocked) {
+                    sessions.firstOrNull { it.id == sid && !it.isLockedGate() }?.let { rememberLockedSessionName(sid, it.title) }
+                }
+                sessions = sessions.map {
+                    if (it.id == sid) it.copy(title = if (isLocked && !isUnlocked) lockListName(sid) else it.title,
+                        locked = isLocked, unlocked = isUnlocked) else it
+                }
                 chats[sid]?.let { c ->
                     c.locked = isLocked
                     c.unlocked = isUnlocked
                     c.unlocking = false
                     if (isLocked && !isUnlocked) {
+                        c.title = lockListName(sid)
                         c.loading = false
                         c.loaded = false
                         c.transcript.messages.clear()
@@ -652,7 +764,8 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
             "history" -> chats[sid]?.let { c ->
-                if (!c.transcript.busy && !c.isLockedGate()) {
+                c.loading = false
+                if ((!c.transcript.busy || !c.loaded) && !c.isLockedGate()) {
                     c.transcript.loadHistory(value.optJSONArray("messages") ?: JSONArray())
                     c.loading = false
                     c.loaded = true
@@ -664,6 +777,7 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     c.changed()
                 }
+                flushOutbox(c)
             }
             "claude" -> chats[sid]?.let { c ->
                 if (c.isLockedGate()) return@let
@@ -712,6 +826,20 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                         } }.orEmpty()
                     }
                 }
+            }
+            "turn_summary" -> chats[sid]?.takeUnless { it.isLockedGate() }?.let { c ->
+                val backend = value.optString("backend")
+                val previous = c.turnSummary.takeIf { it.backend == backend } ?: TurnSummary(backend)
+                c.turnSummary = previous.copy(
+                    diff = when {
+                        value.optBoolean("reset_diff") -> null
+                        value.has("added") && value.has("removed") -> value.optLong("added") to value.optLong("removed")
+                        else -> previous.diff
+                    },
+                    context = if (value.optLong("limit") > 0 && value.has("used")) {
+                        value.optLong("used") to value.optLong("limit")
+                    } else previous.context
+                )
             }
             "run_state" -> {
                 val busy = value.optBoolean("busy")
@@ -768,6 +896,7 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
             "session_deleted" -> {
+                current?.let { store.setLockedSessionName(it.id, sid, "") }
                 sessions = sessions.filter { it.id != sid }
                 chats.remove(sid)
                 if (selected == sid) {
@@ -780,7 +909,7 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                     when (value.optString("type")) {
                         "model_changed" -> c.updateSelectedModel(value.optString("model", "default"))
                         "mode_changed" -> c.mode = value.optString("mode", "manual")
-                        "effort_changed" -> c.effort = value.optString("effort", "default")
+                        "effort_changed" -> c.effort = concreteEffort(value.optString("effort"))
                     }
                 }
             }
@@ -902,6 +1031,9 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                 notice = "Открыта новая чистая сессия."
                 return true
             }
+            name == "/effort" && c.activeBackend() == "agy" -> {
+                notice = "В Antigravity глубина выбирается вместе с моделью."
+            }
             name == "/effort" && arg.isNotEmpty() -> {
                 c.effort = when (arg.lowercase()) {
                     "low", "быстро" -> "low"
@@ -909,10 +1041,9 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                     "high", "глубоко" -> "high"
                     "xhigh" -> "xhigh"
                     "max", "макс" -> "max"
-                    "auto", "default", "авто" -> "default"
                     else -> null
                 } ?: run {
-                    notice = "Глубина: auto, low, medium, high, xhigh или max."
+                    notice = "Глубина: low, medium, high, xhigh или max."
                     return true
                 }
                 notice = "Глубина: ${c.effort}"
@@ -925,11 +1056,8 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                     "agy" -> catalogFor("agy")
                     else -> models
                 }
-                val value = if (arg.equals("default", ignoreCase = true) && active != "api") {
-                    "default"
-                } else {
-                    resolveModel(catalog, arg) ?: arg.takeIf { active == "api" }
-                }
+                val value = (resolveModel(catalog.filter { explicitModel(it.value) }, arg)
+                    ?: arg.takeIf { active == "api" }).takeIf { it != null && explicitModel(it) }
                 if (value == null) {
                     c.transcript.error = "Нет такой модели: $arg. Доступны: " + catalog.joinToString { it.value }
                 } else {
@@ -962,7 +1090,10 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
     /** Model or mode picked while the agent answers: switch it live. */
     fun liveChange(c: Chat) {
         if (protocol >= 4 && c.transcript.busy) {
-            send(JSONObject().put("op", "control").put("sid", c.sid).put("backend", c.activeBackend()).put("action", "model").put("value", c.selectedModel(current)))
+            val model = modelForChat(c)
+            if (model.isNotBlank()) {
+                send(JSONObject().put("op", "control").put("sid", c.sid).put("backend", c.activeBackend()).put("action", "model").put("value", model))
+            }
             send(JSONObject().put("op", "control").put("sid", c.sid).put("backend", c.activeBackend()).put("action", "mode").put("value", c.mode))
         }
     }
@@ -1005,6 +1136,24 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
 
     fun submit() {
         val c = chat() ?: return
+        if (c.isLockedGate()) return
+        if (!demo && link != Link.Online) {
+            // No connection: keep the message and send it as soon as the server is back.
+            val text = c.draft
+            if (text.isNotBlank()) {
+                c.outbox.add(text)
+                c.draft = ""
+                c.transcript.error = ""
+                c.transcript.status = "Ждёт подключения · отправится автоматически"
+                c.changed()
+            }
+            if (link == Link.Off) reconnectNow()
+            return
+        }
+        submitNow(c)
+    }
+
+    private fun submitNow(c: Chat) {
         val profile = current ?: return
         if (c.isLockedGate()) return
         val activeBackend = c.activeBackend()
@@ -1013,7 +1162,7 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         if ((command.isEmpty() && c.picked.isEmpty()) || link != Link.Online) return
         if (c.picked.isEmpty() && localCommand(c, command)) return
         val quickSlash = c.picked.isEmpty() && command.substringBefore(' ').lowercase() in setOf(
-            "/usage", "/limits", "/quota", "/cost", "/tokens", "/status", "/info", "/help", "/commands",
+            "/usage", "/limits", "/quota", "/reset-limits", "/reset-usage", "/cost", "/tokens", "/status", "/info", "/help", "/commands",
             "/model", "/mode", "/effort"
         )
         val text = if (quickSlash) command else draft
@@ -1025,6 +1174,14 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         if (!canSend(c)) return
+        val selectedModel = modelForChat(c)
+        if (!quickSlash && selectedModel.isEmpty()) {
+            c.transcript.error = "Выбери модель перед отправкой."
+            c.changed()
+            return
+        }
+        if (selectedModel.isNotEmpty()) c.updateSelectedModel(selectedModel)
+        c.effort = concreteEffort(c.effort)
         c.transcript.error = ""
         val steering = c.transcript.busy
         c.transcript.userAt = c.transcript.messages.size
@@ -1033,12 +1190,12 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         val b64 = Base64.getEncoder()
         val images = JSONArray(attached.filter { it.image }.map { JSONObject().put("type", "base64").put("media_type", it.mime).put("data", b64.encodeToString(it.bytes)) })
         val files = JSONArray(attached.filter { !it.image }.map { JSONObject().put("type", "file").put("name", it.name).put("data", b64.encodeToString(it.bytes)) })
-        val selectedModel = c.selectedModel(profile)
         val actorStr = actor.ifBlank { "Relay Android" }
         c.transcript.turnBackend = activeBackend
         c.transcript.turnModel = selectedModel
         c.transcript.turnMode = c.mode
-        c.transcript.turnEffort = c.effort
+        val turnEffort = if (activeBackend == "agy") "" else c.effort
+        c.transcript.turnEffort = turnEffort
         c.transcript.turnActor = actorStr
         c.transcript.messages.add(
             Message(
@@ -1050,7 +1207,7 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                 model = selectedModel,
                 actor = actorStr,
                 mode = c.mode,
-                effort = c.effort,
+                effort = turnEffort,
                 steer = steering,
             )
         )
@@ -1070,7 +1227,7 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
             .put("files", files)
             .put("model", selectedModel)
             .put("mode", c.mode)
-            .put("effort", c.effort)
+            .put("effort", turnEffort.ifBlank { "default" })
             .put("actor", actor.ifBlank { "Relay Android" })
             .put("desktop_enabled", false)
             .put("desktop_context", JSONObject())
@@ -1236,7 +1393,18 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         send(JSONObject().put("op", "session_meta").put("sid", session.id).put("actor", actor.ifBlank { "Relay Android" }).apply(change))
 
     fun pin(session: Session, on: Boolean) = meta(session) { put("pinned", on) }
-    fun rename(session: Session, title: String) = meta(session) { put("title", title.trim()) }
+    fun rename(session: Session, title: String) {
+        if (!session.isLockedGate()) {
+            if (session.locked) current?.let { store.setLockedSessionName(it.id, session.id, title) }
+            meta(session) { put("title", title.trim()) }
+            return
+        }
+        val server = current?.id ?: return
+        store.setLockedSessionName(server, session.id, title)
+        val name = lockListName(session.id)
+        sessions = sessions.map { if (it.id == session.id) it.copy(title = name) else it }
+        chats[session.id]?.title = name
+    }
     fun moveTo(session: Session, folder: String) = meta(session) { put("folder", folder) }
     fun delete(session: Session) {
         if (session.locked) {
@@ -1248,6 +1416,9 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
     fun createFolder(name: String, session: Session? = null) =
         send(JSONObject().put("op", "session_folder").put("name", name.trim()).put("sid", session?.id ?: JSONObject.NULL).put("actor", actor))
     fun renameFolder(folder: Folder, name: String) = send(JSONObject().put("op", "session_folder").put("id", folder.id).put("name", name.trim()))
+    fun saveFolderIcon(folder: Folder, icon: String) = send(
+        JSONObject().put("op", "session_folder").put("id", folder.id).put("icon", icon)
+    )
     fun deleteFolder(folder: Folder) = send(JSONObject().put("op", "session_folder").put("id", folder.id).put("delete", true))
     fun toggleFolder(folder: Folder) {
         collapsed = if (folder.id in collapsed) collapsed - folder.id else collapsed + folder.id

@@ -39,11 +39,6 @@ pub fn default_backend_models(b: &str) -> Vec<ModelInfo> {
     match b {
         "codex" => vec![
             ModelInfo {
-                value: "default".into(),
-                display_name: "По умолчанию (Codex)".into(),
-                description: "Модель профиля Codex CLI на сервере".into(),
-            },
-            ModelInfo {
                 value: "gpt-5.4".into(),
                 display_name: "GPT-5.4".into(),
                 description: "Основная агентная модель OpenAI Codex".into(),
@@ -61,28 +56,79 @@ pub fn default_backend_models(b: &str) -> Vec<ModelInfo> {
         ],
         "agy" => vec![
             ModelInfo {
-                value: "default".into(),
-                display_name: "По умолчанию (AGY)".into(),
-                description: "Модель профиля Antigravity CLI на сервере".into(),
+                value: "gemini-4-carbon-medium".into(),
+                display_name: "Gemini 4 Carbon (Medium)".into(),
+                description: "Средняя глубина".into(),
             },
             ModelInfo {
-                value: "gemini-3.1-pro-preview".into(),
-                display_name: "Gemini 3.1 Pro".into(),
-                description: "Глубокое планирование и сложный код".into(),
+                value: "gemini-4-carbon-high".into(),
+                display_name: "Gemini 4 Carbon (High)".into(),
+                description: "Высокая глубина".into(),
             },
             ModelInfo {
-                value: "gemini-3-flash-preview".into(),
-                display_name: "Gemini 3 Flash".into(),
-                description: "Быстрая агентная разработка".into(),
-            },
-            ModelInfo {
-                value: "claude-sonnet-4-6".into(),
-                display_name: "Claude Sonnet 4.6 (AGY)".into(),
-                description: "Через Google Antigravity".into(),
+                value: "gemini-4-carbon-low".into(),
+                display_name: "Gemini 4 Carbon (Low)".into(),
+                description: "Низкая глубина".into(),
             },
         ],
         _ => vec![],
     }
+}
+
+/// Migrate old unselected profiles to a concrete, available model.
+pub fn explicit_model(value: &str) -> bool {
+    !value.trim().is_empty() && !matches!(value.trim().to_ascii_lowercase().as_str(), "default" | "auto")
+}
+
+pub fn selected_model(value: &str, models: &[ModelInfo], backend: &str) -> String {
+    if explicit_model(value) {
+        return value.trim().to_owned();
+    }
+    if backend == "api" {
+        return String::new();
+    }
+    if backend == "claude" && models.iter().any(|m| m.value == "sonnet") {
+        return "sonnet".into();
+    }
+    models.iter().find(|m| explicit_model(&m.value)).map(|m| m.value.clone())
+        .unwrap_or_else(|| if backend == "claude" { "sonnet".into() } else { String::new() })
+}
+
+pub fn selected_effort(value: &str) -> &str {
+    if matches!(value, "" | "default" | "auto") { "medium" } else { value }
+}
+
+pub fn backend_supports_effort(backend: &str) -> bool {
+    backend != "agy"
+}
+
+pub fn backend_effort_options(backend: &str) -> &'static [&'static str] {
+    match backend {
+        "agy" => &[],
+        "codex" => &["low", "medium", "high", "xhigh"],
+        "api" => &["low", "medium", "high"],
+        _ => &["low", "medium", "high", "max"],
+    }
+}
+
+pub const LOCKED_TITLE: &str = "Защищённая сессия";
+
+pub fn locked_session_title(modified: f64) -> String {
+    if modified.is_finite() && modified > 0. {
+        if let Some(time) = chrono::DateTime::from_timestamp(modified as i64, 0) {
+            return format!("Сессия от {}", time.with_timezone(&chrono::Local).format("%d.%m в %H:%M"));
+        }
+    }
+    "Сессия под паролем".into()
+}
+
+fn legacy_session_label(sid: &str, title: &str) -> bool {
+    title == format!("Сессия {}", sid.chars().take(8).collect::<String>())
+}
+
+fn is_visible_session_title(title: &str) -> bool {
+    let title = title.trim();
+    !title.is_empty() && title != LOCKED_TITLE && title != "Новая сессия"
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -154,6 +200,9 @@ impl ApiProfile {
 }
 fn default_tests() -> String {
     "ask".into()
+}
+fn default_chat_orchestra_parallel() -> usize {
+    3
 }
 fn default_mode() -> String {
     "auto".into()
@@ -290,6 +339,10 @@ pub struct Settings {
     #[serde(default)]
     pub orchestrators: Vec<crate::cluster::Config>,
     #[serde(default)]
+    pub chat_orchestra_palette: crate::cluster::ModelPalette,
+    #[serde(default = "default_chat_orchestra_parallel")]
+    pub chat_orchestra_parallel: usize,
+    #[serde(default)]
     pub prompt_snippets: Vec<crate::templates::Snippet>,
     /// Session folders folded in the sidebar (this computer only).
     #[serde(default)]
@@ -300,6 +353,8 @@ pub struct Settings {
     /// Per-conversation backend override ("claude", "codex", "agy", "api").
     #[serde(default)]
     pub session_backends: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub locked_session_names: std::collections::BTreeMap<String, String>,
 }
 /// Drafts and unsent queued messages, kept on disk so closing Relay loses nothing.
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -392,6 +447,33 @@ impl Settings {
         server.effective_backend().to_owned()
     }
 
+    pub fn label_locked_session(&self, key: &str, sid: &str, modified: f64) -> String {
+        self.locked_session_names.get(key).filter(|name| !legacy_session_label(sid, name))
+            .cloned().unwrap_or_else(|| locked_session_title(modified))
+    }
+
+    pub fn remember_locked_title(&mut self, key: &str, sid: &str, title: &str) -> bool {
+        if !is_visible_session_title(title) || legacy_session_label(sid, title)
+            || self.locked_session_names.get(key).is_some_and(|name| !legacy_session_label(sid, name)) {
+            return false;
+        }
+        self.locked_session_names.insert(key.to_owned(), shorten(title.trim(), 120));
+        true
+    }
+
+    pub fn restore_locked_titles(&mut self, server: &str, sessions: &mut [Session]) -> bool {
+        let mut dirty = false;
+        for session in sessions.iter_mut().filter(|s| s.locked) {
+            let key = format!("{server}/{}", session.id);
+            if session.unlocked {
+                dirty |= self.remember_locked_title(&key, &session.id, &session.title);
+            } else {
+                session.title = self.label_locked_session(&key, &session.id, session.modified);
+            }
+        }
+        dirty
+    }
+
     pub fn set_session_backend(&mut self, chat_key: String, backend: &str) {
         let b = normalize_backend(backend).unwrap_or("claude");
         self.api_sessions.insert(chat_key.clone(), b == "api");
@@ -409,9 +491,9 @@ fn default_true() -> bool {
     true
 }
 
-/// Shared 40-theme catalog across Desktop GUI, Relay TUI, and Android (30 dark + 10 light):
+/// Shared 44-theme catalog across Desktop GUI, Relay TUI, and Android (32 dark + 12 light):
 /// `(id, label, is_light, [base, side, rail, surface, line, text, muted, accent])`.
-pub const THEME_SPECS: [(&str, &str, bool, [u32; 8]); 40] = [
+pub const THEME_SPECS: [(&str, &str, bool, [u32; 8]); 44] = [
     ("graphite", "Графит", false, [0x10141a, 0x151b23, 0x0c1016, 0x1b242e, 0x2a3643, 0xe6edf3, 0x8d9cab, 0x83c4b3]),
     ("midnight", "Полночь", false, [0x0f1520, 0x141d2b, 0x0b111b, 0x1b2739, 0x2b3b52, 0xe5edf9, 0x95a5bd, 0x89aef1]),
     ("obsidian", "Обсидиан", false, [0x0d0f12, 0x12151a, 0x090b0e, 0x191d24, 0x2a303b, 0xedeff2, 0x9098a6, 0xe5b567]),
@@ -442,6 +524,8 @@ pub const THEME_SPECS: [(&str, &str, bool, [u32; 8]); 40] = [
     ("sakura_night", "Ночная сакура", false, [0x18131d, 0x130f17, 0x0e0b12, 0x241c2c, 0x382b44, 0xf7ebf4, 0xb29ab0, 0xff85b3]),
     ("arctic_void", "Космос", false, [0x090d16, 0x070a12, 0x05070d, 0x12192b, 0x212d4a, 0xeaf0ff, 0x8697bd, 0x7aa2f7]),
     ("copper", "Медь", false, [0x191412, 0x14100e, 0x0f0c0a, 0x261e1a, 0x3b2f29, 0xf4ebe6, 0xad998f, 0xe08b58]),
+    ("mono", "Монохром", false, [0x111111, 0x161616, 0x0b0b0b, 0x1e1e1e, 0x2e2e2e, 0xededed, 0x8f8f8f, 0xd9d9d9]),
+    ("mono_black", "Чёрно-белый", false, [0x000000, 0x000000, 0x000000, 0x0d0d0d, 0x333333, 0xffffff, 0x9a9a9a, 0xffffff]),
     ("paper", "Бумага", true, [0xfcfcfb, 0xf5f4f2, 0xedece9, 0xffffff, 0xe4e2de, 0x1e1e21, 0x78777e, 0x4a6fe3]),
     ("sand", "Песок", true, [0xfbf7f0, 0xf4eee3, 0xece4d6, 0xfffdf9, 0xe3d8c6, 0x2b241c, 0x857865, 0xc2703d]),
     ("mint", "Мята", true, [0xf6fbf8, 0xedf6f1, 0xe2efe8, 0xffffff, 0xd5e7dc, 0x17261e, 0x6c8478, 0x2f9e77]),
@@ -452,6 +536,8 @@ pub const THEME_SPECS: [(&str, &str, bool, [u32; 8]); 40] = [
     ("peach", "Персик", true, [0xfdf8f5, 0xf7eee8, 0xefe3db, 0xffffff, 0xe6d4c8, 0x2d211b, 0x826c60, 0xd96b43]),
     ("sage", "Шалфей", true, [0xf5f8f4, 0xebf1e9, 0xe0e8dd, 0xffffff, 0xcfdcd0, 0x1c261e, 0x637867, 0x3b875e]),
     ("sky_day", "Облака", true, [0xf5f9fd, 0xebf2f9, 0xdfeaf5, 0xffffff, 0xcbdced, 0x162434, 0x5e768f, 0x0284c7]),
+    ("mono_light", "Монохром светлый", true, [0xfafafa, 0xf2f2f2, 0xe9e9e9, 0xffffff, 0xdedede, 0x161616, 0x737373, 0x262626]),
+    ("ink", "Чернила", true, [0xf3f1ec, 0xebe8e2, 0xe2ded6, 0xfaf8f4, 0xd6d1c7, 0x1a1a1a, 0x6e6b66, 0x1a1a1a]),
 ];
 
 pub fn theme_spec(name: &str) -> &'static (&'static str, &'static str, bool, [u32; 8]) {
@@ -520,6 +606,8 @@ pub struct CommandInfo {
 pub struct SessionFolder {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub icon: String,
 }
 #[derive(Clone, Default, Deserialize)]
 pub struct Folder {
@@ -563,6 +651,7 @@ pub struct Message {
 pub fn builtin_slash_commands() -> Vec<CommandInfo> {
     [
         ("usage", "Лимиты и токены выбранного агента", ""),
+        ("reset-limits", "Проверить доступность разового сброса", ""),
         ("cost", "Статистика токенов и вызовов инструментов сессии", ""),
         ("status", "Состояние сервера, CLI-агентов и текущей сессии", ""),
         ("clear", "Начать новую чистую сессию в текущей папке", ""),
@@ -574,7 +663,7 @@ pub fn builtin_slash_commands() -> Vec<CommandInfo> {
         ("lock", "Установить пароль или заблокировать сессию", ""),
         ("folder", "Открыть окно управления папками сессий", ""),
         ("radar", "Открыть живой радар агентов на сервере", ""),
-        ("theme", "Открыть выбор из 40 тем оформления", "[тема]"),
+        ("theme", "Открыть выбор из 44 тем оформления", "[тема]"),
         ("login", "Авторизовать агента через серверный браузер", "[claude|codex|agy]"),
         ("install", "Установить или обновить CLI на сервере", "[claude|codex|agy|all]"),
         ("stop", "Остановить текущий ответ агента", ""),
@@ -973,6 +1062,7 @@ impl ToolPhase {
 
 pub fn classify_tool(tool: &str) -> ToolPhase {
     if tool.starts_with("mcp__relay_cluster__")
+        || tool.starts_with("mcp_relay_cluster_")
         || matches!(
             tool,
             "Task"
@@ -983,10 +1073,18 @@ pub fn classify_tool(tool: &str) -> ToolPhase {
                 | "swarm"
                 | "run_workflow"
                 | "send_message"
+                | "list_workers"
+                | "create_worker"
+                | "remove_worker"
+                | "dispatch_task"
+                | "task_status"
+                | "wait_for_task"
+                | "cancel_task"
+                | "cluster_status"
         )
     {
         ToolPhase::Subagent
-    } else if tool.starts_with("mcp__relay_desktop__") {
+    } else if tool.starts_with("mcp__relay_desktop__") || tool.starts_with("mcp_relay_desktop_") {
         ToolPhase::Desktop
     } else if matches!(
         tool,
@@ -1029,7 +1127,11 @@ pub fn tool_target_preview(m: &Message, max: usize) -> String {
     let i = &m.input;
     let get = |k: &str| i[k].as_str().unwrap_or("").trim();
     let raw = match m.tool.as_str() {
-        "Bash" | "run_command" | "commandExecution" | "mcp__relay_desktop__run_local_command" => {
+        "Bash"
+        | "run_command"
+        | "commandExecution"
+        | "mcp__relay_desktop__run_local_command"
+        | "mcp_relay_desktop_run_local_command" => {
             let cmd = get("command");
             let cmd = if cmd.is_empty() { get("CommandLine") } else { cmd };
             if cmd.is_empty() {
@@ -1086,7 +1188,18 @@ pub fn tool_target_preview(m: &Message, max: usize) -> String {
                 msg.lines().next().unwrap_or("").to_owned()
             }
         }
-        "mcp__relay_cluster__dispatch_task" => {
+        "mcp__relay_cluster__create_worker" | "mcp_relay_cluster_create_worker" | "create_worker" => {
+            let name = get("name");
+            let tier = get("tier");
+            if !name.is_empty() && !tier.is_empty() && tier != "default" {
+                format!("Создаёт агента: {name} ({tier})")
+            } else if !name.is_empty() {
+                format!("Создаёт агента: {name}")
+            } else {
+                "Создаёт агента".into()
+            }
+        }
+        "mcp__relay_cluster__dispatch_task" | "mcp_relay_cluster_dispatch_task" | "dispatch_task" => {
             let worker = get("worker");
             let title = get("title");
             let task = get("task");
@@ -1219,12 +1332,24 @@ pub fn analyze_turn(
                     | "mcp__relay_cluster__cluster_status"
                     | "mcp__relay_cluster__wait_for_task"
                     | "mcp__relay_cluster__task_status"
+                    | "mcp__relay_cluster__remove_worker"
+                    | "mcp_relay_cluster_list_workers"
+                    | "mcp_relay_cluster_cluster_status"
+                    | "mcp_relay_cluster_wait_for_task"
+                    | "mcp_relay_cluster_task_status"
+                    | "mcp_relay_cluster_remove_worker"
+                    | "list_workers"
+                    | "cluster_status"
+                    | "wait_for_task"
+                    | "task_status"
+                    | "remove_worker"
             )
         {
             let i = &entry.call.input;
             let role = i["Role"]
                 .as_str()
                 .or_else(|| i["worker"].as_str())
+                .or_else(|| i["name"].as_str())
                 .or_else(|| i["subagent_type"].as_str())
                 .or_else(|| i["agent_type"].as_str())
                 .or_else(|| i["TypeName"].as_str())

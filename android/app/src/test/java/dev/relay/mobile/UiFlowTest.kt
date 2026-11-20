@@ -2,6 +2,7 @@ package dev.relay.mobile
 
 import androidx.activity.ComponentActivity
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
@@ -37,7 +38,7 @@ class UiFlowTest {
         vm.handle(org.json.JSONObject().put("type", "hello").put("home", "/root"))
         vm.newChat()
         rule.setContent { RelayApp(vm) }
-        rule.onNodeWithText("Напиши задачу… или / для команд").performTextInput("Привет")
+        rule.onNodeWithContentDescription("Поле сообщения").performTextInput("Привет")
         rule.waitForIdle()
         assertEquals("Привет", vm.chat()?.draft)
         rule.onNodeWithText("С чего начнём?").assertExists()

@@ -27,19 +27,16 @@ fun backendShortLabel(b: String): String = when (b) {
 
 fun defaultBackendModels(backend: String): List<ModelInfo> = when (backend) {
     "codex" -> listOf(
-        ModelInfo("default", "По умолчанию (Codex)", "Модель профиля Codex CLI на сервере"),
         ModelInfo("gpt-5.4", "GPT-5.4", "Основная агентная модель OpenAI Codex"),
         ModelInfo("gpt-5.3-codex", "GPT-5.3 Codex", "Специализированная модель для кода"),
         ModelInfo("gpt-5.4-mini", "GPT-5.4 Mini", "Быстрая модель для простых задач"),
     )
     "agy" -> listOf(
-        ModelInfo("default", "По умолчанию (AGY)", "Модель профиля Antigravity CLI на сервере"),
-        ModelInfo("gemini-3.1-pro-preview", "Gemini 3.1 Pro", "Глубокое планирование и сложный код"),
-        ModelInfo("gemini-3-flash-preview", "Gemini 3 Flash", "Быстрая агентная разработка"),
-        ModelInfo("claude-sonnet-4-6", "Claude Sonnet 4.6 (AGY)", "Через Google Antigravity"),
+        ModelInfo("gemini-4-carbon-medium", "Gemini 4 Carbon (Medium)", "Средняя глубина"),
+        ModelInfo("gemini-4-carbon-high", "Gemini 4 Carbon (High)", "Высокая глубина"),
+        ModelInfo("gemini-4-carbon-low", "Gemini 4 Carbon (Low)", "Низкая глубина"),
     )
     "claude" -> listOf(
-        ModelInfo("default", "Модель сервера", ""),
         ModelInfo("fable", "Fable", ""),
         ModelInfo("opus", "Opus", ""),
         ModelInfo("sonnet", "Sonnet", ""),
@@ -185,8 +182,25 @@ data class AuthFlowState(
 data class ModelInfo(val value: String, val name: String, val description: String)
 data class CommandInfo(val name: String, val description: String, val hint: String)
 
+fun explicitModel(value: String) = value.isNotBlank() && value.trim().lowercase() !in setOf("default", "auto")
+
+fun concreteModel(value: String, models: List<ModelInfo>, backend: String): String = when {
+    explicitModel(value) -> value.trim()
+    backend == "api" -> ""
+    backend == "claude" && models.any { it.value == "sonnet" } -> "sonnet"
+    else -> models.firstOrNull { explicitModel(it.value) }?.value ?: if (backend == "claude") "sonnet" else ""
+}
+
+fun concreteEffort(value: String) = if (value in setOf("", "default", "auto")) "medium" else value
+
+fun lockedSessionTitle(modified: Double): String {
+    if (!modified.isFinite() || modified <= 0) return "Сессия под паролем"
+    val day = java.text.SimpleDateFormat("dd.MM 'в' HH:mm", java.util.Locale("ru"))
+    return "Сессия от ${day.format(java.util.Date((modified * 1000).toLong()))}"
+}
+
 fun modelLabel(models: List<ModelInfo>, value: String): String = when {
-    value == "default" || value.isBlank() -> "Модель: авто"
+    !explicitModel(value) -> "Выбрать модель"
     else -> models.firstOrNull { it.value == value }?.name?.takeIf { it.isNotEmpty() && it != value }
         ?: value.removePrefix("claude-").replace('-', ' ').replaceFirstChar { it.uppercase() }.let { if (it.length > 28) it.take(27) + "…" else it }
 }
@@ -209,6 +223,7 @@ fun slashMatches(draft: String, commands: List<CommandInfo>): List<CommandInfo> 
 
 fun builtinSlashCommands(): List<CommandInfo> = listOf(
     CommandInfo("usage", "Лимиты и токены выбранного агента", ""),
+    CommandInfo("reset-limits", "Проверить доступность разового сброса", ""),
     CommandInfo("cost", "Статистика токенов и вызовов инструментов сессии", ""),
     CommandInfo("status", "Состояние сервера, установленных CLI и текущей сессии", ""),
     CommandInfo("clear", "Начать новую чистую сессию в этой папке", ""),
@@ -220,7 +235,7 @@ fun builtinSlashCommands(): List<CommandInfo> = listOf(
     CommandInfo("help", "Показать список всех быстрых команд Relay", ""),
 )
 
-data class Folder(val id: String, val name: String)
+data class Folder(val id: String, val name: String, val icon: String = "")
 
 data class Message(
     val role: String,
@@ -383,6 +398,14 @@ class Store(context: Context) {
         if (prefs.contains("api:$server/$sid")) prefs.getBoolean("api:$server/$sid", false) else null
     fun setApiSource(server: String, sid: String, enabled: Boolean) {
         prefs.edit().putBoolean("api:$server/$sid", enabled).apply()
+    }
+    fun lockedSessionName(server: String, sid: String): String? = prefs.getString("locked-name:$server/$sid", null)
+
+    fun setLockedSessionName(server: String, sid: String, name: String) {
+        prefs.edit().apply {
+            if (name.isBlank()) remove("locked-name:$server/$sid")
+            else putString("locked-name:$server/$sid", name.trim().take(120))
+        }.apply()
     }
     fun sessionBackend(server: String, sid: String): String? {
         val stored = prefs.getString("backend:$server/$sid", null)

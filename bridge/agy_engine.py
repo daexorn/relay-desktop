@@ -196,9 +196,9 @@ def native_sessions(excluded_ids=None):
                     cwd = m_ws.group(1).strip()
                 if row.get("type") == "USER_INPUT" and not first_user:
                     cleaned = _strip_tags(content)
-                    if cleaned:
-                        first_user = " ".join(cleaned.split())[:100]
-            title = first_user or ("Разговор AGY от " + time.strftime("%d.%m", time.localtime(st.st_mtime)))
+                    clean = globals().get("relay_title_text")
+                    first_user = clean(cleaned) if clean is not None else " ".join(cleaned.split())[:100]
+            title = first_user or ("Antigravity · " + time.strftime("%d.%m %H:%M", time.localtime(st.st_mtime)))
             out.append({
                 "id": low,
                 "native_id": low,
@@ -243,6 +243,24 @@ def native_cwd(sid):
     return None
 
 
+
+HISTORY_KEEP_TOOLS = 1500
+HISTORY_FULL_RESULTS = 300
+
+
+def history_window(messages):
+    """Keep 100% of user/assistant dialogue; trim only ancient tool calls/results beyond HISTORY_KEEP_TOOLS."""
+    msgs = list(messages)
+    tool_indices = [i for i, m in enumerate(msgs) if isinstance(m, dict) and m.get("role") in ("tool", "tool_result")]
+    drop_tools = set(tool_indices[:-HISTORY_KEEP_TOOLS]) if len(tool_indices) > HISTORY_KEEP_TOOLS else set()
+    kept = [m for i, m in enumerate(msgs) if i not in drop_tools]
+    results = [i for i, m in enumerate(kept) if isinstance(m, dict) and m.get("role") == "tool_result"]
+    for i in results[:-HISTORY_FULL_RESULTS]:
+        text = str(kept[i].get("text") or "")
+        if len(text) > 1500:
+            kept[i] = {**kept[i], "text": text[:1500] + "\n…"}
+    return kept
+
 def native_history(sid):
     low = str(sid or "").lower()
     if not _valid_uuid(low):
@@ -252,18 +270,46 @@ def native_history(sid):
         raise ValueError("Сессия не найдена. Обнови список разговоров.")
     messages = []
     pending_tool_ids = collections.deque()
+    rows = []
     with transcript.open("rb") as f:
         size = os.fstat(f.fileno()).st_size
-        if size > 12 * 1024 * 1024:
-            f.seek(size - 12 * 1024 * 1024)
+        if size > 48 * 1024 * 1024:
+            f.seek(size - 48 * 1024 * 1024)
             f.readline()
         for line in f:
             try:
                 row = json.loads(line)
             except ValueError:
                 continue
-            if not isinstance(row, dict):
-                continue
+            if isinstance(row, dict):
+                rows.append(row)
+    # The compact transcript cuts long fields; take those steps whole from transcript_full.jsonl.
+    wanted = {row.get("step_index") for row in rows
+              if row.get("truncated_fields") and row.get("type") in ("USER_INPUT", "PLANNER_RESPONSE", "GENERIC")}
+    wanted.discard(None)
+    full_path = transcript.with_name("transcript_full.jsonl")
+    if wanted and full_path.is_file():
+        full = {}
+        try:
+            with full_path.open("rb") as f:
+                for line in f:
+                    marker = line.find(b'"step_index":')
+                    if marker < 0:
+                        continue
+                    digits = re.match(rb'"step_index":\s*(\d+)', line[marker:])
+                    if not digits or int(digits.group(1)) not in wanted:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(row, dict):
+                        full[row.get("step_index")] = row
+        except OSError:
+            full = {}
+        rows = [full.get(row.get("step_index"), row) if row.get("truncated_fields") else row for row in rows]
+    for row in rows:
+        if True:
             kind = row.get("type")
             step_idx = row.get("step_index", len(messages))
             if kind == "USER_INPUT":
@@ -298,7 +344,7 @@ def native_history(sid):
                     "tool_id": tid,
                     "backend": "agy",
                 })
-    return messages[-600:]
+    return history_window(messages)
 
 
 def delete_native_session(sid):
@@ -355,7 +401,6 @@ class AgyRun:
         self.rpc_waiters = {}
         self.session_id = None
         self.available_modes = set()
-        self.thought_config_id = None
         self.inbox = collections.deque()
         self.condition = threading.Condition()
 
@@ -451,14 +496,10 @@ class AgyRun:
             pass
 
     def _build_environment(self):
-        prompt = (
-            "Relay supports downloadable server files in chat. When the user requests a built mod or other generated "
-            "artifact, include a Markdown download link [filename](absolute_server_file_path) for the real existing file. "
-            "Verify it exists before offering it. Relay chat renders LaTeX math: write formulas as $...$ inline and "
-            "$$...$$ on their own line."
-        )
+        # No Relay system prompt: only the user's own instructions and cluster coordination roles are passed.
+        prompt = ""
         if self.agent_role in AGENT_ROLES:
-            prompt += " " + AGENT_ROLES[self.agent_role]
+            prompt += (" " if prompt else "") + AGENT_ROLES[self.agent_role]
         mcp_list = []
 
         def add_mcp(name, command, args, env_dict):
@@ -486,7 +527,6 @@ class AgyRun:
                 [str(self.owner.board_file), "mcp"],
                 {"RELAY_BOARD_ACTOR": f"AGY · {actor}", "RELAY_BOARD_NAME": "sbrp"},
             )
-            prompt += " Shared task board tools are available in `relay_board`."
         if self.desktop_enabled and getattr(self.owner, "desktop", None):
             try:
                 ctx = json.loads(self.desktop_context or "{}")
@@ -499,10 +539,9 @@ class AgyRun:
                 raw_mcp = json.loads(self.owner.desktop.config(self.sid, tools)).get("mcpServers", {})
                 for name, spec in raw_mcp.items():
                     add_mcp(name, spec["command"], spec.get("args", []), spec.get("env", {}))
-                prompt += " Relay desktop tools operate on the user's computer. Local context: " + self.desktop_context
         if self.custom_prompt:
-            prompt += "\n\nUser's custom instructions:\n" + self.custom_prompt
-        return mcp_list, prompt[:110000]
+            prompt += ("\n\n" if prompt.strip() else "") + self.custom_prompt
+        return mcp_list, prompt.strip()[:110000]
 
     def _emit(self, data):
         self.owner.send({"type": "claude", "sid": self.sid, "data": data})
@@ -604,11 +643,22 @@ class AgyRun:
                 tc = params.get("toolCall") or {}
                 title = str(tc.get("title") or tc.get("kind") or "Действие")
                 raw_in = tc.get("rawInput") if isinstance(tc.get("rawInput"), dict) else {"description": title}
+                low_title = title.lower()
+                is_cluster_tool = (
+                    "relay_cluster" in low_title
+                    or low_title in ("list_workers", "create_worker", "remove_worker", "dispatch_task", "task_status", "wait_for_task", "cancel_task", "cluster_status")
+                )
+
+                if self.cluster_context.get("role") == "worker" and low_title in ("ask_question", "askuserquestion"):
+                    outcome = {"outcome": "selected", "optionId": reject_opt} if reject_opt else {"outcome": "cancelled"}
+                    self._send_json({"jsonrpc": "2.0", "id": rpc_id, "result": {"outcome": outcome}})
+                    return
 
                 auto_allow = (
                     self.mode == "auto"
-                    or "relay_board" in title
-                    or (self.desktop_enabled and "relay_desktop" in title)
+                    or "relay_board" in low_title
+                    or (self.cluster_context.get("role") == "leader" and is_cluster_tool)
+                    or (self.desktop_enabled and "relay_desktop" in low_title)
                     or (self.mode == "acceptEdits" and tc.get("kind") in ("edit", "write"))
                 )
                 if auto_allow:
@@ -657,7 +707,12 @@ class AgyRun:
             return
         upd = params.get("update") or {}
         kind = upd.get("sessionUpdate")
-        if kind == "agent_message_chunk":
+        if kind == "usage_update" and params.get("sessionId") == self.session_id:
+            used, limit = upd.get("used"), upd.get("size")
+            if type(used) is int and used >= 0 and type(limit) is int and limit > 0:
+                self.owner.send({"type": "turn_summary", "sid": self.sid, "backend": self.backend,
+                                 "used": used, "limit": limit})
+        elif kind == "agent_message_chunk":
             content = upd.get("content") or {}
             txt = content.get("text") if isinstance(content, dict) else ""
             if isinstance(txt, str) and txt:
@@ -720,16 +775,13 @@ class AgyRun:
                     "displayName": str(m.get("name") or mid),
                     "description": str(m.get("description") or "")[:240],
                 })
-        for opt in res.get("configOptions") or []:
-            if isinstance(opt, dict) and opt.get("id") in ("thought_level", "effort", "reasoning_effort"):
-                self.thought_config_id = opt["id"]
         if models:
             self.owner.learn_backend_catalog("agy", models, agy_version(self.binary) or "")
 
     def _apply_session_settings(self):
         if not self.session_id:
             return
-        if self.model and self.model != "default":
+        if self.model and self.model not in ("default", "inherit"):
             try:
                 self._rpc("session/set_model", {"sessionId": self.session_id, "modelId": self.model}, timeout=15)
             except Exception:
@@ -740,12 +792,6 @@ class AgyRun:
                 self._rpc("session/set_mode", {"sessionId": self.session_id, "modeId": desired_mode}, timeout=15)
             except Exception:
                 pass
-        if self.effort and self.effort != "default":
-            cfg_id = self.thought_config_id or "thought_level"
-            try:
-                self._rpc("session/set_config_option", {"sessionId": self.session_id, "configId": cfg_id, "value": self.effort}, timeout=15)
-            except Exception:
-                pass
 
     def _ensure_session(self):
         if self.session_id:
@@ -753,10 +799,11 @@ class AgyRun:
         self._rpc("initialize", {
             "protocolVersion": 1,
             "clientCapabilities": {"fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False},
-            "clientInfo": {"name": "relay-desktop", "version": "0.15.0"},
+            "clientInfo": {"name": "relay-desktop", "version": "0.20.0"},
         }, timeout=30)
-        meta = {"antigravity": {"systemPrompt": {"append": self.system_prompt}}}
-        base_params = {"cwd": self.cwd, "mcpServers": self.mcp_servers, "_meta": meta}
+        base_params = {"cwd": self.cwd, "mcpServers": self.mcp_servers}
+        if self.system_prompt:
+            base_params["_meta"] = {"antigravity": {"systemPrompt": {"append": self.system_prompt}}}
 
         if self.linked_session_id and has_native_session(self.linked_session_id):
             try:
@@ -880,7 +927,7 @@ class AgyRun:
     def control(self, subtype, **fields):
         if subtype == "set_model":
             self.model = fields.get("model") or "default"
-            if self.session_id and self.model != "default":
+            if self.session_id and self.model not in ("default", "inherit"):
                 threading.Thread(
                     target=lambda: self._safe_rpc("session/set_model", {"sessionId": self.session_id, "modelId": self.model}),
                     daemon=True,

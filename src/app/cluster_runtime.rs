@@ -26,13 +26,15 @@ impl RelayApp {
             .runs
             .iter()
             .flat_map(|r| {
-                std::iter::once((
-                    r.config.leader.clone(),
-                    r.leader_sid.clone(),
-                    model::shorten(&r.title, 70),
-                    r.config.mode.clone(),
-                ))
-                .chain(r.tasks.iter().map(|t| {
+                let leader_entry = (!r.detached).then(|| {
+                    (
+                        r.config.leader.clone(),
+                        r.leader_sid.clone(),
+                        model::shorten(&r.title, 70),
+                        r.config.mode.clone(),
+                    )
+                });
+                leader_entry.into_iter().chain(r.tasks.iter().map(|t| {
                     (
                         t.agent.clone(),
                         t.sid.clone(),
@@ -49,7 +51,7 @@ impl RelayApp {
                     self.settings.set_session_backend(k.clone(), &agent.backend);
                 }
                 let mut c = Chat::new(sid.clone(), agent_cwd(&agent, &server), title);
-                c.mode = mode;
+                c.mode = agent_mode(&agent, &mode);
                 c.model = agent_model(&agent, &server);
                 c.effort = agent_effort(&agent, &server);
                 self.chats.insert(k, c);
@@ -58,7 +60,7 @@ impl RelayApp {
     }
     pub(super) fn cluster_label(&self, server: &str, sid: &str) -> Option<String> {
         for r in &self.cluster_store.runs {
-            if r.config.leader.server == server && r.leader_sid == sid {
+            if !r.detached && r.config.leader.server == server && r.leader_sid == sid {
                 return Some(format!("Кластер · {}", r.config.name));
             }
             if let Some(t) = r
@@ -76,20 +78,241 @@ impl RelayApp {
             .runs
             .iter()
             .find(|r| {
-                (r.config.leader.server == server && r.leader_sid == sid)
+                (!r.detached && r.config.leader.server == server && r.leader_sid == sid)
                     || r.tasks
                         .iter()
                         .any(|t| t.agent.server == server && t.sid == sid)
             })
             .map(|r| r.id.clone())
     }
+    pub(super) fn any_cluster_for_leader(&self, server: &str, sid: &str) -> Option<String> {
+        self.cluster_store
+            .runs
+            .iter()
+            .find(|r| r.config.leader.server == server && r.leader_sid == sid)
+            .map(|r| r.id.clone())
+    }
+    pub(super) fn is_worker_chat(&self, server: &str, sid: &str) -> bool {
+        self.cluster_store
+            .runs
+            .iter()
+            .any(|r| r.tasks.iter().any(|t| t.agent.server == server && t.sid == sid))
+    }
+    pub(super) fn enable_chat_orchestra(
+        &mut self,
+        server: &Server,
+        k: &str,
+        palette: cluster::ModelPalette,
+        max_parallel: usize,
+        auto_results: bool,
+        update_existing_workers: bool,
+    ) -> Option<String> {
+        let existing_sid = self.chats.get(k).map(|c| c.sid.clone()).or_else(|| {
+            k.strip_prefix(&format!("{}/", server.id))
+                .map(str::to_owned)
+                .filter(|s| !s.is_empty())
+        })?;
+        let existing_id = self.any_cluster_for_leader(&server.id, &existing_sid);
+        let chat_backend = if self.chats.contains_key(k) {
+            self.backend_for_chat(server, k)
+        } else if let Some(r) = existing_id
+            .as_ref()
+            .and_then(|id| self.cluster_store.runs.iter().find(|r| &r.id == id))
+        {
+            agent_backend(&r.config.leader, server).to_owned()
+        } else {
+            server.effective_backend().to_owned()
+        };
+        let (sid, cwd, title_src, chat_model, chat_effort, chat_mode) =
+            if let Some(chat) = self.chats.get(k) {
+                (
+                    chat.sid.clone(),
+                    if chat.cwd.trim().is_empty() {
+                        server.cwd.clone()
+                    } else {
+                        chat.cwd.clone()
+                    },
+                    chat.title.clone(),
+                    if chat.model.trim().is_empty() {
+                        "default".into()
+                    } else {
+                        chat.model.clone()
+                    },
+                    if chat_backend == "agy" || chat.effort.trim().is_empty() {
+                        "default".into()
+                    } else {
+                        chat.effort.clone()
+                    },
+                    if chat.mode.trim().is_empty() {
+                        "auto".into()
+                    } else {
+                        chat.mode.clone()
+                    },
+                )
+            } else if let Some(r) = existing_id
+                .as_ref()
+                .and_then(|id| self.cluster_store.runs.iter().find(|r| &r.id == id))
+            {
+                (
+                    existing_sid,
+                    agent_cwd(&r.config.leader, server),
+                    r.title.clone(),
+                    r.config.leader.model.clone(),
+                    r.config.leader.effort.clone(),
+                    r.config.mode.clone(),
+                )
+            } else {
+                return None;
+            };
+
+        self.settings.chat_orchestra_palette = palette.clone();
+        self.settings.chat_orchestra_parallel = max_parallel.clamp(1, 8);
+        self.save();
+
+        let clean_title = (!title_src.trim().is_empty() && title_src != "Новая сессия")
+            .then(|| title_src.clone());
+        let existing_id = self.any_cluster_for_leader(&server.id, &sid);
+        let run_id = if let Some(rid) = existing_id {
+            if let Some(r) = self.cluster_store.runs.iter_mut().find(|r| r.id == rid) {
+                r.detached = false;
+                r.paused = false;
+                r.config.dynamic_workers = true;
+                r.config.model_palette = palette;
+                r.config.max_parallel = max_parallel.clamp(1, 8);
+                r.config.auto_results = auto_results;
+                r.config.mode = chat_mode;
+                r.config.leader.backend = chat_backend;
+                r.config.leader.model = chat_model;
+                r.config.leader.effort = chat_effort;
+                r.config.leader.cwd = cwd;
+                if let Some(t) = &clean_title {
+                    if r.title == "Оркестр в чате" || r.title == "Новая сессия" {
+                        r.title = model::shorten(t, 90);
+                    }
+                    if r.config.name == "Оркестр в чате" {
+                        r.config.name = format!("Оркестр · {}", model::shorten(t, 36));
+                    }
+                }
+                if update_existing_workers {
+                    r.apply_palette_to_existing_workers();
+                }
+                r.log("Модели оркестра в чате обновлены");
+            }
+            rid
+        } else {
+            let run_title = clean_title
+                .as_ref()
+                .map(|t| model::shorten(t, 90))
+                .unwrap_or_else(|| "Оркестр в чате".into());
+            let cluster_name = clean_title
+                .as_ref()
+                .map(|t| format!("Оркестр · {}", model::shorten(t, 36)))
+                .unwrap_or_else(|| "Оркестр в чате".into());
+            let config = Config {
+                name: cluster_name,
+                leader: Agent {
+                    name: "Оркестратор".into(),
+                    server: server.id.clone(),
+                    cwd,
+                    backend: chat_backend,
+                    model: chat_model,
+                    effort: chat_effort,
+                    ..Default::default()
+                },
+                workers: vec![],
+                shared_prompt: String::new(),
+                max_parallel: max_parallel.clamp(1, 8),
+                max_tasks: 48,
+                mode: chat_mode,
+                auto_results,
+                dynamic_workers: true,
+                model_palette: palette,
+                ..Default::default()
+            };
+            let mut run = Run::attach_to_session(config, sid.clone(), run_title);
+            run.log("Оркестрация включена прямо в сессии чата");
+            let id = run.id.clone();
+            self.cluster_store.runs.push(run);
+            id
+        };
+        if let Some(c) = self.chats.get_mut(k) {
+            c.cluster_context = json!({"run": run_id, "role": "leader"});
+        }
+        self.cluster_store.selected = Some(run_id.clone());
+        self.cluster_store.dirty = true;
+        if let Err(e) = self.cluster_store.save() {
+            self.notice = e;
+        }
+        Some(run_id)
+    }
+    pub(super) fn disable_chat_orchestra(&mut self, server_id: &str, sid: &str) {
+        if let Some(r) = self
+            .cluster_store
+            .runs
+            .iter_mut()
+            .find(|r| r.config.leader.server == server_id && r.leader_sid == sid)
+        {
+            r.detached = true;
+            r.paused = true;
+            r.log("Оркестр в чате отключён (чат вернулся в обычный режим)");
+            self.cluster_store.dirty = true;
+            let _ = self.cluster_store.save();
+        }
+        if let Some(c) = self.chats.get_mut(&key(server_id, sid)) {
+            c.cluster_context = Value::Null;
+            c.custom_prompt.clear();
+        }
+    }
     pub(super) fn prepare_cluster_chat(&mut self, server: &Server, k: &str) -> Result<(), String> {
         let Some(chat) = self.chats.get(k) else {
             return Ok(());
         };
         let Some(run_id) = self.cluster_for_chat(&server.id, &chat.sid) else {
+            let c = self.chats.get_mut(k).unwrap();
+            if c.cluster_context.is_object() {
+                c.cluster_context = Value::Null;
+                c.custom_prompt.clear();
+            }
             return Ok(());
         };
+        let (is_leader, is_dynamic) = self
+            .cluster_store
+            .runs
+            .iter()
+            .find(|r| r.id == run_id)
+            .map(|r| {
+                (
+                    r.leader_sid == chat.sid && r.config.leader.server == server.id,
+                    r.config.dynamic_workers,
+                )
+            })
+            .unwrap();
+        if is_leader && is_dynamic {
+            let chat_backend = self.backend_for_chat(server, k);
+            let chat_snap = self.chats.get(k).unwrap();
+            let chat_model = chat_snap.model.clone();
+            let chat_effort = chat_snap.effort.clone();
+            let chat_mode = chat_snap.mode.clone();
+            let chat_cwd = chat_snap.cwd.clone();
+            let chat_draft = chat_snap.draft.clone();
+            if let Some(r) = self.cluster_store.runs.iter_mut().find(|r| r.id == run_id) {
+                r.config.leader.backend = chat_backend;
+                r.config.leader.model = chat_model;
+                r.config.leader.effort = chat_effort;
+                r.config.leader.cwd = chat_cwd;
+                r.config.mode = chat_mode;
+                if (r.title == "Оркестр в чате" || r.title == "Новая сессия")
+                    && !chat_draft.trim().is_empty()
+                    && !chat_draft.starts_with("<relay-cluster-results>")
+                {
+                    let snippet = model::shorten(chat_draft.trim(), 90);
+                    r.title = snippet.clone();
+                    r.config.name = format!("Оркестр · {}", model::shorten(chat_draft.trim(), 36));
+                    self.cluster_store.dirty = true;
+                }
+            }
+        }
+        let chat = self.chats.get(k).unwrap();
         let run = self
             .cluster_store
             .runs
@@ -126,11 +349,23 @@ impl RelayApp {
             &self.settings.prompt_snippets,
             &context,
         );
-        let custom = templates::expand(
-            &format!("{}\n\n{}", run.config.shared_prompt, agent.prompt),
-            &vars,
-        )?;
-        if custom.len() > 96000 {
+        let mut raw_custom = if run.config.shared_prompt.is_empty() && agent.prompt.is_empty() {
+            String::new()
+        } else {
+            templates::expand(&format!("{}\n\n{}", run.config.shared_prompt, agent.prompt), &vars)?
+        };
+        if leader && run.config.dynamic_workers {
+            let tiers = describe_palette_for_prompt(run, server);
+            let note = format!(
+                "Dynamic in-chat orchestration is active. Analyze this conversation and the user's request, call `list_workers`, create the specialist workers you need via `create_worker` (choosing tier from: {tiers}), dispatch tasks via `dispatch_task`, and track them cleanly so all work is visible in Relay's Cluster tab."
+            );
+            if raw_custom.is_empty() {
+                raw_custom = note;
+            } else {
+                raw_custom = format!("{note}\n\n{raw_custom}");
+            }
+        }
+        if raw_custom.len() > 96000 {
             return Err(
                 "Промпт после подстановок превышает 96 КБ. Сократи инструкции или вставки.".into(),
             );
@@ -141,19 +376,30 @@ impl RelayApp {
             templates::expand(&chat.draft, &vars)?
         };
         let agent_backend = agent.backend.clone();
+        let eff_model = agent_model(agent, server);
+        let eff_effort = agent_effort(agent, server);
+        let eff_mode = agent_mode(agent, &run.config.mode);
+        let ctx_json = json!({
+            "run": run.id,
+            "name": run.config.name,
+            "agent": agent.name,
+            "role": if leader { "leader" } else { "worker" },
+        });
+        let dynamic_leader = leader && run.config.dynamic_workers;
         let c = self.chats.get_mut(k).unwrap();
-        c.custom_prompt = custom;
-        c.model = agent_model(agent, server);
-        c.effort = agent_effort(agent, server);
-        c.mode = run.config.mode.clone();
-        c.cluster_context =
-            json!({"run":run.id,"name":run.config.name,"role":if leader{"leader"}else{"worker"}});
-        c.draft = draft;
-        c.cwd = cwd;
-        c.agent_role = String::new();
-        if crate::model::valid_backend(&agent_backend) {
-            self.settings.set_session_backend(k.to_owned(), &agent_backend);
+        c.custom_prompt = raw_custom;
+        if !dynamic_leader {
+            c.model = eff_model;
+            c.effort = eff_effort;
+            c.mode = eff_mode;
+            c.cwd = cwd;
+            if crate::model::valid_backend(&agent_backend) {
+                self.settings.set_session_backend(k.to_owned(), &agent_backend);
+            }
         }
+        c.cluster_context = ctx_json;
+        c.draft = draft;
+        c.agent_role = String::new();
         Ok(())
     }
     pub(super) fn start_cluster(&mut self, config: Config, text: String) -> Result<(), String> {
@@ -189,7 +435,7 @@ impl RelayApp {
             agent_cwd(&run.config.leader, &server),
             model::shorten(&text, 70),
         );
-        c.mode = run.config.mode.clone();
+        c.mode = agent_mode(&run.config.leader, &run.config.mode);
         c.model = agent_model(&run.config.leader, &server);
         c.effort = agent_effort(&run.config.leader, &server);
         c.loaded = true;
@@ -254,7 +500,7 @@ impl RelayApp {
             .cluster_store
             .runs
             .iter()
-            .any(|r| r.id == run_id && r.leader_sid == sid && r.config.leader.server == server);
+            .any(|r| !r.detached && r.id == run_id && r.leader_sid == sid && r.config.leader.server == server);
         let answer = if !valid {
             Err("Этот инструмент доступен только руководителю своей сессии кластера.".into())
         } else {
@@ -323,15 +569,129 @@ impl RelayApp {
             .ok_or("Сессия кластера не найдена.")?;
         if tool == "list_workers" {
             let r = &self.cluster_store.runs[index];
-            let workers:Vec<_>=r.config.workers.iter().filter(|a|a.enabled).map(|a|{
-                let server=self.settings.servers.iter().find(|s|s.id==a.server);
-                let backend=if crate::model::valid_backend(&a.backend){a.backend.as_str()}else{server.map(|s|s.effective_backend()).unwrap_or("claude")};
-                json!({"worker":a.id,"name":a.name,"backend":backend,"host":server.map(|s|s.host.as_str()),"cwd":server.map(|s|agent_cwd(a,s)),
-                    "connected":self.connected(&a.server),"busy":r.tasks.iter().any(|t|t.agent.id==a.id&&t.state.active()),"instructions":a.prompt})
-            }).collect();
-            return Ok(
-                json!({"ok":true,"workers":workers,"max_parallel":r.config.max_parallel,"max_tasks":r.config.max_tasks}),
-            );
+            let workers: Vec<_> = r
+                .config
+                .workers
+                .iter()
+                .filter(|a| a.enabled)
+                .map(|a| {
+                    let server = self.settings.servers.iter().find(|s| s.id == a.server);
+                    let backend = server
+                        .map(|s| agent_backend(a, s))
+                        .unwrap_or_else(|| {
+                            if crate::model::valid_backend(&a.backend) {
+                                a.backend.as_str()
+                            } else {
+                                "claude"
+                            }
+                        });
+                    let model = server
+                        .map(|s| agent_model(a, s))
+                        .unwrap_or_else(|| a.model.clone());
+                    let effort = server
+                        .map(|s| agent_effort(a, s))
+                        .unwrap_or_else(|| a.effort.clone());
+                    let mode = agent_mode(a, &r.config.mode);
+                    json!({
+                        "worker": a.id,
+                        "name": a.name,
+                        "tier": a.tier,
+                        "backend": backend,
+                        "model": model,
+                        "effort": effort,
+                        "mode": mode,
+                        "host": server.map(|s| s.host.as_str()),
+                        "host_name": server.map(|s| s.name.as_str()),
+                        "cwd": server.map(|s| agent_cwd(a, s)),
+                        "connected": self.connected(&a.server),
+                        "busy": r.tasks.iter().any(|t| t.agent.id == a.id && t.state.active()),
+                        "instructions": a.prompt,
+                    })
+                })
+                .collect();
+            let remaining_worker_slots = 12usize.saturating_sub(workers.len());
+            let available_tiers = if r.config.dynamic_workers {
+                let lead_srv = self
+                    .settings
+                    .servers
+                    .iter()
+                    .find(|s| s.id == r.config.leader.server);
+                json!(palette_tiers_json(r, lead_srv))
+            } else {
+                Value::Null
+            };
+            let mut resp = json!({
+                "ok": true,
+                "workers": workers,
+                "dynamic_workers": r.config.dynamic_workers,
+                "remaining_worker_slots": remaining_worker_slots,
+                "max_parallel": r.config.max_parallel,
+                "max_tasks": r.config.max_tasks,
+            });
+            if !available_tiers.is_null() {
+                resp["available_tiers"] = available_tiers;
+            }
+            return Ok(resp);
+        }
+        if tool == "create_worker" {
+            let (def_srv, def_cwd) = {
+                let r = &self.cluster_store.runs[index];
+                let lead_srv = self
+                    .settings
+                    .servers
+                    .iter()
+                    .find(|s| s.id == r.config.leader.server);
+                let cwd = lead_srv
+                    .map(|s| agent_cwd(&r.config.leader, s))
+                    .unwrap_or_else(|| r.config.leader.cwd.clone());
+                (r.config.leader.server.clone(), cwd)
+            };
+            let servers_snapshot = self.settings.servers.clone();
+            let (agent, created) = self.cluster_store.runs[index].create_worker(
+                input,
+                &def_srv,
+                &def_cwd,
+                &servers_snapshot,
+            )?;
+            self.cluster_store.dirty = true;
+            if let Err(e) = self.cluster_store.save() {
+                return Err(e);
+            }
+            let r = &self.cluster_store.runs[index];
+            let srv = self.settings.servers.iter().find(|s| s.id == agent.server);
+            let eff_b = srv
+                .map(|s| agent_backend(&agent, s))
+                .unwrap_or_else(|| if crate::model::valid_backend(&agent.backend) { agent.backend.as_str() } else { "claude" });
+            let eff_m = srv.map(|s| agent_model(&agent, s)).unwrap_or_else(|| agent.model.clone());
+            let eff_e = srv.map(|s| agent_effort(&agent, s)).unwrap_or_else(|| agent.effort.clone());
+            let eff_mode = agent_mode(&agent, &r.config.mode);
+            let eff_cwd = srv.map(|s| agent_cwd(&agent, s)).unwrap_or_else(|| agent.cwd.clone());
+            return Ok(json!({
+                "ok": true,
+                "created": created,
+                "worker": agent.id,
+                "name": agent.name,
+                "tier": agent.tier,
+                "backend": eff_b,
+                "model": eff_m,
+                "effort": eff_e,
+                "mode": eff_mode,
+                "host": srv.map(|s| s.host.as_str()),
+                "host_name": srv.map(|s| s.name.as_str()),
+                "cwd": eff_cwd,
+                "connected": self.connected(&agent.server),
+            }));
+        }
+        if tool == "remove_worker" {
+            let worker_id = input["worker"]
+                .as_str()
+                .ok_or("Укажи worker (ID исполнителя из list_workers).")?;
+            let name = self.cluster_store.runs[index].remove_worker(worker_id)?;
+            self.cluster_store.dirty = true;
+            if let Err(e) = self.cluster_store.save() {
+                return Err(e);
+            }
+            return Ok(json!({"ok": true, "worker": worker_id, "name": name}));
         }
         if tool == "dispatch_task" {
             let value = self.cluster_store.runs[index].dispatch(request, input)?;
@@ -491,17 +851,26 @@ impl RelayApp {
             {
                 if r.pending_config.is_some() {
                     r.apply_pending();
-                    if let (Some(c), Some(s)) = (
-                        self.chats
-                            .get_mut(&key(&r.config.leader.server, &r.leader_sid)),
-                        self.settings
-                            .servers
-                            .iter()
-                            .find(|s| s.id == r.config.leader.server),
-                    ) {
-                        c.model = agent_model(&r.config.leader, s);
-                        c.effort = agent_effort(&r.config.leader, s);
-                        c.mode = r.config.mode.clone();
+                    let k = key(&r.config.leader.server, &r.leader_sid);
+                    if let Some(s) = self
+                        .settings
+                        .servers
+                        .iter()
+                        .find(|s| s.id == r.config.leader.server)
+                        .cloned()
+                    {
+                        if crate::model::valid_backend(&r.config.leader.backend) {
+                            self.settings
+                                .set_session_backend(k.clone(), &r.config.leader.backend);
+                        } else {
+                            self.settings.session_backends.remove(&k);
+                            self.settings.api_sessions.remove(&k);
+                        }
+                        if let Some(c) = self.chats.get_mut(&k) {
+                            c.model = agent_model(&r.config.leader, &s);
+                            c.effort = agent_effort(&r.config.leader, &s);
+                            c.mode = agent_mode(&r.config.leader, &r.config.mode);
+                        }
                     }
                     self.cluster_store.dirty = true;
                 }
@@ -571,7 +940,7 @@ impl RelayApp {
                 )
             });
             c.title = format!("{} · {}", t.agent.name, t.title);
-            c.mode = mode;
+            c.mode = agent_mode(&t.agent, &mode);
             c.model = agent_model(&t.agent, &server);
             c.effort = agent_effort(&t.agent, &server);
             c.loaded = true;
@@ -677,24 +1046,144 @@ pub(super) fn agent_cwd(a: &Agent, s: &Server) -> String {
         a.cwd.clone()
     }
 }
-fn agent_model(a: &Agent, s: &Server) -> String {
-    if a.model == "inherit" {
-        let b = if crate::model::valid_backend(&a.backend) {
-            a.backend.as_str()
-        } else {
-            s.effective_backend()
-        };
-        s.model_for(b).to_owned()
+pub(super) fn agent_backend<'a>(a: &'a Agent, s: &'a Server) -> &'a str {
+    if crate::model::valid_backend(&a.backend) {
+        a.backend.as_str()
     } else {
-        a.model.clone()
+        s.effective_backend()
     }
 }
-fn agent_effort(a: &Agent, s: &Server) -> String {
-    if a.effort == "inherit" {
-        s.effort.clone()
+pub(super) fn agent_model(a: &Agent, s: &Server) -> String {
+    let trimmed = a.model.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("default") {
+        "default".into()
+    } else if trimmed.eq_ignore_ascii_case("inherit") {
+        let b = agent_backend(a, s);
+        let m = s.model_for(b).trim();
+        if m.is_empty() {
+            "default".into()
+        } else {
+            m.to_owned()
+        }
     } else {
-        a.effort.clone()
+        trimmed.to_owned()
     }
+}
+pub(super) fn agent_effort(a: &Agent, s: &Server) -> String {
+    if agent_backend(a, s) == "agy" {
+        return "default".into();
+    }
+    let trimmed = a.effort.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("default") {
+        "default".into()
+    } else if trimmed.eq_ignore_ascii_case("inherit") {
+        let e = s.effort.trim();
+        if e.is_empty() {
+            "default".into()
+        } else {
+            e.to_owned()
+        }
+    } else {
+        trimmed.to_owned()
+    }
+}
+pub(super) fn agent_mode(a: &Agent, cluster_mode: &str) -> String {
+    let trimmed = a.mode.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("inherit") {
+        cluster_mode.to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+pub(super) fn slot_resolved_summary(
+    slot: &cluster::ModelSlot,
+    leader_backend: &str,
+    srv: Option<&Server>,
+) -> (String, String, String) {
+    let b = if crate::model::valid_backend(&slot.backend) {
+        slot.backend.clone()
+    } else if crate::model::valid_backend(leader_backend) {
+        leader_backend.to_owned()
+    } else {
+        srv.map(|s| s.effective_backend().to_owned())
+            .unwrap_or_else(|| "claude".into())
+    };
+    let eff_b = if b.is_empty() {
+        "claude".into()
+    } else {
+        b
+    };
+    let m_raw = slot.model.trim();
+    let m = if m_raw.is_empty() || m_raw.eq_ignore_ascii_case("default") {
+        "default".into()
+    } else if m_raw.eq_ignore_ascii_case("inherit") {
+        srv.map(|s| {
+            let sm = s.model_for(&eff_b).trim();
+            if sm.is_empty() { "default".into() } else { sm.to_owned() }
+        })
+        .unwrap_or_else(|| "default".into())
+    } else {
+        m_raw.to_owned()
+    };
+    let e = if eff_b == "agy" {
+        "default".into()
+    } else {
+        let eraw = slot.effort.trim();
+        if eraw.is_empty() || eraw.eq_ignore_ascii_case("default") {
+            "default".into()
+        } else if eraw.eq_ignore_ascii_case("inherit") {
+            srv.map(|s| {
+                let se = s.effort.trim();
+                if se.is_empty() { "default".into() } else { se.to_owned() }
+            })
+            .unwrap_or_else(|| "default".into())
+        } else {
+            eraw.to_owned()
+        }
+    };
+    (eff_b, m, e)
+}
+fn palette_tiers_json(r: &Run, srv: Option<&Server>) -> Value {
+    let mut map = serde_json::Map::new();
+    for tier in ["default", "coder", "reviewer", "researcher", "fast"] {
+        let slot = r.config.model_palette.slot_for(tier);
+        let (b, m, e) = slot_resolved_summary(slot, &r.config.leader.backend, srv);
+        map.insert(
+            tier.into(),
+            json!({
+                "backend": b,
+                "model": m,
+                "effort": e,
+            }),
+        );
+    }
+    Value::Object(map)
+}
+fn describe_palette_for_prompt(r: &Run, srv: &Server) -> String {
+    let mut parts = Vec::new();
+    for tier in ["default", "coder", "reviewer", "researcher", "fast"] {
+        if tier != "default" {
+            let custom = match tier {
+                "coder" => r.config.model_palette.coder.is_some(),
+                "reviewer" => r.config.model_palette.reviewer.is_some(),
+                "researcher" => r.config.model_palette.researcher.is_some(),
+                "fast" => r.config.model_palette.fast.is_some(),
+                _ => false,
+            };
+            if !custom {
+                continue;
+            }
+        }
+        let slot = r.config.model_palette.slot_for(tier);
+        let (b, m, e) = slot_resolved_summary(slot, &r.config.leader.backend, Some(srv));
+        let eff = if b != "agy" && e != "default" {
+            format!(" effort={e}")
+        } else {
+            String::new()
+        };
+        parts.push(format!("{tier}={b}/{m}{eff}"));
+    }
+    parts.join(", ")
 }
 
 #[cfg(test)]
@@ -776,8 +1265,10 @@ mod tests {
             agents_open: None,
             radar_open: None,
             deleted_sessions: Default::default(),
+            reconnect: Default::default(),
             renaming: None,
             folder_dialog: None,
+            icon_dialog: None,
             search: String::new(),
             editor: None,
             api_editor: None,
@@ -810,6 +1301,7 @@ mod tests {
             cluster_store: cluster::Store::default(),
             cluster_calls: vec![],
             cluster_edit: None,
+            chat_orchestra_dialog: None,
             cluster_snapshot: None,
             board_view: Default::default(),
             boards: HashMap::new(),
@@ -1357,8 +1849,8 @@ mod tests {
 
     #[test]
     fn agent_installer_and_24_themes_work_in_desktop_state() {
-        assert_eq!(crate::model::THEME_SPECS.len(), 40);
-        assert_eq!(design::THEMES.len(), 40);
+        assert_eq!(crate::model::THEME_SPECS.len(), 44);
+        assert_eq!(design::THEMES.len(), 44);
         for (id, _) in design::THEMES {
             assert!(crate::model::valid_theme(id));
         }
@@ -1447,5 +1939,392 @@ mod tests {
                 },
             );
         }
+    }
+
+    #[test]
+    fn agy_orchestration_preserves_default_inherit_explicit_models_and_per_agent_modes() {
+        let (mut app, a, b, _, mut rx_a, mut rx_b) = fixture();
+        {
+            let sa = app.settings.servers.iter_mut().find(|s| s.id == a.id).unwrap();
+            sa.default_backend = "agy".into();
+            sa.agy_model = "gemini-4-neon-high".into();
+            let sb = app.settings.servers.iter_mut().find(|s| s.id == b.id).unwrap();
+            sb.default_backend = "codex".into();
+            sb.codex_model = "gpt-5.4".into();
+            sb.effort = "high".into();
+        }
+        app.remote.get_mut(&a.id).unwrap().agy_models = vec![
+            crate::model::ModelInfo {
+                value: "gemini-4-neon-high".into(),
+                display_name: "Gemini 4 Neon (High)".into(),
+                description: "Deep reasoning".into(),
+            },
+            crate::model::ModelInfo {
+                value: "gemini-4-carbon-medium".into(),
+                display_name: "Gemini 4 Carbon (Medium)".into(),
+                description: "Balanced".into(),
+            },
+        ];
+
+        // Default config on an AGY server must not hardcode Claude opus/sonnet
+        let auto_cfg = app.default_cluster_config();
+        assert_eq!(auto_cfg.leader.backend, "agy");
+        assert_eq!(auto_cfg.leader.model, "inherit");
+        assert!(auto_cfg.validate().is_ok());
+
+        // Clone produces distinct config & agent IDs
+        let cloned = auto_cfg.clone_as_new();
+        assert_ne!(cloned.id, auto_cfg.id);
+        assert_ne!(cloned.leader.id, auto_cfg.leader.id);
+        assert!(cloned.validate().is_ok());
+
+        // Build mixed orchestra: AGY leader with explicit "default" (no forced model),
+        // Worker 1 = AGY inheriting host's Neon model in auto mode,
+        // Worker 2 = Codex inheriting host's GPT-5.4 + effort=high in read-only plan mode
+        let config = Config {
+            name: "AGY Orchestra".into(),
+            mode: "auto".into(),
+            leader: Agent {
+                id: "lead-agy".into(),
+                name: "AGY Lead".into(),
+                server: a.id.clone(),
+                backend: "agy".into(),
+                model: "default".into(),
+                effort: "default".into(),
+                mode: String::new(),
+                ..Default::default()
+            },
+            workers: vec![
+                Agent {
+                    id: "w-agy-neon".into(),
+                    name: "AGY Coder".into(),
+                    server: a.id.clone(),
+                    backend: "agy".into(),
+                    model: "inherit".into(),
+                    effort: "high".into(), // ignored for AGY -> must normalize to "default"
+                    mode: "auto".into(),
+                    enabled: true,
+                    ..Default::default()
+                },
+                Agent {
+                    id: "w-codex-plan".into(),
+                    name: "Codex Reviewer".into(),
+                    server: b.id.clone(),
+                    backend: String::new(), // inherit from server b (codex)
+                    model: "inherit".into(),
+                    effort: "inherit".into(),
+                    mode: "plan".into(),
+                    enabled: true,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        app.start_cluster(config.clone(), "Orchestrate with AGY".into())
+            .unwrap();
+        let lead = take(&mut rx_a, "prompt");
+        assert_eq!(lead["backend"], "agy");
+        assert_eq!(lead["model"], "default");
+        assert_eq!(lead["effort"], "default");
+        assert_eq!(lead["mode"], "auto");
+
+        let run = app.cluster_store.runs[0].id.clone();
+        let sid = app.cluster_store.runs[0].leader_sid.clone();
+        app.data(
+            a.id.clone(),
+            json!({"type":"cluster_request","id":cluster::id(),"sid":sid,"run":run,"tool":"list_workers","input":{}}),
+        );
+        let list = take(&mut rx_a, "cluster_reply");
+        assert_eq!(list["result"]["workers"][0]["backend"], "agy");
+        assert_eq!(list["result"]["workers"][0]["model"], "gemini-4-neon-high");
+        assert_eq!(list["result"]["workers"][0]["effort"], "default");
+        assert_eq!(list["result"]["workers"][0]["mode"], "auto");
+        assert_eq!(list["result"]["workers"][1]["backend"], "codex");
+        assert_eq!(list["result"]["workers"][1]["model"], "gpt-5.4");
+        assert_eq!(list["result"]["workers"][1]["effort"], "high");
+        assert_eq!(list["result"]["workers"][1]["mode"], "plan");
+
+        // Dispatch to both workers and verify exact resolved backend, model, effort, and mode
+        app.data(
+            a.id.clone(),
+            json!({"type":"cluster_request","id":cluster::id(),"sid":sid,"run":run,"tool":"dispatch_task","input":{"worker":"w-agy-neon","task":"Implement feature"}}),
+        );
+        take(&mut rx_a, "cluster_reply");
+        app.data(
+            a.id.clone(),
+            json!({"type":"cluster_request","id":cluster::id(),"sid":sid,"run":run,"tool":"dispatch_task","input":{"worker":"w-codex-plan","task":"Review diff"}}),
+        );
+        take(&mut rx_a, "cluster_reply");
+        app.cluster_tick();
+
+        let p_agy = take(&mut rx_a, "prompt");
+        assert_eq!(p_agy["backend"], "agy");
+        assert_eq!(p_agy["model"], "gemini-4-neon-high");
+        assert_eq!(p_agy["effort"], "default");
+        assert_eq!(p_agy["mode"], "auto");
+
+        let p_codex = take(&mut rx_b, "prompt");
+        assert_eq!(p_codex["backend"], "codex");
+        assert_eq!(p_codex["model"], "gpt-5.4");
+        assert_eq!(p_codex["effort"], "high");
+        assert_eq!(p_codex["mode"], "plan");
+
+        // Verify AGY single-underscore MCP tool telemetry classification
+        assert_eq!(
+            crate::model::classify_tool("mcp_relay_cluster_dispatch_task"),
+            crate::model::ToolPhase::Subagent
+        );
+        assert_eq!(
+            crate::model::classify_tool("mcp_relay_desktop_run_local_command"),
+            crate::model::ToolPhase::Desktop
+        );
+        let msg = Message {
+            role: "tool".into(),
+            tool: "mcp_relay_cluster_dispatch_task".into(),
+            tool_id: "t-agy-1".into(),
+            input: json!({"worker": "w-agy-neon", "title": "Build UI"}),
+            ..Default::default()
+        };
+        assert_eq!(
+            crate::model::tool_target_preview(&msg, 48),
+            "w-agy-neon -> Build UI"
+        );
+        let tel = crate::model::analyze_turn(&[msg], 0, true, "");
+        assert_eq!(tel.delegations, 1);
+        assert_eq!(tel.subagents.len(), 1);
+        assert_eq!(tel.subagents[0].role, "w-agy-neon");
+
+        // Verify Cluster Editor renders cleanly with live AGY models
+        app.settings.orchestrators.push(config.clone());
+        app.cluster_open = true;
+        let ctx = app.controller.bus.ctx.clone();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1240., 840.));
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ctx| {
+                app.cluster_panel(ctx);
+                app.cluster_settings(ctx);
+            },
+        );
+    }
+
+    #[test]
+    fn in_chat_dynamic_orchestra_preserves_session_creates_workers_with_palette_models_and_detaches_cleanly() {
+        let (mut app, mut a, _, _, mut rx_a, _) = fixture();
+        a.default_backend = "agy".into();
+        a.agy_model = "gemini-4-neon-high".into();
+        app.settings.servers[0] = a.clone();
+        app.settings.selected = Some(a.id.clone());
+
+        // Start from an existing regular chat session with conversation history
+        let sid = cluster::id();
+        let k = key(&a.id, &sid);
+        let mut chat = Chat::new(sid.clone(), a.cwd.clone(), "Refactor API".into());
+        chat.loaded = true;
+        chat.model = "gemini-4-neon-high".into();
+        chat.mode = "auto".into();
+        chat.messages = vec![
+            Message {
+                role: "user".into(),
+                text: "Initial architecture check".into(),
+                ..Default::default()
+            },
+            Message {
+                role: "assistant".into(),
+                text: "Found 3 modules to refactor".into(),
+                ..Default::default()
+            },
+        ];
+        app.chats.insert(k.clone(), chat);
+        app.selected_chat.insert(a.id.clone(), sid.clone());
+
+        // Enable Orchestra right inside THIS chat with user-chosen worker model palette
+        let palette = cluster::ModelPalette {
+            default_worker: cluster::ModelSlot {
+                backend: "agy".into(),
+                model: "gemini-4-carbon-medium".into(),
+                effort: "default".into(),
+            },
+            coder: None,
+            reviewer: Some(cluster::ModelSlot {
+                backend: "codex".into(),
+                model: "gpt-5.4".into(),
+                effort: "high".into(),
+            }),
+            researcher: None,
+            fast: None,
+        };
+        let run_id = app
+            .enable_chat_orchestra(&a, &k, palette, 3, true, false)
+            .expect("dynamic run created");
+        assert_eq!(app.cluster_store.runs.len(), 1);
+        assert!(app.cluster_store.runs[0].config.dynamic_workers);
+        assert!(app.cluster_store.runs[0].config.validate().is_ok());
+        assert_eq!(app.cluster_store.runs[0].leader_sid, sid);
+        assert_eq!(app.chats[&k].messages.len(), 2);
+
+        // User sends a prompt in the same chat: keeps sid, attaches leader cluster_context + palette instructions
+        app.chats.get_mut(&k).unwrap().draft = "Split into backend and review agents and ship it".into();
+        app.send_to_chat(a.clone(), k.clone());
+        let lead_prompt = take(&mut rx_a, "prompt");
+        assert_eq!(lead_prompt["sid"], sid);
+        assert_eq!(lead_prompt["backend"], "agy");
+        assert_eq!(lead_prompt["model"], "gemini-4-neon-high");
+        assert_eq!(lead_prompt["cluster_context"]["role"], "leader");
+        assert_eq!(lead_prompt["cluster_context"]["run"], run_id);
+        assert!(lead_prompt["custom_prompt"].as_str().unwrap().contains("create_worker"));
+        assert!(lead_prompt["custom_prompt"].as_str().unwrap().contains("gemini-4-carbon-medium"));
+
+        // Orchestrator calls list_workers -> sees dynamic_workers: true & available_tiers
+        app.data(
+            a.id.clone(),
+            json!({"type":"cluster_request","id":cluster::id(),"sid":sid,"run":run_id,"tool":"list_workers","input":{}}),
+        );
+        let list = take(&mut rx_a, "cluster_reply");
+        assert_eq!(list["result"]["dynamic_workers"], true);
+        assert_eq!(list["result"]["workers"].as_array().unwrap().len(), 0);
+        assert_eq!(
+            list["result"]["available_tiers"]["default"]["model"],
+            "gemini-4-carbon-medium"
+        );
+        assert_eq!(list["result"]["available_tiers"]["reviewer"]["backend"], "codex");
+        assert_eq!(list["result"]["available_tiers"]["reviewer"]["model"], "gpt-5.4");
+        assert_eq!(list["result"]["available_tiers"]["reviewer"]["effort"], "high");
+
+        // Orchestrator dynamically creates two agents: Backend Coder (default tier) + Security Reviewer (reviewer tier)
+        let before_rev = app.cluster_store.revision;
+        app.data(
+            a.id.clone(),
+            json!({
+                "type": "cluster_request",
+                "id": cluster::id(),
+                "sid": sid,
+                "run": run_id,
+                "tool": "create_worker",
+                "input": {
+                    "name": "Backend Coder",
+                    "tier": "default",
+                    "prompt": "Refactor the 3 modules from our architecture check"
+                }
+            }),
+        );
+        let c1 = take(&mut rx_a, "cluster_reply");
+        assert_eq!(c1["result"]["ok"], true);
+        assert_eq!(c1["result"]["created"], true);
+        assert_eq!(c1["result"]["backend"], "agy");
+        assert_eq!(c1["result"]["model"], "gemini-4-carbon-medium");
+        assert_eq!(c1["result"]["mode"], "auto");
+        let w1_id = c1["result"]["worker"].as_str().unwrap().to_owned();
+        assert!(app.cluster_store.revision > before_rev);
+
+        // Idempotent re-create with same name returns same worker without duplicating
+        app.data(
+            a.id.clone(),
+            json!({
+                "type": "cluster_request",
+                "id": cluster::id(),
+                "sid": sid,
+                "run": run_id,
+                "tool": "create_worker",
+                "input": {"name": "backend coder", "tier": "coder"}
+            }),
+        );
+        let c1_dup = take(&mut rx_a, "cluster_reply");
+        assert_eq!(c1_dup["result"]["created"], false);
+        assert_eq!(c1_dup["result"]["worker"], w1_id);
+        assert_eq!(app.cluster_store.runs[0].config.workers.len(), 1);
+
+        // Create Reviewer -> gets user's Codex GPT-5.4 (high) model and read-only plan mode by default
+        app.data(
+            a.id.clone(),
+            json!({
+                "type": "cluster_request",
+                "id": cluster::id(),
+                "sid": sid,
+                "run": run_id,
+                "tool": "create_worker",
+                "input": {
+                    "name": "Security Reviewer",
+                    "tier": "reviewer",
+                    "prompt": "Review the refactored modules for regressions"
+                }
+            }),
+        );
+        let c2 = take(&mut rx_a, "cluster_reply");
+        assert_eq!(c2["result"]["ok"], true);
+        assert_eq!(c2["result"]["backend"], "codex");
+        assert_eq!(c2["result"]["model"], "gpt-5.4");
+        assert_eq!(c2["result"]["effort"], "high");
+        assert_eq!(c2["result"]["mode"], "plan");
+        let w2_id = c2["result"]["worker"].as_str().unwrap().to_owned();
+
+        // Dispatch tasks to dynamically created workers -> verify outgoing prompts carry palette models
+        app.data(
+            a.id.clone(),
+            json!({"type":"cluster_request","id":cluster::id(),"sid":sid,"run":run_id,"tool":"dispatch_task","input":{"worker":w1_id,"task":"Edit module 1"}}),
+        );
+        take(&mut rx_a, "cluster_reply");
+        app.data(
+            a.id.clone(),
+            json!({"type":"cluster_request","id":cluster::id(),"sid":sid,"run":run_id,"tool":"dispatch_task","input":{"worker":w2_id,"task":"Audit diff"}}),
+        );
+        take(&mut rx_a, "cluster_reply");
+        app.cluster_tick();
+
+        let p1 = take(&mut rx_a, "prompt");
+        let p2 = take(&mut rx_a, "prompt");
+        let both = [&p1, &p2];
+        assert!(both.iter().any(|p| p["backend"] == "agy" && p["model"] == "gemini-4-carbon-medium"));
+        assert!(both.iter().any(|p| p["backend"] == "codex" && p["model"] == "gpt-5.4" && p["effort"] == "high" && p["mode"] == "plan"));
+
+        // Cannot remove a busy worker
+        app.data(
+            a.id.clone(),
+            json!({"type":"cluster_request","id":cluster::id(),"sid":sid,"run":run_id,"tool":"remove_worker","input":{"worker":w2_id}}),
+        );
+        let rm_busy = take(&mut rx_a, "cluster_reply");
+        assert_eq!(rm_busy["result"]["ok"], false);
+
+        // Complete w2 and remove it cleanly when idle
+        let w2_sid = app.cluster_store.runs[0].tasks[1].sid.clone();
+        send_result(&mut app, &a.id, &w2_sid, "Audit ok");
+        app.cluster_tick();
+        app.data(
+            a.id.clone(),
+            json!({"type":"cluster_request","id":cluster::id(),"sid":sid,"run":run_id,"tool":"remove_worker","input":{"worker":w2_id}}),
+        );
+        let rm_ok = take(&mut rx_a, "cluster_reply");
+        assert_eq!(rm_ok["result"]["ok"], true);
+        assert!(!app.cluster_store.runs[0].config.workers[1].enabled);
+
+        // Render chat composer + modal + Cluster tab cleanly
+        app.open_chat_orchestra_dialog(&a, &k);
+        let ctx = app.controller.bus.ctx.clone();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(1240., 840.));
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ctx| {
+                app.main_panel(ctx);
+                app.chat_orchestra_window(ctx);
+                app.cluster_panel(ctx);
+            },
+        );
+
+        // Disable in-chat orchestra -> session reverts to normal single-agent turns while Run stays in Cluster history
+        app.disable_chat_orchestra(&a.id, &sid);
+        assert!(app.cluster_store.runs[0].detached);
+        send_result(&mut app, &a.id, &sid, "Leader done");
+        app.chats.get_mut(&k).unwrap().draft = "Continue without orchestra".into();
+        app.send_to_chat(a, k);
+        let normal_prompt = take(&mut rx_a, "prompt");
+        assert_eq!(normal_prompt["sid"], sid);
+        assert!(normal_prompt["cluster_context"].is_null());
+        assert_eq!(normal_prompt["custom_prompt"], "");
     }
 }

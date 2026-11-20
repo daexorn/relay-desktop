@@ -941,11 +941,11 @@ fn composer(frame: &mut Frame, app: &App, area: Rect, p: Palette) {
                 ""
             };
             format!(
-                " {}{} · {} · {} · {} ",
+                " {}{} · {} · {}{} ",
                 lock_tag,
                 relay_desktop::model::backend_short_label(&c.backend),
-                if c.model == "default" {
-                    "модель: авто"
+                if !relay_desktop::model::explicit_model(&c.model) {
+                    "выбрать модель"
                 } else {
                     &c.model
                 },
@@ -955,11 +955,7 @@ fn composer(frame: &mut Frame, app: &App, area: Rect, p: Palette) {
                     "plan" => "план",
                     _ => "правки",
                 },
-                if c.effort == "default" {
-                    "глубина: авто"
-                } else {
-                    &c.effort
-                }
+                if c.backend == "agy" { String::new() } else { format!(" · {}", relay_desktop::model::selected_effort(&c.effort)) }
             )
         })
         .unwrap_or_else(|| " Сообщение ".into());
@@ -2651,7 +2647,7 @@ mod tests {
 
     #[test]
     fn all_24_shared_themes_render_cleanly_with_distinct_palettes() {
-        assert_eq!(relay_desktop::model::THEME_SPECS.len(), 40);
+        assert_eq!(relay_desktop::model::THEME_SPECS.len(), 44);
         let mut app = App::new(true).unwrap();
         app.demo();
         for &(id, _, is_light, spec_colors) in &relay_desktop::model::THEME_SPECS {

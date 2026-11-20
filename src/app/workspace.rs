@@ -46,10 +46,12 @@ impl RelayApp {
                             crate::model::SessionFolder {
                                 id: "f1".into(),
                                 name: "Продакшн".into(),
+                                icon: String::new(),
                             },
                             crate::model::SessionFolder {
                                 id: "f2".into(),
                                 name: "Бэкенд & API".into(),
+                                icon: String::new(),
                             },
                         ];
                     }

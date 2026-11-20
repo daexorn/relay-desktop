@@ -8,6 +8,53 @@ pub fn now() -> f64 {
     chrono::Utc::now().timestamp_millis() as f64 / 1000.
 }
 
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[serde(default)]
+pub struct ModelSlot {
+    pub backend: String,
+    pub model: String,
+    pub effort: String,
+}
+impl Default for ModelSlot {
+    fn default() -> Self {
+        Self {
+            backend: String::new(),
+            model: "inherit".into(),
+            effort: "inherit".into(),
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct ModelPalette {
+    pub default_worker: ModelSlot,
+    pub coder: Option<ModelSlot>,
+    pub reviewer: Option<ModelSlot>,
+    pub researcher: Option<ModelSlot>,
+    pub fast: Option<ModelSlot>,
+}
+impl ModelPalette {
+    pub fn normalize_tier(tier: &str) -> &'static str {
+        match tier.trim().to_ascii_lowercase().as_str() {
+            "coder" | "dev" | "developer" | "impl" => "coder",
+            "reviewer" | "review" | "audit" | "qa" => "reviewer",
+            "researcher" | "research" | "explorer" | "architect" | "planner" => "researcher",
+            "fast" | "quick" | "light" => "fast",
+            _ => "default",
+        }
+    }
+    pub fn slot_for(&self, tier: &str) -> &ModelSlot {
+        match Self::normalize_tier(tier) {
+            "coder" => self.coder.as_ref().unwrap_or(&self.default_worker),
+            "reviewer" => self.reviewer.as_ref().unwrap_or(&self.default_worker),
+            "researcher" => self.researcher.as_ref().unwrap_or(&self.default_worker),
+            "fast" => self.fast.as_ref().unwrap_or(&self.default_worker),
+            _ => &self.default_worker,
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize, Debug)]
 #[serde(default)]
 pub struct Agent {
@@ -18,6 +65,8 @@ pub struct Agent {
     pub backend: String,
     pub model: String,
     pub effort: String,
+    pub mode: String,
+    pub tier: String,
     pub prompt: String,
     pub enabled: bool,
 }
@@ -31,6 +80,8 @@ impl Default for Agent {
             backend: String::new(),
             model: "default".into(),
             effort: "default".into(),
+            mode: String::new(),
+            tier: String::new(),
             prompt: String::new(),
             enabled: true,
         }
@@ -48,6 +99,8 @@ pub struct Config {
     pub max_tasks: usize,
     pub mode: String,
     pub auto_results: bool,
+    pub dynamic_workers: bool,
+    pub model_palette: ModelPalette,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -64,10 +117,22 @@ impl Default for Config {
             max_tasks: 32,
             mode: "auto".into(),
             auto_results: true,
+            dynamic_workers: false,
+            model_palette: ModelPalette::default(),
         }
     }
 }
 impl Config {
+    pub fn clone_as_new(&self) -> Self {
+        let mut copy = self.clone();
+        copy.id = id();
+        copy.name = format!("{} (копия)", self.name.trim());
+        copy.leader.id = id();
+        for w in &mut copy.workers {
+            w.id = id();
+        }
+        copy
+    }
     pub fn validate(&self) -> Result<(), String> {
         if self.name.trim().is_empty() {
             return Err("Назови кластер.".into());
@@ -76,7 +141,11 @@ impl Config {
             return Err("Выбери хост руководителя.".into());
         }
         let workers: Vec<_> = self.workers.iter().filter(|a| a.enabled).collect();
-        if workers.is_empty() || self.workers.len() > 12 {
+        if self.dynamic_workers {
+            if self.workers.len() > 12 {
+                return Err("Слишком много исполнителей (максимум 12).".into());
+            }
+        } else if workers.is_empty() || self.workers.len() > 12 {
             return Err("Добавь от 1 до 12 исполнителей.".into());
         }
         if !(1..=8).contains(&self.max_parallel) || !(1..=128).contains(&self.max_tasks) {
@@ -91,6 +160,12 @@ impl Config {
             }
             if !a.backend.is_empty() && !crate::model::valid_backend(&a.backend) {
                 return Err("Неизвестный тип агента в кластере.".into());
+            }
+            if !a.mode.is_empty()
+                && a.mode != "inherit"
+                && !["auto", "manual", "acceptEdits", "plan"].contains(&a.mode.as_str())
+            {
+                return Err("Неизвестный режим прав у агента кластера.".into());
             }
             if a.prompt.len() > 65536 {
                 return Err("Промпт агента слишком длинный.".into());
@@ -173,19 +248,237 @@ pub struct Run {
     pub journal: Vec<JournalEntry>,
     #[serde(default)]
     pub pending_config: Option<Config>,
+    #[serde(default)]
+    pub detached: bool,
 }
 impl Run {
     pub fn new(config: Config, title: String) -> Self {
+        Self::attach_to_session(config, id(), title)
+    }
+    pub fn attach_to_session(config: Config, leader_sid: String, title: String) -> Self {
         Self {
             id: id(),
             config,
-            leader_sid: id(),
+            leader_sid,
             title,
             paused: false,
             created: now(),
             tasks: vec![],
             journal: vec![],
             pending_config: None,
+            detached: false,
+        }
+    }
+    pub fn create_worker(
+        &mut self,
+        args: &Value,
+        default_server: &str,
+        default_cwd: &str,
+        servers: &[crate::model::Server],
+    ) -> Result<(Agent, bool), String> {
+        if !self.config.dynamic_workers {
+            return Err("Динамическое создание агентов отключено в этой команде.".into());
+        }
+        if self.paused {
+            return Err("Кластер на паузе. Дождись возобновления пользователем.".into());
+        }
+        let raw_name = args["name"].as_str().unwrap_or("").trim();
+        if raw_name.is_empty() || raw_name.chars().count() > 80 {
+            return Err("Укажи name агента (от 1 до 80 символов).".into());
+        }
+        if let Some(existing) = self
+            .config
+            .workers
+            .iter()
+            .find(|w| w.enabled && w.name.trim().eq_ignore_ascii_case(raw_name))
+        {
+            return Ok((existing.clone(), false));
+        }
+        if self.config.workers.iter().filter(|w| w.enabled).count() >= 12 {
+            return Err("Достигнут предел в 12 активных исполнителей.".into());
+        }
+        let raw_tier = args["tier"].as_str().unwrap_or("default").trim();
+        if !raw_tier.is_empty()
+            && !matches!(
+                raw_tier.to_ascii_lowercase().as_str(),
+                "default"
+                    | "coder"
+                    | "dev"
+                    | "developer"
+                    | "impl"
+                    | "reviewer"
+                    | "review"
+                    | "audit"
+                    | "qa"
+                    | "researcher"
+                    | "research"
+                    | "explorer"
+                    | "architect"
+                    | "planner"
+                    | "fast"
+                    | "quick"
+                    | "light"
+            )
+        {
+            return Err(
+                "Неизвестный tier: используй default, coder, reviewer, researcher или fast.".into(),
+            );
+        }
+        let tier = ModelPalette::normalize_tier(raw_tier).to_owned();
+        let slot = self.config.model_palette.slot_for(&tier).clone();
+        let server = match args
+            .get("host")
+            .or_else(|| args.get("server"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(target) => servers
+                .iter()
+                .find(|s| {
+                    s.id == target
+                        || s.name.eq_ignore_ascii_case(target)
+                        || s.host.eq_ignore_ascii_case(target)
+                })
+                .map(|s| s.id.clone())
+                .ok_or_else(|| format!("Сервер «{target}» не найден."))?,
+            None => default_server.to_owned(),
+        };
+        let cwd = match args.get("cwd").and_then(|v| v.as_str()).map(str::trim) {
+            Some(dir) if !dir.is_empty() => {
+                if dir.contains('\0') || dir.len() > 1024 {
+                    return Err("Некорректная рабочая папка cwd.".into());
+                }
+                dir.to_owned()
+            }
+            _ => default_cwd.to_owned(),
+        };
+        let prompt = match args.get("prompt").and_then(|v| v.as_str()) {
+            Some(p) => {
+                if p.len() > 32768 {
+                    return Err("Промпт создаваемого агента превышает 32 КБ.".into());
+                }
+                p.trim().to_owned()
+            }
+            None => String::new(),
+        };
+        let mode = match args
+            .get("mode")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(m) => {
+                if !["auto", "acceptEdits", "plan", "manual"].contains(&m) {
+                    return Err("Неизвестный режим mode: auto, acceptEdits, plan или manual.".into());
+                }
+                m.to_owned()
+            }
+            None => {
+                if matches!(tier.as_str(), "reviewer" | "researcher") {
+                    "plan".into()
+                } else {
+                    String::new()
+                }
+            }
+        };
+        let backend = if crate::model::valid_backend(&slot.backend) {
+            slot.backend.clone()
+        } else if crate::model::valid_backend(&self.config.leader.backend) {
+            self.config.leader.backend.clone()
+        } else {
+            String::new()
+        };
+        let eff_backend = if crate::model::valid_backend(&backend) {
+            backend.as_str()
+        } else {
+            servers
+                .iter()
+                .find(|s| s.id == server)
+                .map(|s| s.effective_backend())
+                .unwrap_or("claude")
+        };
+        let model = if slot.model.trim().is_empty() {
+            "inherit".into()
+        } else {
+            slot.model.trim().to_owned()
+        };
+        let effort = if eff_backend == "agy" {
+            "default".into()
+        } else if slot.effort.trim().is_empty() {
+            "inherit".into()
+        } else {
+            slot.effort.trim().to_owned()
+        };
+        let agent = Agent {
+            id: id(),
+            name: raw_name.to_owned(),
+            server,
+            cwd,
+            backend,
+            model,
+            effort,
+            mode,
+            tier: tier.clone(),
+            prompt,
+            enabled: true,
+        };
+        self.config.workers.push(agent.clone());
+        self.log(format!("Оркестратор создал агента: {} ({tier})", agent.name));
+        Ok((agent, true))
+    }
+    pub fn remove_worker(&mut self, worker_id: &str) -> Result<String, String> {
+        if !self.config.dynamic_workers {
+            return Err("Динамическое управление агентами отключено.".into());
+        }
+        if self
+            .tasks
+            .iter()
+            .any(|t| t.agent.id == worker_id && t.state.active())
+        {
+            return Err("Нельзя отключить агента, пока он выполняет задачу.".into());
+        }
+        let Some(w) = self
+            .config
+            .workers
+            .iter_mut()
+            .find(|w| w.id == worker_id && w.enabled)
+        else {
+            return Err("Активный исполнитель не найден.".into());
+        };
+        w.enabled = false;
+        let name = w.name.clone();
+        self.log(format!("Оркестратор отключил агента: {name}"));
+        Ok(name)
+    }
+    pub fn apply_palette_to_existing_workers(&mut self) {
+        let leader_backend = self.config.leader.backend.clone();
+        let palette = self.config.model_palette.clone();
+        for w in &mut self.config.workers {
+            if !w.enabled {
+                continue;
+            }
+            let tier = if w.tier.is_empty() { "default" } else { w.tier.as_str() };
+            let slot = palette.slot_for(tier);
+            w.backend = if crate::model::valid_backend(&slot.backend) {
+                slot.backend.clone()
+            } else if crate::model::valid_backend(&leader_backend) {
+                leader_backend.clone()
+            } else {
+                String::new()
+            };
+            w.model = if slot.model.trim().is_empty() {
+                "inherit".into()
+            } else {
+                slot.model.trim().to_owned()
+            };
+            w.effort = if w.backend == "agy" {
+                "default".into()
+            } else if slot.effort.trim().is_empty() {
+                "inherit".into()
+            } else {
+                slot.effort.trim().to_owned()
+            };
         }
     }
     pub fn log(&mut self, message: impl Into<String>) {

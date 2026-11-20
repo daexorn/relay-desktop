@@ -19,6 +19,79 @@ SPEC = importlib.util.spec_from_file_location("relay_bridge", Path(__file__).par
 bridge = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(bridge)
 
+class HistoryCompletenessTest(unittest.TestCase):
+    def test_primary_chain_stitches_compaction_but_drops_retry(self):
+        rows = [
+            {"type": "user", "uuid": "u1", "parentUuid": None, "message": {"role": "user", "content": "first"}},
+            {"type": "assistant", "uuid": "a1_retry", "parentUuid": "u1", "message": {"role": "assistant", "content": "abandoned"}},
+            {"type": "assistant", "uuid": "a1", "parentUuid": "u1", "message": {"role": "assistant", "content": "kept1"}},
+            {"type": "system", "uuid": "cb", "parentUuid": None, "subtype": "compact_boundary"},
+            {"type": "user", "uuid": "u2", "parentUuid": "cb", "message": {"role": "user", "content": "second"}},
+            {"type": "assistant", "uuid": "a2", "parentUuid": "u2", "message": {"role": "assistant", "content": "kept2"}},
+        ]
+        uuids = [r["uuid"] for r in bridge.primary_chain(rows)]
+        self.assertEqual(uuids, ["u1", "a1", "u2", "a2"])
+
+    def test_history_window_preserves_all_dialogue(self):
+        msgs = []
+        for i in range(5):
+            msgs.append({"role": "user", "text": f"prompt-{i}"})
+            for j in range(400):
+                msgs.append({"role": "tool", "tool": "Read", "input": {}, "tool_id": f"t-{i}-{j}"})
+                msgs.append({"role": "tool_result", "text": "x" * 2000, "failed": False, "tool_id": f"t-{i}-{j}"})
+            msgs.append({"role": "assistant", "text": f"reply-{i}"})
+        out = bridge.history_window(msgs)
+        users = [m["text"] for m in out if m["role"] == "user"]
+        assistants = [m["text"] for m in out if m["role"] == "assistant"]
+        self.assertEqual(users, [f"prompt-{i}" for i in range(5)])
+        self.assertEqual(assistants, [f"reply-{i}" for i in range(5)])
+        tools = [m for m in out if m["role"] in ("tool", "tool_result")]
+        self.assertEqual(len(tools), bridge.HISTORY_KEEP_TOOLS)
+
+
+class UsageResetAndTitlesTest(unittest.TestCase):
+    def test_reset_uses_only_the_credit_previewed_in_this_chat(self):
+        host = bridge.Bridge.__new__(bridge.Bridge)
+        host.reset_lock = threading.Lock()
+        host.pending_resets = {}
+        credit = {"id": "test-credit", "resetType": "codexRateLimits", "status": "available"}
+        consume = mock.Mock(return_value={"outcome": "reset"})
+        host.codex = {"consume_reset_credit": consume,
+                      "probe_rate_limits": mock.Mock(return_value={"rateLimitResetCredits": {"availableCount": 1, "credits": [credit]}})}
+        self.assertIn("Сначала", host._reset_limits("a", "codex", "confirm"))
+        self.assertIn("confirm", host._reset_limits("a", "codex", ""))
+        self.assertIn("Сначала", host._reset_limits("b", "codex", "confirm"))
+        self.assertIn("claude.ai", host._reset_limits("a", "claude", "confirm"))
+        consume.assert_not_called()
+        self.assertIn("подтвердил", host._reset_limits("a", "codex", "confirm"))
+        self.assertIn("Сначала", host._reset_limits("a", "codex", "confirm"))
+        consume.assert_called_once_with("test-credit")
+
+    def test_generated_headers_and_commands_are_not_session_names(self):
+        title = bridge.relay_title_text("<environment_context>internal cwd</environment_context>\n# Работа с каталогом\nподробности")
+        self.assertEqual(title, "Работа с каталогом")
+        self.assertEqual(bridge.relay_title_text('<relay-shared-history v=1> truncated'), "")
+        self.assertEqual(bridge.relay_title_text('/reset-limits confirm'), "")
+
+
+class PeerReconnectTest(unittest.TestCase):
+    def test_peer_keeps_receiving_after_read_timeouts_and_split_frames(self):
+        conn = mock.Mock()
+        conn.recv.side_effect = [
+            b'{"type":"run_state",', socket.timeout(),
+            b'"sid":"s","busy":true}\n', socket.timeout(), socket.timeout(),
+            b'{"type":"claude","sid":"s","data":{"type":"result"}}\n'
+            b'{"type":"run_state","sid":"s","busy":false}\n', b'',
+        ]
+        host = mock.Mock()
+        peer = bridge.Peer(host, conn)
+        peer.watch()
+        events = [call.args[0] for call in host.route.call_args_list]
+        self.assertEqual([event["type"] for event in events], ["run_state", "claude", "run_state"])
+        self.assertEqual([events[0]["busy"], events[-1]["busy"]], [True, False])
+        host.drop_peer.assert_called_once_with(peer)
+
+
 FAKE = '''#!/usr/bin/env python3
 import json,sys
 def send(x):print(json.dumps(x),flush=True)
@@ -273,7 +346,12 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(run.agent_role,'reviewer')
         args=run.process.args
         self.assertIn('review agent',args[args.index('--append-system-prompt')+1])
-        self.assertIn('renders LaTeX',args[args.index('--append-system-prompt')+1])
+        self.assertNotIn('renders LaTeX',args[args.index('--append-system-prompt')+1])
+
+    def test_plain_session_gets_no_system_prompt(self):
+        self.host.dispatch({'op':'prompt','sid':self.sid,'cwd':str(self.root),'text':'test','mode':'manual'})
+        self.wait('permission')
+        self.assertNotIn('--append-system-prompt',self.host.runs[self.sid].process.args)
 
     def test_leader_gets_cluster_tools_and_custom_prompt_but_workers_do_not(self):
         source=(Path(__file__).parents[1]/'bridge/cluster_mcp.py').read_text()
@@ -494,6 +572,9 @@ class ProtocolTests(unittest.TestCase):
         self.assertTrue(result['is_error'])
         self.assertIn('История сохранена',result['errors'][0])
         self.assertTrue(first.auth_failed)
+        # The result frame is published before the subsequent run-state update.
+        while self.wait('run_state')['busy']:
+            pass
         self.assertFalse(first.busy)
         self.assertEqual(len(self.host.runs),1)
         # No automatic repeat. Only the next explicit user prompt starts a fresh CLI.
@@ -673,6 +754,65 @@ class UsageTests(unittest.TestCase):
             self.assertTrue(done.wait(2))
             state.refresh_async(lambda result:None)
             self.assertEqual(fetch.call_count,1)
+
+    def test_agy_oauth_quota_summary_and_sanitization(self):
+        with tempfile.TemporaryDirectory() as folder:
+            Path(folder,'antigravity-oauth-token').write_text(json.dumps({
+                'auth_method':'oauth-personal',
+                'token':{'access_token':'agy-fixture-secret','expiry':'2099-01-01T13:59:39.985059589Z','refresh_token':'do-not-leak'}
+            }))
+            response={'groups':[{'displayName':'Claude and GPT models','buckets':[
+                {'bucketId':'3p-weekly','window':'weekly','displayName':'Weekly Limit Remaining','resetTime':'2099-01-07T10:00:00Z','remainingFraction':0.4992},
+                {'bucketId':'3p-5h','window':'5h','displayName':'Five Hour Limit Remaining','resetTime':'2099-01-01T18:00:00Z','remainingFraction':1},
+            ]}],'secret':'do-not-forward'}
+            state=bridge.AgyUsageState()
+            with mock.patch.dict(bridge.os.environ,{'AGY_DATA_DIR':folder}),mock.patch.object(bridge.urllib.request,'build_opener') as factory:
+                factory.return_value.open.return_value=io.BytesIO(json.dumps(response).encode())
+                state.fetch_oauth()
+                request=factory.return_value.open.call_args.args[0]
+                self.assertEqual(request.full_url,bridge.AgyUsageState.QUOTA_URL)
+                self.assertEqual(factory.return_value.open.call_args.kwargs['timeout'],6)
+            short_snap=state.snapshot(short=True)
+            self.assertTrue(short_snap['available'])
+            self.assertEqual(short_snap['backend'],'agy')
+            self.assertEqual([w['id'] for w in short_snap['windows']],['five_hour','seven_day'])
+            self.assertEqual([w['utilization'] for w in short_snap['windows']],[0.0,50.1])
+            self.assertEqual([w['label'] for w in short_snap['windows']],['5 часов','Неделя'])
+            full_snap=state.snapshot(short=False)
+            self.assertEqual(full_snap['windows'][1]['label'],'Claude and GPT models · Неделя')
+            dumped=json.dumps(short_snap)+json.dumps(full_snap)
+            self.assertNotIn('agy-fixture-secret',dumped)
+            self.assertNotIn('do-not-leak',dumped)
+            self.assertNotIn('do-not-forward',dumped)
+
+    def test_agy_expired_token_never_sends_request(self):
+        with tempfile.TemporaryDirectory() as folder:
+            Path(folder,'antigravity-oauth-token').write_text(json.dumps({
+                'token':{'access_token':'agy-expired','expiry':'2020-01-01T00:00:00.123456789Z'}
+            }))
+            with mock.patch.dict(bridge.os.environ,{'AGY_DATA_DIR':folder}),mock.patch.object(bridge.urllib.request,'build_opener') as factory:
+                state=bridge.AgyUsageState()
+                state.fetch_oauth()
+                factory.assert_not_called()
+                self.assertFalse(state.snapshot()['available'])
+
+    def test_agy_falls_back_to_available_models_when_summary_empty(self):
+        with tempfile.TemporaryDirectory() as folder:
+            Path(folder,'antigravity-oauth-token').write_text(json.dumps({
+                'token':{'access_token':'agy-fixture','expiry':'2099-01-01T00:00:00Z'}
+            }))
+            models_resp={'models':{
+                'claude-opus':{'displayName':'Claude Opus','modelProvider':'MODEL_PROVIDER_ANTHROPIC','quotaInfo':{'remainingFraction':0.6,'resetTime':'2099-01-02T00:00:00Z'}},
+                'gemini-pro':{'displayName':'Gemini Pro','modelProvider':'MODEL_PROVIDER_GOOGLE','quotaInfo':{'remainingFraction':0.9,'resetTime':'2099-01-01T05:00:00Z'}},
+            }}
+            state=bridge.AgyUsageState()
+            with mock.patch.dict(bridge.os.environ,{'AGY_DATA_DIR':folder}),mock.patch.object(bridge.urllib.request,'build_opener') as factory:
+                factory.return_value.open.side_effect=[io.BytesIO(b'{"groups":[]}'),io.BytesIO(json.dumps(models_resp).encode())]
+                state.fetch_oauth()
+            snap=state.snapshot()
+            self.assertTrue(snap['available'])
+            self.assertEqual(snap['source'],'agy_available_models')
+            self.assertEqual([(w['id'],w['utilization']) for w in snap['windows']],[('agy_3p',40.0),('agy_gemini',10.0)])
 
 
 if __name__=='__main__':unittest.main()

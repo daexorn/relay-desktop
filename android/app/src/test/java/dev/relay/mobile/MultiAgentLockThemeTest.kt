@@ -27,19 +27,20 @@ class MultiAgentLockThemeTest {
     }
 
     @Test fun allTwentyFourThemesSyncWithDesktopSpecs() {
-        assertEquals(40, THEMES.size)
+        assertEquals(44, THEMES.size)
         val dark = THEMES.filter { !it.light }
         val light = THEMES.filter { it.light }
-        assertEquals(30, dark.size)
-        assertEquals(10, light.size)
+        assertEquals(32, dark.size)
+        assertEquals(12, light.size)
         val expectedIds = listOf(
             "graphite", "midnight", "obsidian", "tokyo", "catppuccin", "gruvbox",
             "kanagawa", "everforest", "cyber", "aurora", "forest", "plum",
             "ember", "ocean", "nord", "rose", "dracula", "oled",
             "monokai", "ayu", "synthwave", "cobalt", "matrix", "vesper",
             "poimandres", "horizon", "zenburn", "sakura_night", "arctic_void", "copper",
+            "mono", "mono_black",
             "paper", "sand", "mint", "latte", "solarized", "frost",
-            "lavender", "peach", "sage", "sky_day",
+            "lavender", "peach", "sage", "sky_day", "mono_light", "ink",
         )
         assertEquals(expectedIds, THEMES.map { it.id })
         for (t in THEMES) {

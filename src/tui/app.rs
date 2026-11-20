@@ -23,7 +23,8 @@ use std::{
 };
 
 pub const COMMANDS: &[(&str, &str)] = &[
-    ("/usage", "Лимиты подписки, сброс таймеров и расход токенов"),
+    ("/usage", "Лимиты, время обновления и токены"),
+    ("/reset-limits", "Проверить доступность разового сброса"),
     ("/cost", "Статистика токенов и вызовов инструментов сессии"),
     ("/status", "Состояние сервера, установленных CLI и сессии"),
     ("/clear", "Открыть новую чистую сессию в текущей папке"),
@@ -41,7 +42,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/cd", "Рабочая папка на сервере"),
     ("/model", "Выбрать модель"),
     ("/mode", "auto, manual, acceptEdits, plan"),
-    ("/effort", "default, low, medium, high, xhigh, max"),
+    ("/effort", "low, medium, high, xhigh, max"),
     ("/backend", "claude, codex, agy или api в этой сессии"),
     ("/install", "Установить или обновить claude, codex, agy на сервере"),
     ("/api", "Настроить API для сервера"),
@@ -63,7 +64,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/pin", "Закрепить или открепить сессию"),
     ("/delete", "Удалить сессию с подтверждением"),
     ("/prompt", "Инструкции для этой сессии"),
-    ("/theme", "Выбрать тему оформления (40 тем)"),
+    ("/theme", "Выбрать тему оформления (44 темы)"),
     ("/refresh", "Обновить сессии и лимиты"),
     ("/login", "Как войти в Claude, Codex или AGY на сервере"),
     ("/quit", "Выйти из Relay TUI"),
@@ -1086,11 +1087,7 @@ impl App {
             }
             Picker::Models => {
                 let active_backend = self.chat().map(|c| c.backend.as_str()).unwrap_or("claude");
-                let mut items = vec![Item {
-                    id: "default".into(),
-                    label: "По умолчанию".into(),
-                    detail: "Выбор сервера / текущего профиля".into(),
-                }];
+                let mut items: Vec<Item> = Vec::new();
                 match active_backend {
                     "api" => {
                         if let Some(server) = self.server() {
@@ -1158,6 +1155,10 @@ impl App {
                         }
                     }
                 }
+                if items.is_empty() && active_backend == "claude" {
+                    items.push(Item { id: "sonnet".into(), label: "Sonnet".into(), detail: String::new() });
+                }
+                items.retain(|item| relay_desktop::model::explicit_model(&item.id));
                 items
             }
             Picker::Themes => relay_desktop::model::THEME_SPECS
@@ -1192,7 +1193,7 @@ impl App {
                 detail: id.into(),
             })
             .collect(),
-            Picker::Efforts => ["default", "low", "medium", "high", "xhigh", "max"]
+            Picker::Efforts => ["low", "medium", "high", "xhigh", "max"]
                 .into_iter()
                 .map(|s| Item {
                     id: s.into(),
@@ -1601,10 +1602,11 @@ impl App {
                 let Some(rows) = value["sessions"].as_array() else {
                     return;
                 };
-                let sessions: Vec<Session> = rows
+                let mut sessions: Vec<Session> = rows
                     .iter()
                     .filter_map(|v| serde_json::from_value(v.clone()).ok())
                     .collect();
+                self.settings.restore_locked_titles(host, &mut sessions);
                 let r = self.remote.entry(host.into()).or_default();
                 r.sessions = sessions.clone();
                 r.loaded = true;
@@ -1665,7 +1667,7 @@ impl App {
                     match kind {
                         "model_changed" => c.model = value["model"].as_str().unwrap_or("default").into(),
                         "mode_changed" => c.mode = value["mode"].as_str().unwrap_or("manual").into(),
-                        "effort_changed" => c.effort = value["effort"].as_str().unwrap_or("default").into(),
+                        "effort_changed" => c.effort = relay_desktop::model::selected_effort(value["effort"].as_str().unwrap_or("")).into(),
                         _ => {}
                     }
                     self.dirty = true;
@@ -2071,6 +2073,19 @@ impl App {
             );
             let c = &self.chats[key];
             let mut request = c.request(&prompt, &self.settings.actor());
+            request["effort"] = json!(if c.backend == "agy" { "default" } else { relay_desktop::model::selected_effort(&c.effort) });
+            if c.backend != "api" && !relay_desktop::model::explicit_model(&c.model) {
+                let live_models = self.remote.get(host).map(|remote| match c.backend.as_str() {
+                    "codex" => remote.codex_models.as_slice(),
+                    "agy" => remote.agy_models.as_slice(),
+                    _ => remote.models.as_slice(),
+                }).unwrap_or_default();
+                let fallback = if live_models.is_empty() {
+                    relay_desktop::model::default_backend_models(&c.backend)
+                } else { Vec::new() };
+                let models = if live_models.is_empty() { &fallback } else { live_models };
+                request["model"] = json!(relay_desktop::model::selected_model(&c.model, models, &c.backend));
+            }
             let files = prompt
                 .files
                 .iter()
@@ -2268,11 +2283,18 @@ impl App {
             "/add"=>self.ask_field(Field::Add{server:Server::default(),stage:0},String::new()),
             "/sessions"=>{self.refresh();self.popup=Some(Popup::Picker{kind:Picker::Sessions,search:Editor::new(arg.into()),index:0});},
             "/resume"=>if arg.is_empty(){self.ask_field(Field::Resume,String::new());}else if uuid::Uuid::parse_str(arg).is_err(){self.notice="Укажи UUID сессии".into();}else if let Some(session)=self.active.as_ref().and_then(|h|self.remote.get(h)).and_then(|r|r.sessions.iter().find(|s|s.id==arg)).cloned(){self.open_session(session);}else{self.notice="Сессия не найдена в списке. /refresh обновит список.".into();},
+            "/usage"|"/limits"|"/quota"|"/reset-limits"|"/reset-usage"|"/cost"|"/tokens"|"/status"|"/info" => {
+                if let (Some(host), Some(c)) = (self.active.as_ref(), self.chat()) {
+                    self.controller.send(host, json!({"op":"prompt","sid":c.sid,"cwd":c.cwd,"backend":c.backend,
+                        "text":line,"model":c.model,"mode":c.mode,"effort":c.effort}));
+                }
+            }
             "/new"|"/clear"=>self.new_chat(),
             "/cd"=>if arg.is_empty(){self.ask_field(Field::Cwd,self.chat().map(|c|c.cwd.clone()).unwrap_or_else(||"~".into()));}else{self.set_cwd(arg);},
-            "/model"=>if arg.is_empty(){self.picker(Picker::Models);}else if arg.len()<=160&&!arg.chars().any(char::is_control){if let Some(c)=self.chat_mut(){c.model=arg.into();}self.control("model",arg);},
+            "/model"=>if arg.is_empty(){self.picker(Picker::Models);}else if relay_desktop::model::explicit_model(arg)&&arg.len()<=160&&!arg.chars().any(char::is_control){if let Some(c)=self.chat_mut(){c.model=arg.into();}self.control("model",arg);}else{self.notice="Выбери конкретную модель через /model".into();},
             "/mode"=>if arg.is_empty(){self.picker(Picker::Modes);}else if ["auto","manual","acceptEdits","plan"].contains(&arg){if let Some(c)=self.chat_mut(){c.mode=arg.into();}self.control("mode",arg);}else{self.notice="Режим: auto, manual, acceptEdits или plan".into();},
-            "/effort"=>if arg.is_empty(){self.picker(Picker::Efforts);}else if ["default","low","medium","high","xhigh","max"].contains(&arg){if let Some(c)=self.chat_mut(){c.effort=arg.into();}self.notice="Глубина применится к следующему ответу".into();}else{self.notice="Глубина: default, low, medium, high, xhigh, max".into();},
+            "/effort" if self.chat().is_some_and(|c| c.backend == "agy") => { self.notice="В Antigravity глубина выбирается вместе с моделью.".into(); },
+            "/effort"=>if arg.is_empty(){self.picker(Picker::Efforts);}else if ["low","medium","high","xhigh","max"].contains(&arg){if let Some(c)=self.chat_mut(){c.effort=arg.into();}self.notice="Глубина применится к следующему ответу".into();}else{self.notice="Глубина: low, medium, high, xhigh, max".into();},
             "/backend" => {
                 if arg.is_empty() {
                     self.picker(Picker::Backends);
@@ -2474,7 +2496,7 @@ impl App {
                     self.notice = format!("Тема оформления: {label} ({arg})");
                 } else {
                     self.notice =
-                        "Неизвестная тема. Нажми F4 или введи /theme для выбора из 40 тем.".into();
+                        "Неизвестная тема. Нажми F4 или введи /theme для выбора из 44 тем.".into();
                 }
             }
             "/refresh"=>self.refresh(),
@@ -4013,7 +4035,7 @@ mod tests {
         let mut app = App::new(true).unwrap();
         app.demo();
         let items = app.items(Picker::Themes, "");
-        assert_eq!(items.len(), 40);
+        assert_eq!(items.len(), 44);
         assert!(items.iter().any(|i| i.id == "graphite" && i.detail.contains("Тёмная тема")));
         assert!(items.iter().any(|i| i.id == "synthwave" && i.detail.contains("Тёмная тема")));
         assert!(items.iter().any(|i| i.id == "paper" && i.detail.contains("Светлая тема")));
@@ -4025,7 +4047,7 @@ mod tests {
             assert_eq!(app.theme(), id);
         }
         app.command("/theme nonexistent-theme");
-        assert_eq!(app.theme(), "sky_day");
+        assert_eq!(app.theme(), "ink");
     }
 
     #[test]

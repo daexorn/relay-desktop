@@ -99,7 +99,7 @@ class RemoteBrowser:
         self.process=None;self.display=None;self.wm=None;self.capture=None;self.clipboard=None
         self.runtime=None;self.profile_lock=None;self.thread=None;self.env=None;self.prefix=[]
         self.lock=threading.RLock();self.input_lock=threading.RLock();self.stop=threading.Event()
-        self.sequence=0;self.outstanding=None;self.last_digest=None;self.dead=False;self.modifiers=0
+        self.sequence=0;self.outstanding=None;self.last_digest=None;self.dead=False;self.modifiers=0;self.last_pasted_digest=None;self.last_synced_digest=None;self._last_clip_check=0.0
 
     @staticmethod
     def address(value):
@@ -175,6 +175,11 @@ class RemoteBrowser:
     def run(self):
         try:
             while not self.stop.wait(.125) and self.alive():
+                now=time.monotonic()
+                if now-self._last_clip_check>=.35:
+                    self._last_clip_check=now
+                    try:self.sync_browser_clipboard()
+                    except (OSError,subprocess.SubprocessError):pass
                 with self.lock:
                     if self.outstanding is not None:continue
                 self.capture.stdin.write(b'g');self.capture.stdin.flush()
@@ -210,9 +215,14 @@ class RemoteBrowser:
         self.set_modifiers(0);self.xdo('key','--clearmodifiers',keys)
 
     def set_clipboard(self,text):
-        stop_process(self.clipboard)
+        with self.lock:
+            stop_process(self.clipboard)
+            self.clipboard=None
+            self.last_pasted_digest=hashlib.sha256(text.encode('utf-8')).digest() if text else None
         process=self.spawn([shutil.which('xclip'),'-selection','clipboard','-in','-quiet'],stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
-        self.clipboard=process;ready=threading.Event()
+        with self.lock:
+            self.clipboard=process
+        ready=threading.Event()
         def drain():
             try:
                 while True:
@@ -227,15 +237,9 @@ class RemoteBrowser:
         if not ready.wait(3) or process.poll() is not None:
             stop_process(process);raise OSError('Не удалось подготовить буфер серверного браузера.')
 
-    def paste(self,text):
-        self.set_clipboard(text);self.shortcut('ctrl+v');time.sleep(.04)
-
-    def selection(self):
-        # An explicit human Copy action only. Clearing the selection first prevents
-        # a password field refusing Copy from returning an earlier pasted secret.
-        self.set_clipboard('');self.shortcut('ctrl+c');time.sleep(.08)
+    def read_clipboard(self,timeout=2.5):
         process=self.spawn([shutil.which('xclip'),'-selection','clipboard','-out'],stdout=subprocess.PIPE)
-        body=bytearray();end=time.monotonic()+3;complete=False
+        body=bytearray();end=time.monotonic()+timeout;complete=False
         try:
             while time.monotonic()<end and len(body)<=65536:
                 if not select.select([process.stdout],[],[],.1)[0]:continue
@@ -246,6 +250,56 @@ class RemoteBrowser:
             stop_process(process);process.stdout.close()
         text=body.decode('utf-8','replace')
         return text if complete and len(body)<=65536 and len(text)<=16384 else ''
+
+    def _browser_owns_clipboard(self):
+        with self.lock:
+            owner=self.clipboard
+        return owner is None or owner.poll() is not None
+
+    def sync_browser_clipboard(self):
+        # In X11, our own `xclip -in` exits immediately when Chromium claims CLIPBOARD
+        # (page "Copy" button, right-click Copy, Ctrl+C/Ctrl+X). While our xclip still
+        # owns it, the clipboard holds text pasted FROM the PC — never echo it back.
+        if not self._browser_owns_clipboard():
+            return ''
+        text=self.read_clipboard(timeout=1.5)
+        if not text:
+            return ''
+        digest=hashlib.sha256(text.encode('utf-8')).digest()
+        with self.lock:
+            if digest==self.last_synced_digest or digest==self.last_pasted_digest:
+                return ''
+            self.last_synced_digest=digest
+        self.send({'type':'auth_clipboard','id':self.ident,'text':text})
+        return text
+
+    def paste(self,text):
+        self.set_clipboard(text);self.shortcut('ctrl+v');time.sleep(.04)
+
+    def selection(self):
+        # Preserve text Chromium itself already copied (e.g. a page's "Copy code" button)
+        # if Ctrl+C finds no active selection, while still clearing before Ctrl+C so a
+        # password field refusing Copy can never return an earlier pasted secret.
+        prior=''
+        if self.env is not None and self._browser_owns_clipboard():
+            try:
+                cand=self.read_clipboard(timeout=1.0)
+                if cand:
+                    digest=hashlib.sha256(cand.encode('utf-8')).digest()
+                    if digest!=self.last_pasted_digest:
+                        prior=cand
+            except (OSError,subprocess.SubprocessError):
+                prior=''
+        self.set_clipboard('');self.shortcut('ctrl+c');time.sleep(.14)
+        text=self.read_clipboard(timeout=2.5)
+        if not text and self.env is not None:
+            time.sleep(.14)
+            text=self.read_clipboard(timeout=1.5)
+        result=text or prior
+        if result:
+            with self.lock:
+                self.last_synced_digest=hashlib.sha256(result.encode('utf-8')).digest()
+        return result
 
     def navigate(self,url):
         with self.input_lock:

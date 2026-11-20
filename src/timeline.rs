@@ -1020,6 +1020,7 @@ fn preview(ui: &mut egui::Ui, call: Option<&Message>, results: Vec<&Message>, ru
         ui.add_space(4.);
         ui.horizontal(|ui| {
             design::waveform(ui, accent(), 13.);
+            ui.add_space(5.);
             ui.label(RichText::new("поток выполняется в реальном времени…").size(11.0).color(accent()));
         });
         return;

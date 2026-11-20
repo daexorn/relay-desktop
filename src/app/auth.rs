@@ -219,8 +219,10 @@ impl RelayApp {
             }
             "auth_clipboard" => {
                 if login.active() && login.visible {
-                    if let Some(text) = value["text"].as_str().filter(|v| v.len() <= 65536) {
+                    if let Some(text) = value["text"].as_str().filter(|v| !v.is_empty() && v.len() <= 65536) {
                         self.controller.bus.ctx.copy_text(text.to_owned());
+                        self.controller.bus.ctx.request_repaint();
+                        self.notice = "Скопировано из браузера".into();
                     }
                 }
             }
@@ -457,6 +459,7 @@ impl RelayApp {
             || self.settings_open
             || self.folder_open
             || self.cluster_edit.is_some()
+            || self.chat_orchestra_dialog.is_some()
             || self.delete_chat.is_some()
             || self.close_confirm
             || !self.desktop_requests.is_empty()
@@ -484,6 +487,7 @@ impl RelayApp {
         }
         let events = ui.input(|i| i.events.clone());
         let has_paste = events.iter().any(|e| matches!(e, egui::Event::Paste(_)));
+        let has_copy = events.iter().any(|e| matches!(e, egui::Event::Copy));
         let mut pointer = None;
         for event in events {
             let mut input = None;
@@ -557,11 +561,20 @@ impl RelayApp {
                 }
                 egui::Event::Key {
                     key,
+                    physical_key,
                     pressed,
                     modifiers,
                     ..
                 } if response.has_focus() => {
-                    if !(has_paste && key == egui::Key::V && modifiers.command) {
+                    let is_copy_key = modifiers.command
+                        && (key == egui::Key::C || physical_key == Some(egui::Key::C));
+                    let is_paste_key = modifiers.command
+                        && (key == egui::Key::V || physical_key == Some(egui::Key::V));
+                    if is_copy_key {
+                        if !has_copy && pressed {
+                            input = Some(json!({"kind":"copy"}));
+                        }
+                    } else if !(has_paste && is_paste_key) {
                         if let Some(key) = auth_browser::key(key, modifiers.command) {
                             input = Some(
                                 json!({"kind":"key","key":key,"pressed":pressed,"modifiers":auth_browser::modifiers(modifiers)}),

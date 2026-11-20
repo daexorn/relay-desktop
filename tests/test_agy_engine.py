@@ -70,7 +70,53 @@ for raw in sys.stdin:
         if "need-auth" in text_in:
             emit({"jsonrpc": "2.0", "id": rid, "error": {"code": -32000, "message": "Authentication required"}})
             continue
-        if "ask-perm" in text_in:
+        if "ask-cluster-perm" in text_in:
+            emit({"jsonrpc": "2.0", "id": 702, "method": "session/request_permission", "params": {
+                "sessionId": sid,
+                "toolCall": {"toolCallId": "tc-cluster", "title": "mcp_relay_cluster_create_worker", "kind": "other", "rawInput": {"name": "Coder", "tier": "coder"}},
+                "options": [
+                    {"optionId": "allow_once", "kind": "allow_once", "name": "Allow"},
+                    {"optionId": "reject_once", "kind": "reject_once", "name": "Reject"}
+                ]
+            }})
+            while 702 not in waiters:
+                nxt = json.loads(sys.stdin.readline())
+                record(nxt)
+                if nxt.get("id") == 702:
+                    waiters[702] = nxt.get("result") or {}
+            chosen1 = (waiters.pop(702).get("outcome") or {}).get("optionId", "none")
+            emit({"jsonrpc": "2.0", "id": 704, "method": "session/request_permission", "params": {
+                "sessionId": sid,
+                "toolCall": {"toolCallId": "tc-cluster-2", "title": "mcp_relay_cluster_dispatch_task", "kind": "other", "rawInput": {"worker": "w1", "task": "Build"}},
+                "options": [
+                    {"optionId": "allow_once", "kind": "allow_once", "name": "Allow"},
+                    {"optionId": "reject_once", "kind": "reject_once", "name": "Reject"}
+                ]
+            }})
+            while 704 not in waiters:
+                nxt = json.loads(sys.stdin.readline())
+                record(nxt)
+                if nxt.get("id") == 704:
+                    waiters[704] = nxt.get("result") or {}
+            chosen2 = (waiters.pop(704).get("outcome") or {}).get("optionId", "none")
+            reply = f"AGY cluster perm: {chosen1},{chosen2}"
+        elif "ask-worker-question" in text_in:
+            emit({"jsonrpc": "2.0", "id": 703, "method": "session/request_permission", "params": {
+                "sessionId": sid,
+                "toolCall": {"toolCallId": "tc-q", "title": "ask_question", "kind": "other", "rawInput": {"question": "Need input?"}},
+                "options": [
+                    {"optionId": "allow_once", "kind": "allow_once", "name": "Allow"},
+                    {"optionId": "reject_once", "kind": "reject_once", "name": "Reject"}
+                ]
+            }})
+            while 703 not in waiters:
+                nxt = json.loads(sys.stdin.readline())
+                record(nxt)
+                if nxt.get("id") == 703:
+                    waiters[703] = nxt.get("result") or {}
+            chosen = (waiters.pop(703).get("outcome") or {}).get("optionId", "none")
+            reply = f"AGY worker q: {chosen}"
+        elif "ask-perm" in text_in:
             emit({"jsonrpc": "2.0", "id": 701, "method": "session/request_permission", "params": {
                 "sessionId": sid,
                 "toolCall": {"toolCallId": "tc-perm", "title": "run_command", "kind": "execute", "rawInput": {"command": "pytest"}},
@@ -214,7 +260,7 @@ class AgyEngineTests(unittest.TestCase):
             logged = [json.loads(line) for line in self.rpc_log.read_text(encoding="utf-8").splitlines()]
             snew = next(m for m in logged if m.get("method") == "session/new")
             self.assertTrue(any(s["name"] == "relay_board" for s in snew["params"]["mcpServers"]))
-            self.assertIn("Relay supports downloadable", snew["params"]["_meta"]["antigravity"]["systemPrompt"]["append"])
+            self.assertNotIn("_meta", snew["params"])  # Relay adds no system prompt of its own.
             self.assertTrue(any(m.get("method") == "session/set_model" and m["params"]["modelId"] == "gemini-3.1-pro-preview" for m in logged))
             self.assertTrue(any(m.get("method") == "session/set_mode" and m["params"]["modeId"] == "accept-edits" for m in logged))
 
@@ -268,6 +314,56 @@ class AgyEngineTests(unittest.TestCase):
         self.host.dispatch({"op": "delete_session", "sid": native_sid})
         self.wait_for(lambda e: e.get("type") == "session_deleted" and e.get("sid") == native_sid)
         self.assertFalse(transcript.exists())
+
+    def test_agy_cluster_leader_registers_mcp_auto_allows_and_worker_blocks_questions(self):
+        cluster_src = (Path(__file__).parents[1] / "bridge/cluster_mcp.py").read_text(encoding="utf-8")
+        with mock.patch.object(bridge, "CLUSTER_SOURCE", cluster_src, create=True):
+            host = bridge.Bridge(
+                send=self.events.put,
+                transcripts=bridge.Transcripts(self.root / ".claude/projects"),
+                binary=None,
+            )
+            self.addCleanup(host.close)
+            run_id = str(uuid.uuid4())
+            lead_sid = str(uuid.uuid4())
+            # Leader in manual mode with model="default" (no forced model override!)
+            host.dispatch({
+                "op": "prompt",
+                "backend": "agy",
+                "sid": lead_sid,
+                "cwd": str(self.project),
+                "text": "ask-cluster-perm",
+                "model": "default",
+                "mode": "manual",
+                "cluster_context": {"run": run_id, "role": "leader", "name": "AGY Orchestra"},
+            })
+            res, _ = self.wait_for(lambda e: e.get("type") == "claude" and e.get("sid") == lead_sid and e["data"].get("type") == "result")
+            self.assertFalse(res["data"]["is_error"])
+            self.assertEqual(res["data"]["result"], "AGY cluster perm: allow_once,allow_once")
+
+            logged = [json.loads(line) for line in self.rpc_log.read_text(encoding="utf-8").splitlines()]
+            snew = next(m for m in logged if m.get("method") == "session/new")
+            self.assertTrue(any(s["name"] == "relay_cluster" for s in snew["params"]["mcpServers"]))
+            sys_prompt = snew["params"]["_meta"]["antigravity"]["systemPrompt"]["append"]
+            self.assertIn("lead orchestrator agent", sys_prompt)
+            self.assertIn("prefer `relay_cluster` tools", sys_prompt)
+            self.assertFalse(any(m.get("method") == "session/set_model" for m in logged))
+
+            # Worker blocks interactive ask_question so it reports back to leader
+            worker_sid = str(uuid.uuid4())
+            host.dispatch({
+                "op": "prompt",
+                "backend": "agy",
+                "sid": worker_sid,
+                "cwd": str(self.project),
+                "text": "ask-worker-question",
+                "model": "gemini-3.1-pro-preview",
+                "mode": "auto",
+                "cluster_context": {"run": run_id, "role": "worker", "name": "AGY Worker"},
+            })
+            res_w, _ = self.wait_for(lambda e: e.get("type") == "claude" and e.get("sid") == worker_sid and e["data"].get("type") == "result")
+            self.assertFalse(res_w["data"]["is_error"])
+            self.assertEqual(res_w["data"]["result"], "AGY worker q: reject_once")
 
 
 if __name__ == "__main__":

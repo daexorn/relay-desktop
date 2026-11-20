@@ -124,8 +124,26 @@ impl RelayApp {
         });
     }
 
+    pub(super) fn locked_sidebar_title(&self, server: &str, sid: &str) -> String {
+        let modified = self.remote.get(server).and_then(|r| r.sessions.iter().find(|s| s.id == sid))
+            .map_or(0., |s| s.modified);
+        self.settings.label_locked_session(&key(server, sid), sid, modified)
+    }
+
+    pub(super) fn remember_lock_title(&mut self, server: &str, sid: &str) {
+        let k = key(server, sid);
+        let title = self.remote.get(server).and_then(|r| r.sessions.iter().find(|s| s.id == sid && !s.is_locked_gate()))
+            .map(|s| s.title.as_str()).or_else(|| self.chats.get(&k).filter(|c| !c.locked || c.unlocked).map(|c| c.title.as_str()));
+        if title.is_some_and(|title| self.settings.remember_locked_title(&k, sid, title)) {
+            self.save();
+        }
+    }
+
     pub(super) fn relock_session(&mut self, server: &str, sid: &str) {
+        self.remember_lock_title(server, sid);
+        let title = self.locked_sidebar_title(server, sid);
         if let Some(c) = self.chats.get_mut(&key(server, sid)) {
+            c.title.clone_from(&title);
             c.messages.clear();
             c.sent_images.clear();
             c.permissions.clear();
@@ -140,7 +158,7 @@ impl RelayApp {
             if let Some(s) = r.sessions.iter_mut().find(|s| s.id == sid) {
                 s.locked = true;
                 s.unlocked = false;
-                s.title = "Защищённая сессия".into();
+                s.title = title;
                 s.auto_title.clear();
             }
         }
@@ -261,6 +279,7 @@ impl RelayApp {
             return true;
         };
         self.deleted_sessions.insert(key(server, sid));
+        self.settings.locked_session_names.remove(&key(server, sid));
         if let Some(remote) = self.remote.get_mut(server) {
             remote.sessions.retain(|s| s.id != sid);
         }

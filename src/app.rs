@@ -1,5 +1,6 @@
 mod cluster_runtime;
 mod cluster_view;
+mod project_icon;
 mod session_actions;
 mod api_settings;
 mod workspace;
@@ -34,6 +35,10 @@ struct Remote {
     home: String,
     usage: Usage,
     usage_requested: Option<Instant>,
+    /// Account limits of every installed agent for the permanent sidebar block.
+    usage_by: HashMap<String, Usage>,
+    /// When limits of each agent were last requested (every 5 minutes).
+    usage_polled: HashMap<String, Instant>,
     sessions_requested: Option<Instant>,
     sessions_loaded: bool,
     sessions_retries: u8,
@@ -58,6 +63,13 @@ struct Remote {
     /// `claude update` is running on the server.
     updating: bool,
 }
+#[derive(Default)]
+struct TurnSummary {
+    backend: String,
+    diff: Option<(u64, u64)>,
+    context: Option<(u64, u64)>,
+}
+
 struct Chat {
     sid: String,
     cwd: String,
@@ -88,12 +100,15 @@ struct Chat {
     sent_images: HashMap<usize, Vec<Attachment>>,
     queue: std::collections::VecDeque<QueuedPrompt>,
     queue_paused: bool,
+    /// Server `modified` time of the session the last time this chat was in sync with it.
+    synced_modified: f64,
     turn_backend: String,
     turn_model: String,
     turn_mode: String,
     turn_effort: String,
     turn_actor: String,
     turn_agent_name: String,
+    turn_summary: TurnSummary,
 }
 struct QueuedPrompt {
     text: String,
@@ -127,7 +142,7 @@ impl Chat {
             return false;
         }
         self.queue.push_back(QueuedPrompt {
-            text: std::mem::take(&mut self.draft).trim().to_owned(),
+            text: std::mem::take(&mut self.draft),
             files: std::mem::take(&mut self.images),
         });
         true
@@ -166,12 +181,14 @@ impl Chat {
             sent_images: HashMap::new(),
             queue: Default::default(),
             queue_paused: false,
+            synced_modified: 0.,
             turn_backend: String::new(),
             turn_model: String::new(),
             turn_mode: String::new(),
             turn_effort: String::new(),
             turn_actor: String::new(),
             turn_agent_name: String::new(),
+            turn_summary: TurnSummary::default(),
         }
     }
 }
@@ -204,9 +221,12 @@ pub struct RelayApp {
     agents_open: Option<String>,
     radar_open: Option<String>,
     deleted_sessions: std::collections::HashSet<String>,
+    /// Servers whose connection dropped: next automatic attempt and how many were made.
+    reconnect: HashMap<String, (Instant, u32)>,
     /// Session being renamed in the sidebar, with the text typed so far.
     renaming: Option<(String, String)>,
     folder_dialog: Option<session_actions::FolderDialog>,
+    icon_dialog: Option<project_icon::IconDialog>,
     search: String,
     editor: Option<Editor>,
     api_editor: Option<api_settings::Editor>,
@@ -240,6 +260,7 @@ pub struct RelayApp {
     cluster_store: crate::cluster::Store,
     cluster_calls: Vec<cluster_runtime::Pending>,
     cluster_edit: Option<cluster_view::Editor>,
+    chat_orchestra_dialog: Option<cluster_view::ChatOrchestraDialog>,
     cluster_snapshot: Option<(u64, String, std::sync::Arc<crate::cluster::Run>)>,
     board_view: crate::board::BoardView,
     boards: HashMap<String, Value>,
@@ -280,8 +301,10 @@ impl RelayApp {
             agents_open: None,
             radar_open: None,
             deleted_sessions: Default::default(),
+            reconnect: Default::default(),
             renaming: None,
             folder_dialog: None,
+            icon_dialog: None,
             search: String::new(),
             editor: None,
             api_editor: None,
@@ -317,6 +340,7 @@ impl RelayApp {
             cluster_store: Default::default(),
             cluster_calls: vec![],
             cluster_edit: None,
+            chat_orchestra_dialog: None,
             cluster_snapshot: None,
             board_view: Default::default(),
             boards: HashMap::new(),
@@ -658,7 +682,7 @@ impl RelayApp {
                 chat.loading = false;
                 chat.loaded = false;
                 chat.messages.clear();
-            } else if !chat.loaded && !chat.loading {
+            } else if !chat.loaded {
                 chat.loading = true;
                 self.controller
                     .send(&s.id, json!({"op":"history","sid":session.id}));
@@ -911,6 +935,9 @@ impl RelayApp {
                 Event::Password { server, password } => {
                     if let Some(password) = password {
                         self.establish(server, password);
+                    } else if self.reconnect.remove(&server.id).is_some() {
+                        self.remote.entry(server.id.clone()).or_default().connecting = false;
+                        self.notice = "Связь прервалась, а пароль сервера не сохранён. Нажми «Отправить», чтобы подключиться.".into();
                     } else {
                         self.remote.entry(server.id.clone()).or_default().connecting = false;
                         self.editor = Some(Editor {
@@ -937,17 +964,28 @@ impl RelayApp {
                     self.desktop_requests.retain(|(s, _)| s != &server);
                     r.connected = false;
                     r.connecting = false;
+                    let known = self.settings.servers.iter().any(|s| s.id == server);
                     for (k, c) in &mut self.chats {
                         if k.starts_with(&format!("{server}/")) {
                             if c.busy {
-                                c.error="Подключение прервалось. Подключись снова, чтобы продолжить эту сессию.".into();
+                                c.status = "Связь прервалась · переподключаемся".into();
                             }
+                            // An upload cut midway goes back to the front of the queue and is resent.
+                            let failed_upload = c.upload_progress.is_some();
                             c.restore_failed_upload();
+                            if failed_upload && (!c.draft.trim().is_empty() || !c.images.is_empty()) {
+                                c.enqueue_draft();
+                            }
                             c.busy = false;
-                            c.queue_paused = true;
+                            c.queue_paused = false;
                             c.loading = false;
                             c.permissions.clear();
                         }
+                    }
+                    if known && !self.demo {
+                        let attempt = self.reconnect.get(&server).map_or(0, |(_, n)| *n);
+                        let delay = [1u64, 2, 3, 5, 8, 13, 20, 30][(attempt as usize).min(7)];
+                        self.reconnect.insert(server.clone(), (Instant::now() + Duration::from_secs(delay), attempt + 1));
                     }
                 }
                 Event::Files { server, sid, paths } => self.load_images(server, sid, paths),
@@ -1074,6 +1112,7 @@ impl RelayApp {
                 self.notice = value["message"].as_str().unwrap_or("").into();
             }
             "hello" => {
+                self.reconnect.remove(&server);
                 let r = self.remote.entry(server.clone()).or_default();
                 r.connected = true;
                 r.connecting = false;
@@ -1127,12 +1166,25 @@ impl RelayApp {
                     .map_or("ask".to_owned(), |s| s.tests.clone());
                 self.controller
                     .send(&server, json!({"op":"_tests_policy","mode":tests}));
+                // Reset any in-flight history loaders from a dropped connection so sessions never stay stuck.
+                let prefix = format!("{server}/");
+                for (k, c) in &mut self.chats {
+                    if k.starts_with(&prefix) {
+                        c.loading = false;
+                    }
+                }
                 if let Some(sid) = self.selected_chat.get(&server) {
                     if let Some(c) = self.chats.get_mut(&key(&server, sid)) {
-                        if !c.loaded && !c.loading {
-                            c.loading = true;
-                            self.controller
-                                .send(&server, json!({"op":"history","sid":sid}));
+                        if !(c.locked && !c.unlocked) {
+                            if !c.loaded {
+                                c.loading = true;
+                                self.controller
+                                    .send(&server, json!({"op":"history","sid":sid}));
+                            } else if !c.busy {
+                                // Quietly sync any messages written while disconnected.
+                                self.controller
+                                    .send(&server, json!({"op":"history","sid":sid}));
+                            }
                         }
                     }
                 }
@@ -1170,7 +1222,7 @@ impl RelayApp {
                     match kind {
                         "model_changed" => c.model = value["model"].as_str().unwrap_or("default").into(),
                         "mode_changed" => c.mode = value["mode"].as_str().unwrap_or("manual").into(),
-                        "effort_changed" => c.effort = value["effort"].as_str().unwrap_or("default").into(),
+                        "effort_changed" => c.effort = model::selected_effort(value["effort"].as_str().unwrap_or("")).into(),
                         _ => {}
                     }
                 }
@@ -1250,6 +1302,24 @@ impl RelayApp {
                     };
                 }
             }
+            "turn_summary" => {
+                let sid = value["sid"].as_str().unwrap_or("");
+                let backend = value["backend"].as_str().unwrap_or("");
+                if let Some(c) = self.chats.get_mut(&key(&server, sid)).filter(|c| !c.locked || c.unlocked) {
+                    if c.turn_summary.backend != backend {
+                        c.turn_summary = TurnSummary { backend: backend.into(), ..Default::default() };
+                    }
+                    if value["reset_diff"] == true {
+                        c.turn_summary.diff = None;
+                    }
+                    if let (Some(added), Some(removed)) = (value["added"].as_u64(), value["removed"].as_u64()) {
+                        c.turn_summary.diff = Some((added, removed));
+                    }
+                    if let (Some(used), Some(limit)) = (value["used"].as_u64(), value["limit"].as_u64()) {
+                        c.turn_summary.context = (limit > 0).then_some((used, limit));
+                    }
+                }
+            }
             "run_state" => {
                 let sid = value["sid"].as_str().unwrap_or("").to_owned();
                 let busy = value["busy"] == true;
@@ -1277,24 +1347,37 @@ impl RelayApp {
                     } else if !busy && c.busy {
                         c.busy = false;
                         c.status.clear();
+                        // The turn ended without this window seeing every event (other computer, reconnect):
+                        // reload so no messages go missing.
+                        if c.loaded {
+                            self.controller.send(&server, json!({"op":"history","sid":sid}));
+                        }
                     }
                 }
             }
             "usage" => {
-                if let Ok(usage) = serde_json::from_value(value.clone()) {
-                    self.remote.entry(server.clone()).or_default().usage = usage;
+                if let Ok(usage) = serde_json::from_value::<Usage>(value.clone()) {
+                    let backend = value["backend"].as_str().unwrap_or("claude").to_owned();
+                    let remote = self.remote.entry(server.clone()).or_default();
+                    if backend == "claude" {
+                        remote.usage = usage.clone();
+                    }
+                    remote.usage_by.insert(backend, usage);
                 }
             }
             "sessions" => {
                 let Some(rows) = value["sessions"].as_array() else {
                     return;
                 };
-                let sessions: Vec<Session> = rows
+                let mut sessions: Vec<Session> = rows
                     .iter()
                     .filter_map(|row| serde_json::from_value::<Session>(row.clone()).ok())
                     .filter(|s| !s.id.is_empty())
                     .filter(|s| !self.deleted_sessions.contains(&key(&server, &s.id)))
                     .collect();
+                if self.settings.restore_locked_titles(&server, &mut sessions) {
+                    self.save();
+                }
                 let remote = self.remote.entry(server.clone()).or_default();
                 remote.sessions = sessions.clone();
                 if let Some(folders) = value["folders"].as_array() {
@@ -1309,8 +1392,22 @@ impl RelayApp {
                 if remote.protocol >= 4 {
                     remote.running = sessions.iter().filter(|s| s.running).map(|s| s.id.clone()).collect();
                 }
+                let selected_sid = self.selected_chat.get(&server).cloned();
                 for s in &sessions {
                     if let Some(c) = self.chats.get_mut(&key(&server, &s.id)) {
+                        // Messages written from another device or a terminal: pull them into the open chat.
+                        if s.modified > c.synced_modified + 0.25 {
+                            if c.synced_modified > 0.
+                                && c.loaded
+                                && !c.busy
+                                && !c.loading
+                                && selected_sid.as_deref() == Some(s.id.as_str())
+                                && !s.is_locked_gate()
+                            {
+                                self.controller.send(&server, json!({"op":"history","sid":s.id}));
+                            }
+                            c.synced_modified = s.modified;
+                        }
                         c.title = s.title.clone();
                         c.cwd = s.cwd.clone();
                         c.locked = s.locked;
@@ -1384,12 +1481,16 @@ impl RelayApp {
                 let sid = value["sid"].as_str().unwrap_or("");
                 let locked = value["locked"] == true;
                 let unlocked = value["unlocked"].as_bool().unwrap_or(!locked);
+                if locked && !unlocked {
+                    self.remember_lock_title(&server, sid);
+                }
+                let sidebar_title = self.locked_sidebar_title(&server, sid);
                 if let Some(r) = self.remote.get_mut(&server) {
                     if let Some(s) = r.sessions.iter_mut().find(|s| s.id == sid) {
                         s.locked = locked;
                         s.unlocked = unlocked;
                         if locked && !unlocked {
-                            s.title = "Защищённая сессия".into();
+                            s.title.clone_from(&sidebar_title);
                             s.auto_title.clear();
                         }
                     }
@@ -1398,6 +1499,7 @@ impl RelayApp {
                     c.locked = locked;
                     c.unlocked = unlocked;
                     if locked && !unlocked {
+                        c.title = sidebar_title;
                         c.messages.clear();
                         c.sent_images.clear();
                         c.permissions.clear();
@@ -1421,7 +1523,8 @@ impl RelayApp {
             "history" => {
                 let sid = value["sid"].as_str().unwrap_or("");
                 if let Some(c) = self.chats.get_mut(&key(&server, sid)) {
-                    if !c.busy {
+                    c.loading = false;
+                    if !c.busy || !c.loaded {
                         let mut messages: Vec<Message> = value["messages"]
                             .as_array()
                             .map(|rows| {
@@ -1488,6 +1591,9 @@ impl RelayApp {
                             c.busy = false;
                             c.queue_paused = true;
                             c.permissions.clear();
+                            if c.loaded {
+                                self.controller.send(&server, json!({"op":"history","sid":sid}));
+                            }
                         }
                         "error" => {
                             if value["op"] == "session_lock" {
@@ -1572,14 +1678,68 @@ impl RelayApp {
         if self.local_command(&server, &k) {
             return;
         }
+        if !self.demo && !self.connected(&server.id) {
+            // Offline: keep the message and send it by itself as soon as the connection is back.
+            let c = self.chats.get_mut(&k).unwrap();
+            if c.enqueue_draft() {
+                c.queue_paused = false;
+                c.error.clear();
+                c.status = "Ждёт подключения · отправится автоматически".into();
+            }
+            let connecting = self.remote.get(&server.id).is_some_and(|r| r.connecting);
+            if !connecting {
+                self.reconnect.remove(&server.id);
+                self.connect(server);
+            }
+            return;
+        }
         let live = self.remote.get(&server.id).is_some_and(|r| r.protocol >= 4);
         let can_steer = live && matches!(backend.as_str(), "claude" | "codex");
         let c = self.chats.get_mut(&k).unwrap();
-        if c.busy && !can_steer {
-            c.enqueue_draft();
+        if (c.busy && !can_steer) || c.loading {
+            if c.enqueue_draft() && c.loading {
+                c.queue_paused = false;
+            }
             return;
         }
         self.send_to_chat(server, k);
+    }
+    /// Reconnects servers whose connection dropped, with growing pauses between attempts.
+    fn auto_reconnect(&mut self, ctx: &egui::Context) {
+        if self.demo || self.reconnect.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        let mut due = vec![];
+        let mut next: Option<Duration> = None;
+        for (id, (at, _)) in &self.reconnect {
+            let r = self.remote.get(id);
+            if r.is_some_and(|r| r.connected || r.connecting) {
+                continue;
+            }
+            if *at <= now {
+                due.push(id.clone());
+            } else {
+                let wait = *at - now;
+                next = Some(next.map_or(wait, |n| n.min(wait)));
+            }
+        }
+        self.reconnect.retain(|id, _| self.settings.servers.iter().any(|s| &s.id == id));
+        for id in due {
+            if let Some(server) = self.settings.servers.iter().find(|s| s.id == id).cloned() {
+                if let Some(entry) = self.reconnect.get_mut(&id) {
+                    entry.0 = now + Duration::from_secs(60);
+                }
+                let notice = std::mem::take(&mut self.notice);
+                self.connect(server);
+                if !notice.is_empty() && !notice.starts_with("Связь") {
+                    self.notice = notice;
+                }
+            }
+        }
+        if let Some(wait) = next {
+            ctx.request_repaint_after(wait);
+        }
     }
     /// Commands that act at once, also in the middle of an answer: `/model`, `/mode`, `/backend`, `/login`, `/stop`.
     fn local_command(&mut self, server: &Server, k: &str) -> bool {
@@ -1761,7 +1921,7 @@ impl RelayApp {
         let done = match name {
             "/model" if !arg.is_empty() => match resolve_model(&models, arg).or_else(|| {
                 (backend == "api" || (models.is_empty() && backend != "claude")).then(|| arg.to_owned())
-            }).or_else(|| (arg.eq_ignore_ascii_case("default") && backend != "api").then(|| "default".into())) {
+            }).filter(|model| crate::model::explicit_model(model)) {
                 Some(value) => {
                     if backend == "api" {
                         if let Some(profile) = self.settings.servers.iter_mut().find(|s| s.id == server.id) {
@@ -1799,6 +1959,10 @@ impl RelayApp {
                 self.controller.send(&server.id, json!({"op":"control","sid":c.sid,"backend":backend,"action":"mode","value":mode}));
                 true
             }
+            "/effort" if backend == "agy" => {
+                self.notice = "В Antigravity глубина выбирается вместе с моделью.".into();
+                true
+            }
             "/effort" if !arg.is_empty() => {
                 let eff = match arg.to_lowercase().as_str() {
                     "low" | "быстро" => "low",
@@ -1806,9 +1970,8 @@ impl RelayApp {
                     "high" | "глубоко" => "high",
                     "xhigh" => "xhigh",
                     "max" | "макс" => "max",
-                    "auto" | "default" | "авто" => "default",
                     _ => {
-                        c.error = "Глубина: auto, low, medium, high, xhigh или max.".into();
+                        c.error = "Глубина: low, medium, high, xhigh или max.".into();
                         return true;
                     },
                 };
@@ -1822,7 +1985,7 @@ impl RelayApp {
                 c.queue_paused = true;
                 true
             }
-            "/usage" | "/limits" | "/quota" | "/cost" | "/tokens" | "/status" | "/info" | "/help" | "/commands"
+            "/usage" | "/limits" | "/quota" | "/reset-limits" | "/reset-usage" | "/cost" | "/tokens" | "/status" | "/info" | "/help" | "/commands"
                 if c.busy && c.images.is_empty() =>
             {
                 self.controller.send(
@@ -1865,6 +2028,8 @@ impl RelayApp {
                     "/usage"
                         | "/limits"
                         | "/quota"
+                        | "/reset-limits"
+                        | "/reset-usage"
                         | "/cost"
                         | "/tokens"
                         | "/status"
@@ -1892,14 +2057,43 @@ impl RelayApp {
             .is_some_and(|r| r.leader_sid != self.chats[&k].sid);
         let live = self.remote.get(&server.id).is_some_and(|r| r.protocol >= 4);
         let can_steer = live && matches!(backend.as_str(), "claude" | "codex");
-        let mut api_request = json!({"model":if self.chats[&k].cluster_context.is_object() { self.chats[&k].model.as_str() } else { "default" }});
+        let is_cluster = self.chats[&k].cluster_context.is_object();
+        let mut api_request = json!({"model":if is_cluster { self.chats[&k].model.as_str() } else { "default" }});
         self.apply_api_request(&server, &mut api_request);
+        let catalog = self.models_for_backend(&server, &backend);
         let c = self.chats.get_mut(&k).unwrap();
+        if backend != "api" && !is_quick_slash {
+            if is_cluster {
+                let m = c.model.trim();
+                if m.is_empty() || m.eq_ignore_ascii_case("inherit") {
+                    c.model = "default".into();
+                } else {
+                    c.model = m.to_owned();
+                }
+            } else {
+                c.model = model::selected_model(&c.model, &catalog, &backend);
+                if c.model.is_empty() {
+                    c.error = "Выбери модель перед отправкой.".into();
+                    c.queue_paused = true;
+                    return;
+                }
+            }
+        }
+        if is_cluster {
+            if backend == "agy"
+                || c.effort.trim().is_empty()
+                || c.effort.eq_ignore_ascii_case("inherit")
+            {
+                c.effort = "default".into();
+            }
+        } else {
+            c.effort = model::selected_effort(&c.effort).to_owned();
+        }
         let steering = c.busy && can_steer;
         if (c.busy && !can_steer) || c.loading || (c.draft.trim().is_empty() && c.images.is_empty()) {
             return;
         }
-        let text = c.draft.trim().to_owned();
+        let text = c.draft.clone();
         let images: Vec<_> = c
             .images
             .iter()
@@ -1918,7 +2112,7 @@ impl RelayApp {
         );
         self.controller.send(&server.id,json!({"op":"_desktop_policy","sid":c.sid,"auto":server.local_control && c.mode=="auto"}));
         let actor_str = self.settings.actor();
-        let mut request = json!({"op":"prompt","backend":backend,"sid":c.sid,"cwd":c.cwd,"text":text,"images":images,"files":files,"model":c.model,"mode":c.mode,"effort":c.effort,"agent_role":c.agent_role,"custom_prompt":c.custom_prompt,"cluster_context":c.cluster_context,"actor":actor_str,"desktop_enabled":!worker && ((server.local_control && server.local_workspace.is_some()) || server.tests!="off"),"desktop_context":{"os":std::env::consts::OS,"workspace":server.local_workspace,"downloads":dirs::download_dir(),"auto":c.mode=="auto","local":server.local_control && server.local_workspace.is_some(),"tests":server.tests}});
+        let mut request = json!({"op":"prompt","backend":backend,"sid":c.sid,"cwd":c.cwd,"text":text,"images":images,"files":files,"model":c.model,"mode":c.mode,"effort":if backend == "agy" { "default" } else { &c.effort },"agent_role":c.agent_role,"custom_prompt":c.custom_prompt,"cluster_context":c.cluster_context,"actor":actor_str,"desktop_enabled":!worker && ((server.local_control && server.local_workspace.is_some()) || server.tests!="off"),"desktop_context":{"os":std::env::consts::OS,"workspace":server.local_workspace,"downloads":dirs::download_dir(),"auto":c.mode=="auto","local":server.local_control && server.local_workspace.is_some(),"tests":server.tests}});
         if server.api.enabled {
             request["backend"] = json!("api");
             request["model"] = api_request["model"].take();
@@ -1927,7 +2121,7 @@ impl RelayApp {
         let sent_backend = request["backend"].as_str().unwrap_or(&backend).to_owned();
         let sent_model = request["model"].as_str().unwrap_or(&c.model).to_owned();
         let sent_mode = c.mode.clone();
-        let sent_effort = c.effort.clone();
+        let sent_effort = if backend == "agy" { String::new() } else { c.effort.clone() };
         let sent_agent_name = c.cluster_context["name"].as_str().unwrap_or("").to_owned();
         if self.demo {
             c.error = "Это предпросмотр интерфейса. Добавь свой сервер для работы.".into();
@@ -2194,26 +2388,12 @@ impl RelayApp {
             )
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing.y = 7.;
-                // Perfectly vertically centered 30px brand, persistent little Claude buddy & quick-tools row
-                let any_busy = self.chats.values().any(|c| c.busy)
-                    || self.remote.values().any(|r| !r.running.is_empty());
                 ui.allocate_ui_with_layout(
                     Vec2::new(ui.available_width(), 30.),
                     Layout::left_to_right(Align::Center),
                     |ui| {
                         ui.spacing_mut().item_spacing.x = 6.;
-                        let (mascot_r, mascot_resp) =
-                            ui.allocate_exact_size(Vec2::splat(24.), egui::Sense::hover());
-                        design::engine_icon(ui, mascot_r, "claude");
-                        mascot_resp.on_hover_text(if any_busy {
-                            "Клодёнок сейчас трудится над задачей!"
-                        } else {
-                            "Клодёнок на связи и готов помочь"
-                        });
                         ui.label(RichText::new("Relay").size(18.5).color(p.text).strong());
-                        let (star_r, _) =
-                            ui.allocate_exact_size(Vec2::splat(18.), egui::Sense::hover());
-                        design::engine_icon(ui, star_r, "agy");
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             ui.spacing_mut().item_spacing.x = 5.;
                             if design::button(
@@ -2422,9 +2602,7 @@ impl RelayApp {
                                                     }
                                                 }
                                                 _ => {
-                                                    limits::show(ui, &remote.usage, p, connected);
                                                     if !cli_installed {
-                                                        ui.add_space(4.);
                                                         if ui.add(egui::Label::new(RichText::new("Claude Code не установлен · установить").size(11.5).color(accent())).sense(egui::Sense::click())).clicked() {
                                                             self.install_server_agent(&server.id, "claude", "install");
                                                         }
@@ -2445,6 +2623,27 @@ impl RelayApp {
                                                 }
                                             }
                                         }
+                                    }
+                                    if let Some(remote) = self.remote.get(&server.id) {
+                                            // Постоянный блок лимитов: все установленные агенты сервера, обновляется раз в 5 минут.
+                                            let agents: Vec<(&str, &str)> = [("claude", "Claude"), ("codex", "Codex"), ("agy", "Antigravity")]
+                                                .into_iter()
+                                                .filter(|(id, _)| self.backend_installed(&server.id, id))
+                                                .collect();
+                                            if !agents.is_empty() {
+                                                ui.add_space(8.);
+                                                label(ui, "Лимиты", 11., p.muted);
+                                                for (id, name) in agents {
+                                                    ui.add_space(4.);
+                                                    label(ui, name, 11.5, if id == active_backend { accent() } else { p.text });
+                                                    let usage = remote
+                                                        .usage_by
+                                                        .get(id)
+                                                        .cloned()
+                                                        .unwrap_or_else(|| if id == "claude" { remote.usage.clone() } else { Usage::default() });
+                                                    limits::show(ui, &usage, p, connected, name);
+                                                }
+                                            }
                                     }
                                     ui.add_space(8.);
                                     let active_browser =
@@ -2704,7 +2903,7 @@ impl RelayApp {
                         ui.spacing_mut().item_spacing.y = 1.;
                         let mut shown = 0;
                         if !pinned.is_empty() {
-                            section_heading(ui, Some("📌"), "Закреплённые", pinned.len(), None, p);
+                            section_heading(ui, Some("📌"), "Закреплённые", pinned.len(), None, p, None);
                             for session in &pinned {
                                 if let Some(action) = self.session_row(ui, ctx, &server.id, session, &folders, connected, p) {
                                     actions.push(((*session).clone(), action));
@@ -2721,7 +2920,8 @@ impl RelayApp {
                                 continue;
                             }
                             let collapsed = self.settings.collapsed_folders.contains(&folder.id) && query.is_empty();
-                            let header = section_heading(ui, Some(if collapsed { "📁" } else { "📂" }), &folder.name, inside.len(), Some(collapsed), p);
+                            let texture = project_icon::folder_texture(ctx, &folder.icon);
+                            let header = section_heading(ui, Some(if collapsed { "📁" } else { "📂" }), &folder.name, inside.len(), Some(collapsed), p, texture.as_ref());
                             if header.clicked() {
                                 if collapsed {
                                     self.settings.collapsed_folders.retain(|f| f != &folder.id);
@@ -2741,6 +2941,10 @@ impl RelayApp {
                                 });
                             }
                             header.context_menu(|ui| {
+                                if ui.button("Значок проекта…").clicked() {
+                                    self.icon_dialog = Some(project_icon::IconDialog::new(server.id.clone(), folder));
+                                    ui.close_menu();
+                                }
                                 if ui.button("Переименовать папку…").clicked() {
                                     self.folder_dialog = Some(session_actions::FolderDialog {
                                         server: server.id.clone(),
@@ -2781,7 +2985,7 @@ impl RelayApp {
                         for session in &loose {
                             let heading = day_group(session.modified);
                             if heading != group {
-                                section_heading(ui, None, heading, 0, None, p);
+                                section_heading(ui, None, heading, 0, None, p, None);
                                 group = heading;
                             }
                             if let Some(action) = self.session_row(ui, ctx, &server.id, session, &folders, connected, p) {
@@ -2849,7 +3053,8 @@ impl RelayApp {
         let title = self.cluster_label(server, &session.id).unwrap_or_else(|| session.title.clone());
         if let Some((sid, text)) = self.renaming.clone().filter(|(sid, _)| *sid == session.id) {
             let mut text = text;
-            match folder_name_field(ui, &mut text, "Название сессии · Enter, пусто — авто", p) {
+            let hint = if session.is_locked_gate() { "Метка на этом устройстве · Enter" } else { "Название сессии · Enter" };
+            match folder_name_field(ui, &mut text, hint, p) {
                 Some(true) => {
                     action = Some(RowAction::Rename(text.trim().to_owned()));
                     self.renaming = None;
@@ -3028,7 +3233,33 @@ impl RelayApp {
             }
             RowAction::StartRename => self.renaming = Some((session.id.clone(), session.title.clone())),
             RowAction::Rename(title) => {
-                self.controller.send(server, json!({"op":"session_meta","sid":session.id,"title":title,"actor":actor}));
+                if session.is_locked_gate() {
+                    let k = key(server, &session.id);
+                    if title.is_empty() {
+                        self.settings.locked_session_names.remove(&k);
+                    } else {
+                        self.settings.locked_session_names.insert(k.clone(), model::shorten(&title, 120));
+                    }
+                    let title = self.settings.label_locked_session(&k, &session.id, session.modified);
+                    if let Some(row) = self.remote.get_mut(server).and_then(|r| r.sessions.iter_mut().find(|s| s.id == session.id)) {
+                        row.title.clone_from(&title);
+                    }
+                    if let Some(chat) = self.chats.get_mut(&k) {
+                        chat.title = title;
+                    }
+                    self.save();
+                } else {
+                    if session.locked {
+                        let k = key(server, &session.id);
+                        if title.is_empty() {
+                            self.settings.locked_session_names.remove(&k);
+                        } else {
+                            self.settings.locked_session_names.insert(k, model::shorten(&title, 120));
+                        }
+                        self.save();
+                    }
+                    self.controller.send(server, json!({"op":"session_meta","sid":session.id,"title":title,"actor":actor}));
+                }
             }
             RowAction::MoveToFolder => {
                 self.folder_dialog = Some(session_actions::FolderDialog {
@@ -4006,6 +4237,53 @@ impl RelayApp {
             .backend_installing(&server.id, &backend)
             .map(str::to_owned);
         let models = self.models_for_backend(&server, &backend);
+        let (is_worker_session, active_orchestra) = {
+            let sid = self.chats.get(k).map(|c| c.sid.as_str()).unwrap_or("");
+            let is_w = self.is_worker_chat(&server.id, sid);
+            let orch = if !is_w {
+                self.cluster_store
+                    .runs
+                    .iter()
+                    .find(|r| !r.detached && r.config.leader.server == server.id && r.leader_sid == sid)
+                    .map(|r| {
+                        let w_count = r.config.workers.iter().filter(|w| w.enabled).count();
+                        let w_active = r.tasks.iter().filter(|t| t.state.active()).count();
+                        let (eff_b, eff_m, _) = cluster_runtime::slot_resolved_summary(
+                            &r.config.model_palette.default_worker,
+                            &backend,
+                            Some(&server),
+                        );
+                        let b_short = crate::model::backend_short_label(&eff_b);
+                        let m_disp = if eff_m == "default" {
+                            "авто движка".into()
+                        } else {
+                            model_label(&self.models_for_backend(&server, &eff_b), &eff_m)
+                        };
+                        let role_mods = [
+                            ("кодер", r.config.model_palette.coder.is_some()),
+                            ("ревью", r.config.model_palette.reviewer.is_some()),
+                            ("поиск", r.config.model_palette.researcher.is_some()),
+                            ("быстрый", r.config.model_palette.fast.is_some()),
+                        ]
+                        .into_iter()
+                        .filter(|(_, on)| *on)
+                        .map(|(n, _)| n)
+                        .collect::<Vec<_>>();
+                        let summary = if role_mods.is_empty() {
+                            format!("{b_short} · {m_disp}")
+                        } else {
+                            format!("{b_short} · {m_disp} (+{})", role_mods.join(", "))
+                        };
+                        (r.id.clone(), w_count, w_active, summary)
+                    })
+            } else {
+                None
+            };
+            (is_w, orch)
+        };
+        let mut open_orchestra_dlg = false;
+        let mut open_cluster_view: Option<String> = None;
+        let mut disable_orchestra = false;
         self.game_test_cards(ui, &server.id, p);
         let (mut commands, live) = self
             .remote
@@ -4178,6 +4456,39 @@ impl RelayApp {
             }
             ui.add_space(6.);
         }
+        if chat.turn_summary.backend == backend
+            && (chat.turn_summary.context.is_some() || chat.turn_summary.diff.is_some())
+        {
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.;
+                if let Some((added, removed)) = chat.turn_summary.diff {
+                    label(ui, format!("+{added}"), 11.5, GREEN);
+                    label(ui, format!("−{removed}"), 11.5, design::RED);
+                }
+                if let Some((used, limit)) = chat.turn_summary.context {
+                    let ratio = (used as f32 / limit as f32).clamp(0., 1.);
+                    let (ring, _) = ui.allocate_exact_size(Vec2::splat(13.), egui::Sense::hover());
+                    ui.painter().circle_stroke(ring.center(), 4.5, Stroke::new(1.4, p.line));
+                    if ratio > 0. {
+                        let points = (0..=24).map(|i| {
+                            let angle = -std::f32::consts::FRAC_PI_2 + std::f32::consts::TAU * ratio * i as f32 / 24.;
+                            ring.center() + Vec2::angled(angle) * 4.5
+                        }).collect();
+                        ui.painter().add(egui::Shape::line(points, Stroke::new(1.4, accent())));
+                    }
+                    let short = |n: u64| match n {
+                        0..=999 => n.to_string(),
+                        1_000..=999_999 => format!("{:.1}k", n as f64 / 1_000.),
+                        _ => format!("{:.2}M", n as f64 / 1_000_000.),
+                    };
+                    label(ui, format!("{}/{}", short(used), short(limit)), 11.5, p.muted)
+                        .on_hover_text(format!("Токены окна контекста: {used} из {limit}"));
+                }
+            });
+        }
+        if backend != "api" && !model::explicit_model(&chat.model) {
+            chat.model = model::selected_model(&chat.model, &models, &backend);
+        }
         let previous = (chat.model.clone(), chat.mode.clone(), chat.effort.clone());
         if active_cli_missing || active_cli_installing.is_some() {
             egui::Frame::new()
@@ -4253,6 +4564,47 @@ impl RelayApp {
             ui.add_space(6.);
         }
         let focused = ui.memory(|m| m.has_focus(egui::Id::new("prompt-field")));
+        if let Some((ref rid, w_count, w_active, ref w_summary)) = active_orchestra {
+            egui::Frame::new()
+                .fill(design::mix(p.side, accent(), 0.08))
+                .stroke(Stroke::new(1.0_f32, accent().gamma_multiply(0.35)))
+                .corner_radius(10.)
+                .inner_margin(egui::Margin::symmetric(10, 6))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal_wrapped(|ui| {
+                        let (orb, _) = ui.allocate_exact_size(Vec2::splat(16.), egui::Sense::hover());
+                        design::orbital_core(ui, orb, accent(), w_active > 0 || chat.busy);
+                        label(ui, "Оркестр", 12., accent());
+                        label(
+                            ui,
+                            if w_count == 0 {
+                                format!("Модели агентов: {w_summary} · сам создаст нужных при задаче")
+                            } else if w_active > 0 {
+                                format!("{w_summary} · агентов: {w_count} · в работе: {w_active}")
+                            } else {
+                                format!("{w_summary} · агентов: {w_count}")
+                            },
+                            11.5,
+                            p.muted,
+                        );
+                        if ui.small_button("Модели агентов").clicked() {
+                            open_orchestra_dlg = true;
+                        }
+                        if ui.small_button("Кластер ↗").clicked() {
+                            open_cluster_view = Some(rid.clone());
+                        }
+                        if ui
+                            .small_button("Выкл")
+                            .on_hover_text("Отключить оркестрацию в этом чате и продолжить обычной сессией")
+                            .clicked()
+                        {
+                            disable_orchestra = true;
+                        }
+                    });
+                });
+            ui.add_space(6.);
+        }
         let focus = ui
             .ctx()
             .animate_bool_with_time(egui::Id::new("composer-focus"), focused, 0.18);
@@ -4337,16 +4689,23 @@ impl RelayApp {
                     if !compact {
                         api_settings::backend_picker(ui, &mut backend, &mut configure_api, &mut login_provider, &mut open_agents, installed_flags, chat.busy, p);
                         let is_api = backend == "api";
-                        composer_selectors(ui, chat, &mut tests, &models, if is_api { Some(&mut api_model) } else { None }, p);
+                        composer_selectors(
+                            ui,
+                            chat,
+                            &mut tests,
+                            &models,
+                            &backend,
+                            if is_api { Some(&mut api_model) } else { None },
+                            (!is_worker_session).then_some((active_orchestra.is_some(), &mut open_orchestra_dlg)),
+                            p,
+                        );
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 8.;
-                        let ready = (!chat.draft.trim().is_empty() || !chat.images.is_empty())
-                            && !chat.loading;
-                        ui.add_enabled_ui(ready || !connected, |ui| {
+                        ui.add_enabled_ui(true, |ui| {
                             if design::action_button(
                                 ui,
-                                if connected { Icon::Send } else { Icon::Arrow },
+                                Icon::Send,
                                 p,
                                 true,
                             )
@@ -4357,7 +4716,7 @@ impl RelayApp {
                             } else if connected {
                                 "Отправить"
                             } else {
-                                "Подключиться"
+                                "Нет связи · сообщение уйдёт после переподключения"
                             })
                             .clicked()
                             {
@@ -4378,7 +4737,7 @@ impl RelayApp {
                             Vec2::splat(26.),
                             egui::Sense::click(),
                         );
-                        design::engine_icon(ui, pet_rect, &backend);
+                        design::engine_icon(ui, pet_rect, "pet");
                         if pet_resp
                             .on_hover_cursor(egui::CursorIcon::PointingHand)
                             .on_hover_text("Меню команд (/usage, /cost, /status, /help)")
@@ -4396,7 +4755,16 @@ impl RelayApp {
                     ui.horizontal_wrapped(|ui| {
                         api_settings::backend_picker(ui, &mut backend, &mut configure_api, &mut login_provider, &mut open_agents, installed_flags, chat.busy, p);
                         let is_api = backend == "api";
-                        composer_selectors(ui, chat, &mut tests, &models, if is_api { Some(&mut api_model) } else { None }, p);
+                        composer_selectors(
+                            ui,
+                            chat,
+                            &mut tests,
+                            &models,
+                            &backend,
+                            if is_api { Some(&mut api_model) } else { None },
+                            (!is_worker_session).then_some((active_orchestra.is_some(), &mut open_orchestra_dlg)),
+                            p,
+                        );
                     });
                 }
             });
@@ -4418,7 +4786,7 @@ impl RelayApp {
                 .cluster_store
                 .runs
                 .iter_mut()
-                .find(|r| r.config.leader.server == server.id && r.leader_sid == chat.sid)
+                .find(|r| !r.detached && r.config.leader.server == server.id && r.leader_sid == chat.sid)
             {
                 r.config.leader.model = current.0.clone();
                 r.config.mode = current.1.clone();
@@ -4450,9 +4818,27 @@ impl RelayApp {
                 profile.api.model = api_model;
             }
             if backend != previous_backend {
+                let sid_copy = self.chats.get(k).map(|c| c.sid.clone()).unwrap_or_default();
+                let is_dyn_leader = self
+                    .cluster_store
+                    .runs
+                    .iter()
+                    .any(|r| !r.detached && r.config.dynamic_workers && r.config.leader.server == server.id && r.leader_sid == sid_copy);
                 if let Some(c) = self.chats.get_mut(k) {
-                    if !c.cluster_context.is_object() {
+                    if !c.cluster_context.is_object() || is_dyn_leader {
                         c.model = server.model_for(&backend).to_owned();
+                    }
+                }
+                if is_dyn_leader {
+                    if let Some(r) = self
+                        .cluster_store
+                        .runs
+                        .iter_mut()
+                        .find(|r| !r.detached && r.config.leader.server == server.id && r.leader_sid == sid_copy)
+                    {
+                        r.config.leader.backend = backend.clone();
+                        r.config.leader.model = server.model_for(&backend).to_owned();
+                        self.cluster_store.dirty = true;
                     }
                 }
                 if matches!(backend.as_str(), "codex" | "agy") {
@@ -4461,6 +4847,19 @@ impl RelayApp {
             }
             if backend == "api" && server.api.base_url.is_empty() { configure_api = true; }
             self.save();
+        }
+        if disable_orchestra {
+            let sid = self.chats.get(k).map(|c| c.sid.clone()).unwrap_or_default();
+            self.disable_chat_orchestra(&server.id, &sid);
+        }
+        if open_orchestra_dlg {
+            self.open_chat_orchestra_dialog(&server, k);
+        }
+        if let Some(rid) = open_cluster_view {
+            self.cluster_store.selected = Some(rid);
+            self.cluster_open = true;
+            self.board_open = false;
+            self.settings_open = false;
         }
         if install_active_cli {
             self.install_server_agent(&server.id, &backend, "install");
@@ -5016,6 +5415,7 @@ impl RelayApp {
             || self.trust.is_some()
             || self.folder_open
             || self.folder_dialog.is_some()
+            || self.icon_dialog.is_some()
             || self.close_confirm
             || self.delete_chat.is_some()
             || self.lock_dialog.is_some()
@@ -5030,6 +5430,7 @@ impl RelayApp {
         self.deletion_dialog(ctx, p, modal_t);
         self.lock_dialog(ctx, p, modal_t);
         self.folder_modal(ctx, p, modal_t);
+        self.project_icon_modal(ctx, p);
         self.agents_dialog(ctx, p, modal_t);
         self.radar_dialog(ctx, p, modal_t);
         if let Some(mut editor) = self.editor.take() {
@@ -5204,6 +5605,7 @@ impl RelayApp {
             }
             if delete {
                 self.controller.disconnect(&editor.server.id);
+                self.reconnect.remove(&editor.server.id);
                 self.settings.servers.retain(|s| s.id != editor.server.id);
                 storage::forget(&editor.server.id);
                 let _ = storage::remember_api_key(&editor.server.id, "");
@@ -5564,6 +5966,8 @@ impl RelayApp {
                     "updated_at":chrono::Local::now().timestamp()
                 })).unwrap_or_default(),
                 usage_requested: None,
+                usage_by: HashMap::new(),
+                usage_polled: HashMap::new(),
                 sessions_requested: None,
                 sessions_loaded: true,
                 sessions_retries: 0,
@@ -5593,8 +5997,8 @@ impl RelayApp {
                     {"name":"code-review","description":"Проверить изменения","hint":""}
                 ])).unwrap_or_default(),
                 folders: vec![
-                    crate::model::SessionFolder { id: "f-ships".into(), name: "Корабли".into() },
-                    crate::model::SessionFolder { id: "f-site".into(), name: "Сайт и лаунчер".into() },
+                    crate::model::SessionFolder { id: "f-ships".into(), name: "Корабли".into(), icon: String::new() },
+                    crate::model::SessionFolder { id: "f-site".into(), name: "Сайт и лаунчер".into(), icon: String::new() },
                 ],
                 sessions: vec![
                     Session {
@@ -5708,8 +6112,8 @@ fn resolve_model(models: &[crate::model::ModelInfo], typed: &str) -> Option<Stri
 }
 
 fn model_label(models: &[crate::model::ModelInfo], value: &str) -> String {
-    if value == "default" {
-        return "Модель: авто".into();
+    if !model::explicit_model(value) {
+        return "Выбрать модель".into();
     }
     let mut name = models
         .iter()
@@ -5732,10 +6136,21 @@ fn model_label(models: &[crate::model::ModelInfo], value: &str) -> String {
     model::shorten(&name, 28)
 }
 
-fn composer_selectors(ui: &mut egui::Ui, chat: &mut Chat, tests: &mut String, models: &[crate::model::ModelInfo], api_model: Option<&mut String>, p: Palette) {
+fn composer_selectors(
+    ui: &mut egui::Ui,
+    chat: &mut Chat,
+    tests: &mut String,
+    models: &[crate::model::ModelInfo],
+    backend: &str,
+    api_model: Option<&mut String>,
+    orchestra: Option<(bool, &mut bool)>,
+    p: Palette,
+) {
     let previous_style=ui.style().clone();
+        chat.effort = model::selected_effort(&chat.effort).to_owned();
         let is_api = api_model.is_some();
         let selected_model = api_model.unwrap_or(&mut chat.model);
+        let mut orchestra = orchestra;
         ui.spacing_mut().button_padding = Vec2::new(8., 5.);
         ui.spacing_mut().interact_size.y = 28.;
         ui.spacing_mut().icon_width = 10.;
@@ -5761,15 +6176,30 @@ fn composer_selectors(ui: &mut egui::Ui, chat: &mut Chat, tests: &mut String, mo
             .wrap_mode(egui::TextWrapMode::Truncate)
             .icon(design::combo_icon)
             .show_ui(ui, |ui| {
+                if let Some((orch_on, open_orch)) = orchestra.as_mut() {
+                    let orch_lbl = if *orch_on {
+                        "✓ Оркестр активен · модели агентов…"
+                    } else {
+                        "⚡ Включить оркестр (модели агентов)…"
+                    };
+                    if ui
+                        .button(RichText::new(orch_lbl).size(12.5).color(accent()))
+                        .on_hover_text("Оркестратор сам создаст нужных агентов под этот чат; задай только их модели")
+                        .clicked()
+                    {
+                        **open_orch = true;
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                }
                 if models.is_empty() && !is_api {
-                    for (id, name) in [("default", "Модель сервера"), ("fable", "Fable"), ("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku")] {
+                    for (id, name) in [("sonnet", "Sonnet"), ("opus", "Opus"), ("haiku", "Haiku")] {
                         ui.selectable_value(selected_model, id.into(), name);
                     }
                 }
                 if models.is_empty() && is_api { ui.add(egui::TextEdit::singleline(selected_model).hint_text("Идентификатор модели API")); }
-                for m in models {
-                    let name = if m.value == "default" { format!("Авто · {}", m.description) } else { m.display_name.clone() };
-                    ui.selectable_value(selected_model, m.value.clone(), name)
+                for m in models.iter().filter(|m| model::explicit_model(&m.value)) {
+                    ui.selectable_value(selected_model, m.value.clone(), model_label(models, &m.value))
                         .on_hover_text(&m.description);
                 }
                 if !is_api {
@@ -5780,6 +6210,32 @@ fn composer_selectors(ui: &mut egui::Ui, chat: &mut Chat, tests: &mut String, mo
                     });
                 }
             });
+        if let Some((orch_on, open_orch)) = orchestra {
+            let orch_label = if orch_on { "Оркестр ✓" } else { "Оркестр" };
+            design::wrap_control(ui, orch_label);
+            let btn = egui::Button::new(
+                RichText::new(orch_label)
+                    .size(12.5)
+                    .color(if orch_on { accent() } else { p.muted }),
+            )
+            .fill(if orch_on { accent().gamma_multiply(0.14) } else { p.side })
+            .stroke(Stroke::new(
+                1.0_f32,
+                if orch_on { accent().gamma_multiply(0.55) } else { p.line },
+            ))
+            .corner_radius(egui::CornerRadius::same(8));
+            if ui
+                .add(btn)
+                .on_hover_text(if orch_on {
+                    "Настроить модели агентов оркестра в этом чате"
+                } else {
+                    "Включить оркестрацию прямо в этом чате и выбрать модели агентов"
+                })
+                .clicked()
+            {
+                *open_orch = true;
+            }
+        }
         design::wrap_control(ui,match chat.mode.as_str(){"auto"=>"Авто","acceptEdits"=>"Правки файлов","plan"=>"План",_=>"С подтверждением"});
         egui::ComboBox::from_id_salt("mode-selector")
             .selected_text(
@@ -5805,38 +6261,35 @@ fn composer_selectors(ui: &mut egui::Ui, chat: &mut Chat, tests: &mut String, mo
                     ui.selectable_value(&mut chat.mode, id.into(), name);
                 }
             });
-        design::wrap_control(ui,&format!("Глубина: {}",if chat.effort=="default"{"авто"}else{&chat.effort}));
-        egui::ComboBox::from_id_salt("effort-selector")
-            .selected_text(
-                RichText::new(format!(
-                    "Глубина: {}",
-                    if chat.effort == "default" {
-                        "авто"
-                    } else {
-                        chat.effort.as_str()
+        if backend != "agy" {
+            design::wrap_control(ui,&format!("Глубина: {}", chat.effort));
+            egui::ComboBox::from_id_salt("effort-selector")
+                .selected_text(
+                    RichText::new(format!(
+                        "Глубина: {}",
+                        chat.effort
+                    ))
+                    .size(12.5)
+                    .color(p.muted),
+                )
+                .width(0.)
+                .wrap_mode(egui::TextWrapMode::Truncate)
+                .icon(design::combo_icon)
+                .show_ui(ui, |ui| {
+                    label(ui, "Глубина размышлений", 12., p.muted);
+                    for (id, name) in [
+                        ("low", "Низкая · Low"),
+                        ("medium", "Средняя · Medium"),
+                        ("high", "Высокая · High"),
+                        ("xhigh", "Очень высокая · xHigh"),
+                        ("max", "Максимальная · Max"),
+                    ] {
+                        ui.selectable_value(&mut chat.effort, id.into(), name);
                     }
-                ))
-                .size(12.5)
-                .color(p.muted),
-            )
-            .width(0.)
-            .wrap_mode(egui::TextWrapMode::Truncate)
-            .icon(design::combo_icon)
-            .show_ui(ui, |ui| {
-                label(ui, "Глубина размышлений", 12., p.muted);
-                for (id, name) in [
-                    ("default", "Автоматически"),
-                    ("low", "Низкая · Low"),
-                    ("medium", "Средняя · Medium"),
-                    ("high", "Высокая · High"),
-                    ("xhigh", "Очень высокая · xHigh"),
-                    ("max", "Максимальная · Max"),
-                ] {
-                    ui.selectable_value(&mut chat.effort, id.into(), name);
-                }
-            })
-            .response
-            .on_hover_text("Применяется к следующему сообщению");
+                })
+                .response
+                .on_hover_text("Применяется к следующему сообщению");
+        }
         if is_api {ui.set_style(previous_style);return;}
         design::wrap_control(ui,&format!("Тесты: {}",match tests.as_str(){"auto"=>"авто","off"=>"выкл",_=>"спрашивать"}));
         egui::ComboBox::from_id_salt("tests-selector")
@@ -6041,6 +6494,9 @@ fn session_menu(
 ) -> Option<RowAction> {
     let mut action = None;
     let locked_gate = session.is_locked_gate();
+    if locked_gate && ui.button("Имя в списке…").on_hover_text("Метка на этом устройстве").clicked() {
+        action = Some(RowAction::StartRename);
+    }
     ui.add_enabled_ui(connected, |ui| {
         if locked_gate {
             if ui.button("Разблокировать сессию…").clicked() {
@@ -6064,7 +6520,7 @@ fn session_menu(
             if ui.button(if pinned { "Открепить" } else { "Закрепить сверху" }).clicked() {
                 action = Some(RowAction::Pin(!pinned));
             }
-            if ui.button("Переименовать").on_hover_text("Название увидят все, кто подключается к серверу").clicked() {
+            if ui.button("Переименовать").on_hover_text("Название сессии на сервере").clicked() {
                 action = Some(RowAction::StartRename);
             }
             if ui.button("Скопировать команду для терминала")
@@ -6098,7 +6554,7 @@ fn session_menu(
 }
 
 /// A sidebar section title; folders get a chevron and fold on click.
-fn section_heading(ui: &mut egui::Ui, icon: Option<&str>, text: &str, count: usize, collapsed: Option<bool>, p: Palette) -> egui::Response {
+fn section_heading(ui: &mut egui::Ui, icon: Option<&str>, text: &str, count: usize, collapsed: Option<bool>, p: Palette, texture: Option<&egui::TextureHandle>) -> egui::Response {
     ui.add_space(10.);
     let (rect, response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 24.), egui::Sense::click());
     let painter = ui.painter();
@@ -6115,7 +6571,11 @@ fn section_heading(ui: &mut egui::Ui, icon: Option<&str>, text: &str, count: usi
         painter.add(egui::Shape::line(points, Stroke::new(1.4_f32, p.muted)));
         x += 14.;
     }
-    if let Some(icon) = icon {
+    if let Some(texture) = texture {
+        let thumb = egui::Rect::from_center_size(egui::pos2(x + 9., rect.center().y), Vec2::splat(18.));
+        painter.image(texture.id(), thumb, egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1., 1.)), Color32::WHITE);
+        x += 25.;
+    } else if let Some(icon) = icon {
         painter.text(
             egui::pos2(x + 6., rect.center().y),
             egui::Align2::CENTER_CENTER,
@@ -6481,6 +6941,7 @@ impl eframe::App for RelayApp {
         self.poll();
         self.persist_pending(false);
         self.cluster_tick();
+        self.auto_reconnect(ctx);
         self.drain_queues();
         if !self.demo {
             if let Some(server) = self.settings.selected.as_ref() {
@@ -6516,6 +6977,29 @@ impl eframe::App for RelayApp {
                     ctx.request_repaint_after(Duration::from_secs(20));
                 }
             }
+        }
+        if !self.demo {
+            // Лимиты всех установленных агентов на каждом подключённом сервере: раз в 5 минут, как ручной /usage.
+            let mut due = Vec::new();
+            for (server, remote) in &self.remote {
+                if !remote.connected {
+                    continue;
+                }
+                for agent in ["claude", "codex", "agy"] {
+                    if remote.usage_polled.get(agent).is_none_or(|at| at.elapsed() >= Duration::from_secs(300))
+                        && self.backend_installed(server, agent)
+                    {
+                        due.push((server.clone(), agent));
+                    }
+                }
+            }
+            for (server, agent) in due {
+                if let Some(remote) = self.remote.get_mut(&server) {
+                    remote.usage_polled.insert(agent.to_owned(), Instant::now());
+                }
+                self.controller.send(&server, json!({"op":"usage","backend":agent}));
+            }
+            ctx.request_repaint_after(Duration::from_secs(60));
         }
         self.frames += 1;
         if !self.demo {
@@ -6591,6 +7075,7 @@ impl eframe::App for RelayApp {
         self.dialogs(ctx);
         self.settings_panel(ctx);
         self.cluster_settings(ctx);
+        self.chat_orchestra_window(ctx);
         if self.chats.values().any(|c| c.busy) || self.remote.values().any(|r| r.connecting) {
             ctx.request_repaint_after(Duration::from_millis(16));
         }
@@ -6684,14 +7169,15 @@ mod tests {
                 egui::CentralPanel::default().show(ctx,|ui|{
                     ui.horizontal_wrapped(|ui|{
                         api_settings::source_picker(ui,&mut api,&mut configure,false,design::palette(false));
-                        composer_selectors(ui,&mut chat,&mut tests,&[],None,design::palette(false));
+                        let mut open_orch = false;
+                        composer_selectors(ui,&mut chat,&mut tests,&[],"claude",None,Some((false, &mut open_orch)),design::palette(false));
                     });
                 });
             });
             let mut labels=0;
             for shape in output.shapes {
                 if let egui::Shape::Text(text)=shape.shape {
-                    if ["Claude Code","Модель: авто","Авто","Глубина: авто","Тесты: спрашивать"].contains(&text.galley.job.text.as_str()) {
+                    if ["Claude Code","Выбрать модель","Авто","Глубина: medium","Тесты: спрашивать"].contains(&text.galley.job.text.as_str()) {
                         labels+=1;
                         assert!(screen.expand(0.5).contains_rect(egui::Rect::from_min_size(text.pos,text.galley.size())),"{} outside {width}px toolbar",text.galley.job.text);
                     }

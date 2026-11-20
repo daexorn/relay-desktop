@@ -95,3 +95,31 @@ class BrowserTests(unittest.TestCase):
                 self.assertFalse(thread.is_alive());self.assertFalse(errors)
                 self.assertIn(('key','--clearmodifiers','ctrl+v'),self.calls)
             finally:os.close(writer);thread.join(4)
+
+    def test_webpage_copy_button_syncs_clipboard_without_echoing_pasted_secrets(self):
+        # While our paste xclip still owns CLIPBOARD, never echo it back to PC.
+        owner=mock.Mock();owner.poll.return_value=None
+        self.browser.clipboard=owner
+        self.browser.read_clipboard=mock.Mock(return_value='pasted-secret')
+        self.assertEqual(self.browser.sync_browser_clipboard(),'')
+        self.assertFalse(self.events)
+        # Once Chromium claims CLIPBOARD (e.g. page "Copy code" button), xclip exits (poll() != None).
+        owner.poll.return_value=0
+        self.browser.last_pasted_digest=browser.hashlib.sha256(b'pasted-secret').digest()
+        # Same pasted secret is still blocked; new code from webpage syncs once.
+        self.assertEqual(self.browser.sync_browser_clipboard(),'')
+        self.browser.read_clipboard=mock.Mock(return_value='AUTH-CODE-12345')
+        self.assertEqual(self.browser.sync_browser_clipboard(),'AUTH-CODE-12345')
+        self.assertEqual(self.events,[{'type':'auth_clipboard','id':'fixture','text':'AUTH-CODE-12345'}])
+        # Polling again with unchanged clipboard does not spam duplicate events.
+        self.assertEqual(self.browser.sync_browser_clipboard(),'')
+        self.assertEqual(len(self.events),1)
+
+    def test_explicit_copy_preserves_page_copied_code_when_nothing_is_selected(self):
+        self.browser.env={'DISPLAY':':99'}
+        self.browser.clipboard=None
+        self.browser.set_clipboard=mock.Mock()
+        self.browser.shortcut=mock.Mock()
+        # Before ctrl+c: page already put code in clipboard; after ctrl+c with no selection: empty.
+        self.browser.read_clipboard=mock.Mock(side_effect=['OAUTH-CODE-999','',''])
+        self.assertEqual(self.browser.selection(),'OAUTH-CODE-999')

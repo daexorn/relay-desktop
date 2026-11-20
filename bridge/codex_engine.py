@@ -146,6 +146,15 @@ def probe_rate_limits():
     return _probe_app_server(binary, "account/rateLimits/read", {}, timeout=6) if binary else {}
 
 
+def consume_reset_credit(credit_id):
+    binary = codex_binary()
+    if not binary:
+        return {}
+    operation = str(uuid.uuid5(uuid.NAMESPACE_URL, "relay:codex-limit-reset:" + credit_id))
+    return _probe_app_server(binary, "account/rateLimitResetCredit/consume",
+                             {"creditId": credit_id, "idempotencyKey": operation}, timeout=12)
+
+
 def _probe_app_server(binary, method, params, timeout):
     try:
         with subprocess.Popen(
@@ -240,9 +249,13 @@ def _valid_uuid(val):
 
 
 def _clean_title(text, mtime):
-    text = re.sub(r"<relay-files>.*?</relay-files>", "", str(text or ""), flags=re.S)
-    text = " ".join(text.split())[:100]
-    return text or ("Разговор Codex от " + time.strftime("%d.%m", time.localtime(mtime)))
+    text = str(text or "")
+    clean = globals().get("relay_title_text")
+    if clean is not None:
+        text = clean(text)
+    else:
+        text = " ".join(re.sub(r"<relay-files>.*?</relay-files>", "", text, flags=re.S).split())[:100]
+    return text or ("Codex · " + time.strftime("%d.%m %H:%M", time.localtime(mtime)))
 
 
 def native_sessions(excluded_ids=None):
@@ -272,7 +285,8 @@ def native_sessions(excluded_ids=None):
                     mtime = float(updated_at or created_at or time.time())
                     if mtime > 1e11:
                         mtime /= 1000.0
-                    raw_title = name or title or first_msg or preview or ""
+                    clean = globals().get("relay_title_text") or (lambda text: str(text or "").strip())
+                    raw_title = next((value for raw in (name, title, first_msg, preview) if (value := clean(str(raw or "")))), "")
                     resolved_cwd = str(Path(cwd).expanduser()) if cwd else str(Path.home())
                     results[low] = {
                         "id": low,
@@ -439,6 +453,24 @@ def _item_to_messages(item):
     return []
 
 
+
+HISTORY_KEEP_TOOLS = 1500
+HISTORY_FULL_RESULTS = 300
+
+
+def history_window(messages):
+    """Keep 100% of user/assistant dialogue; trim only ancient tool calls/results beyond HISTORY_KEEP_TOOLS."""
+    msgs = list(messages)
+    tool_indices = [i for i, m in enumerate(msgs) if isinstance(m, dict) and m.get("role") in ("tool", "tool_result")]
+    drop_tools = set(tool_indices[:-HISTORY_KEEP_TOOLS]) if len(tool_indices) > HISTORY_KEEP_TOOLS else set()
+    kept = [m for i, m in enumerate(msgs) if i not in drop_tools]
+    results = [i for i, m in enumerate(kept) if isinstance(m, dict) and m.get("role") == "tool_result"]
+    for i in results[:-HISTORY_FULL_RESULTS]:
+        text = str(kept[i].get("text") or "")
+        if len(text) > 1500:
+            kept[i] = {**kept[i], "text": text[:1500] + "\n…"}
+    return kept
+
 def native_history(sid):
     low = str(sid or "").lower()
     if not _valid_uuid(low):
@@ -464,7 +496,7 @@ def native_history(sid):
         except sqlite3.Error:
             pass
     if messages:
-        return messages[-600:]
+        return history_window(messages)
 
     sessions_dir = home / "sessions"
     if sessions_dir.is_dir():
@@ -472,8 +504,8 @@ def native_history(sid):
             try:
                 with rollout.open("rb") as f:
                     size = os.fstat(f.fileno()).st_size
-                    if size > 8 * 1024 * 1024:
-                        f.seek(size - 8 * 1024 * 1024)
+                    if size > 48 * 1024 * 1024:
+                        f.seek(size - 48 * 1024 * 1024)
                         f.readline()
                     for line in f:
                         try:
@@ -499,7 +531,7 @@ def native_history(sid):
             except OSError:
                 pass
             if messages:
-                return messages[-600:]
+                return history_window(messages)
     raise ValueError("Сессия не найдена. Обнови список разговоров.")
 
 
@@ -565,6 +597,7 @@ class CodexRun:
         self.rpc_seq = 0
         self.rpc_waiters = {}
         self.thread_id = None
+        self.initialized = False
         self.active_turn_id = None
         self.turn_done = threading.Event()
         self.turn_error = None
@@ -661,16 +694,12 @@ class CodexRun:
             pass
 
     def _build_environment(self):
-        prompt = (
-            "Relay supports downloadable server files in chat. When the user requests a built mod or other generated "
-            "artifact, include a Markdown download link [filename](absolute_server_file_path) for the real existing file. "
-            "Verify it exists before offering it. Relay chat renders LaTeX math: write formulas as $...$ inline and "
-            "$$...$$ on their own line."
-        )
+        # No Relay system prompt: only the user's own instructions and cluster coordination roles are passed.
+        prompt = ""
         if self.mode == "plan":
             prompt += " Mode is PLAN: inspect and propose concrete steps without modifying files or running destructive commands."
         if self.agent_role in AGENT_ROLES:
-            prompt += " " + AGENT_ROLES[self.agent_role]
+            prompt += (" " if prompt else "") + AGENT_ROLES[self.agent_role]
         servers = {}
         if self.cluster_context.get("role") == "leader" and getattr(self.owner, "cluster", None):
             cfg = self.owner.cluster.config(self.sid, self.cluster_context["run"])
@@ -692,7 +721,6 @@ class CodexRun:
                 "args": [str(self.owner.board_file), "mcp"],
                 "env": {"RELAY_BOARD_ACTOR": f"Codex · {actor}", "RELAY_BOARD_NAME": "sbrp"},
             }
-            prompt += " Shared task board tools are available in `relay_board`."
         if self.desktop_enabled and getattr(self.owner, "desktop", None):
             try:
                 ctx = json.loads(self.desktop_context or "{}")
@@ -705,10 +733,9 @@ class CodexRun:
                 raw_mcp = json.loads(self.owner.desktop.config(self.sid, tools)).get("mcpServers", {})
                 for name, spec in raw_mcp.items():
                     servers[name] = {"command": spec["command"], "args": spec.get("args", []), "env": spec.get("env", {})}
-                prompt += " Relay desktop tools operate on the user's computer. Local context: " + self.desktop_context
         if self.custom_prompt:
-            prompt += "\n\nUser's custom instructions:\n" + self.custom_prompt
-        return servers, prompt[:110000]
+            prompt += ("\n\n" if prompt.strip() else "") + self.custom_prompt
+        return servers, prompt.strip()[:110000]
 
     def _emit(self, data):
         self.owner.send({"type": "claude", "sid": self.sid, "data": data})
@@ -859,7 +886,30 @@ class CodexRun:
             self.owner.send({"type": "permission_cancelled", "sid": self.sid, "id": req_id})
 
     def _handle_notification(self, method, params):
-        if method == "item/agentMessage/delta":
+        if method == "turn/diff/updated" and params.get("threadId") == self.thread_id:
+            diff = params.get("diff")
+            if not isinstance(diff, str):
+                return
+            plus = minus = 0
+            in_hunk = False
+            for line in diff.splitlines():
+                if line.startswith("diff --git "):
+                    in_hunk = False
+                elif line.startswith("@@ "):
+                    in_hunk = True
+                elif in_hunk:
+                    plus += line.startswith("+")
+                    minus += line.startswith("-")
+            self.owner.send({"type": "turn_summary", "sid": self.sid, "backend": self.backend,
+                             "added": plus, "removed": minus})
+        elif method == "thread/tokenUsage/updated" and params.get("threadId") == self.thread_id:
+            usage = params.get("tokenUsage") or {}
+            last = usage.get("last") or {}
+            used, limit = last.get("totalTokens"), usage.get("modelContextWindow")
+            if type(used) is int and used >= 0 and type(limit) is int and limit > 0:
+                self.owner.send({"type": "turn_summary", "sid": self.sid, "backend": self.backend,
+                                 "used": used, "limit": limit})
+        elif method == "item/agentMessage/delta":
             item_id = str(params.get("itemId") or "msg")
             delta = str(params.get("delta") or "")
             if not delta:
@@ -935,6 +985,7 @@ class CodexRun:
             turn = params.get("turn") or {}
             if isinstance(turn.get("id"), str):
                 self.active_turn_id = turn["id"]
+                self.owner.send({"type": "turn_summary", "sid": self.sid, "backend": self.backend, "reset_diff": True})
         elif method == "turn/completed":
             turn = params.get("turn") or {}
             status = turn.get("status")
@@ -955,27 +1006,34 @@ class CodexRun:
     def _ensure_thread(self):
         if self.thread_id:
             return
-        self._rpc("initialize", {"clientInfo": {"name": "relay-desktop", "version": "0.15.0"}}, timeout=30)
-        self._send_json({"jsonrpc": "2.0", "method": "initialized"})
-        try:
-            res = self._rpc("model/list", {"limit": 100}, timeout=15)
-            models = [
-                {
-                    "value": m.get("model") or m.get("id"),
-                    "displayName": str(m.get("displayName") or m.get("model") or m.get("id")),
-                    "description": str(m.get("description") or "")[:240],
-                }
-                for m in (res.get("data") or [])
-                if isinstance(m, dict) and not m.get("hidden") and isinstance(m.get("model") or m.get("id"), str)
-            ]
-            if models:
-                self.owner.learn_backend_catalog("codex", models, codex_version(self.binary) or "")
-        except Exception:
-            pass
+        if not getattr(self, "initialized", False):
+            try:
+                self._rpc("initialize", {"clientInfo": {"name": "relay-desktop", "version": "0.20.0"}}, timeout=30)
+            except ValueError as error:
+                if "already initialized" not in str(error).lower():
+                    raise
+            else:
+                self._send_json({"jsonrpc": "2.0", "method": "initialized"})
+            self.initialized = True
+            try:
+                res = self._rpc("model/list", {"limit": 100}, timeout=15)
+                models = [
+                    {
+                        "value": m.get("model") or m.get("id"),
+                        "displayName": str(m.get("displayName") or m.get("model") or m.get("id")),
+                        "description": str(m.get("description") or "")[:240],
+                    }
+                    for m in (res.get("data") or [])
+                    if isinstance(m, dict) and not m.get("hidden") and isinstance(m.get("model") or m.get("id"), str)
+                ]
+                if models:
+                    self.owner.learn_backend_catalog("codex", models, codex_version(self.binary) or "")
+            except Exception:
+                pass
 
         approval, sandbox_mode, _ = _mode_policies(self.mode)
         cfg = {"mcp_servers": self.mcp_servers} if self.mcp_servers else None
-        chosen_model = None if not self.model or self.model == "default" else self.model
+        chosen_model = None if not self.model or self.model in ("default", "inherit") else self.model
 
         if self.linked_thread_id and has_native_session(self.linked_thread_id):
             params = {
@@ -983,13 +1041,23 @@ class CodexRun:
                 "cwd": self.cwd,
                 "approvalPolicy": approval,
                 "sandbox": sandbox_mode,
-                "developerInstructions": self.system_prompt,
             }
+            if self.system_prompt:
+                params["developerInstructions"] = self.system_prompt
             if chosen_model:
                 params["model"] = chosen_model
             if cfg:
                 params["config"] = cfg
-            res = self._rpc("thread/resume", params, timeout=30)
+            for delay in (0.15, 0.35, 0.7, 1.4, None):
+                try:
+                    res = self._rpc("thread/resume", params, timeout=30)
+                    break
+                except ValueError as error:
+                    if "already has an active writer" not in str(error).lower():
+                        raise
+                    if delay is None:
+                        raise ValueError("Этот тред Codex всё ещё открыт в другом процессе. Дождись его завершения и повтори отправку.") from error
+                    time.sleep(delay)
             self.thread_id = (res.get("thread") or {}).get("id") or self.linked_thread_id
             self._load_relay_context(resumed=True)
         else:
@@ -997,8 +1065,9 @@ class CodexRun:
                 "cwd": self.cwd,
                 "approvalPolicy": approval,
                 "sandbox": sandbox_mode,
-                "developerInstructions": self.system_prompt,
             }
+            if self.system_prompt:
+                params["developerInstructions"] = self.system_prompt
             if chosen_model:
                 params["model"] = chosen_model
             if cfg:
@@ -1079,7 +1148,7 @@ class CodexRun:
                     "approvalPolicy": approval,
                     "sandboxPolicy": sandbox_policy,
                 }
-                if self.model and self.model != "default":
+                if self.model and self.model not in ("default", "inherit"):
                     turn_params["model"] = self.model
                 mapped_effort = _map_effort(self.effort)
                 if mapped_effort:
@@ -1177,7 +1246,8 @@ class CodexRun:
             except subprocess.TimeoutExpired:
                 try:
                     os.killpg(self.process.pid, signal.SIGKILL)
-                except ProcessLookupError:
+                    self.process.wait(timeout=2)
+                except (ProcessLookupError, subprocess.TimeoutExpired):
                     pass
             except ProcessLookupError:
                 pass

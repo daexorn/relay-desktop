@@ -73,7 +73,7 @@ fn title(window: &Window) -> String {
 }
 
 /// Shows account limits without deriving a percentage from token counts.
-pub fn show(ui: &mut egui::Ui, usage: &Usage, palette: Palette, connected: bool) {
+pub fn show(ui: &mut egui::Ui, usage: &Usage, palette: Palette, connected: bool, agent: &str) {
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing.y = 4.;
         ui.spacing_mut().interact_size.y = 18.;
@@ -82,8 +82,13 @@ pub fn show(ui: &mut egui::Ui, usage: &Usage, palette: Palette, connected: bool)
             return;
         }
         if !usage.available {
+            let hint = if usage.message.trim().is_empty() {
+                format!("{agent} на этом сервере пока не передал данные о лимитах. Проценты появятся после их получения.")
+            } else {
+                usage.message.chars().filter(|value| !value.is_control()).take(200).collect()
+            };
             ui.label(RichText::new("Лимиты недоступны").size(12.).color(palette.muted))
-                .on_hover_text("Claude на этом сервере пока не передал данные о лимитах. Проценты появятся после их получения.");
+                .on_hover_text(hint);
             return;
         }
 
@@ -143,10 +148,10 @@ pub fn show(ui: &mut egui::Ui, usage: &Usage, palette: Palette, connected: bool)
                 }
                 response.on_hover_text(format!("Использовано {value:.0}% · осталось {:.0}%", 100. - value));
             } else {
-                response.on_hover_text("Claude не сообщил процент использования этого лимита.");
+                response.on_hover_text(format!("{agent} не сообщил процент использования этого лимита."));
             }
         }
-        if usage.updated_at.is_finite() && usage.updated_at > 0. && now - usage.updated_at > 300. {
+        if usage.updated_at.is_finite() && usage.updated_at > 0. && now - usage.updated_at > 660. {
             ui.add_space(3.);
             ui.label(RichText::new("Данные требуют обновления").size(11.).color(palette.muted));
         }

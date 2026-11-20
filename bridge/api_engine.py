@@ -110,7 +110,7 @@ class ApiRun:
     backend='api'
     def __init__(self,owner,sid,cwd,model,mode,resume,effort='default',api=None):
         self.owner,self.sid,self.cwd=owner,sid,cwd
-        self.config=configuration(api);self.model=model if model and model!='default' else self.config['model']
+        self.config=configuration(api);self.model=model if model and model not in ('default','inherit') else self.config['model']
         self.mode,self.effort=mode,effort
         self.agent_role=getattr(owner,'agent_role','');self.custom_prompt=getattr(owner,'custom_prompt','')
         self.cluster_context=getattr(owner,'cluster_context',{})

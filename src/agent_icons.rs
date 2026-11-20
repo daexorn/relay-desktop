@@ -5,15 +5,16 @@ pub type Pixels = [[Option<[u8; 3]>; SIZE]; SIZE];
 
 /// The same artwork is packaged with Android and rendered with Braille in the TUI.
 pub fn pixels(backend: &str) -> &'static Pixels {
-    static ICONS: OnceLock<[Pixels; 4]> = OnceLock::new();
+    static ICONS: OnceLock<[Pixels; 5]> = OnceLock::new();
     let index = match backend {
         "codex" => 1,
         "agy" => 2,
         "api" => 3,
+        "pet" => 4,
         _ => 0,
     };
     &ICONS.get_or_init(|| {
-        let mut icons = [[[None; SIZE]; SIZE]; 4];
+        let mut icons = [[[None; SIZE]; SIZE]; 5];
         for (icon, line) in icons
             .iter_mut()
             .zip(include_str!("../assets/agent-icons.txt").lines())

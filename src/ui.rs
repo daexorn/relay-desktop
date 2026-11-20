@@ -570,7 +570,102 @@ pub fn phase_icon(phase: crate::model::ToolPhase) -> Icon {
 /// Top stripes intentionally removed for a clean, band-free matte header.
 pub fn ambient_horizon(_painter: &egui::Painter, _rect: Rect, _color: Color32, _light: bool) {}
 
+/// Claude mark: the orange spark of uneven rays.
+fn paint_claude_mark(painter: &egui::Painter, rect: Rect) {
+    const LENGTHS: [f32; 12] = [1.0, 0.80, 0.94, 0.78, 0.98, 0.84, 0.90, 0.76, 0.97, 0.82, 0.92, 0.79];
+    let color = Color32::from_rgb(217, 119, 87);
+    let c = rect.center();
+    let r = rect.width().min(rect.height()) * 0.5;
+    for (i, l) in LENGTHS.iter().enumerate() {
+        let a = -std::f32::consts::FRAC_PI_2
+            + i as f32 * std::f32::consts::TAU / LENGTHS.len() as f32
+            + if i % 2 == 1 { 0.05 } else { -0.03 };
+        let u = Vec2::new(a.cos(), a.sin());
+        let n = Vec2::new(-u.y, u.x);
+        let (base, tip) = (r * 0.135, (r * 0.06).max(0.5));
+        let end = c + u * (r * l - tip);
+        painter.add(egui::Shape::convex_polygon(
+            vec![c + n * base, end + n * tip, end - n * tip, c - n * base],
+            color,
+            Stroke::NONE,
+        ));
+        painter.circle_filled(end, tip, color);
+    }
+    painter.circle_filled(c, r * 0.2, color);
+}
+
+/// OpenAI blossom for Codex: six interlaced links, in the text colour of the theme.
+fn paint_openai_mark(painter: &egui::Painter, rect: Rect) {
+    let color = if painter.ctx().style().visuals.dark_mode {
+        Color32::from_rgb(236, 236, 236)
+    } else {
+        Color32::from_rgb(20, 20, 20)
+    };
+    let c = rect.center();
+    let r = rect.width().min(rect.height()) * 0.5;
+    let (length, radius, width, offset) = (r * 0.95, r * 0.24, (r * 0.11).max(1.1), r * 0.36);
+    for k in 0..6 {
+        let a = (k as f32 * 60.).to_radians();
+        let u = Vec2::new(a.cos(), a.sin());
+        let n = Vec2::new(-u.y, u.x);
+        let center = c + n * offset;
+        let half = length * 0.5 - radius;
+        let mut points = Vec::with_capacity(40);
+        for (end, from) in [(half, -90f32), (-half, 90.)] {
+            for step in 0..=18 {
+                let t = (from + step as f32 * 10.).to_radians();
+                points.push(center + u * end + (u * t.cos() + n * t.sin()) * radius);
+            }
+        }
+        painter.add(egui::Shape::closed_line(points, Stroke::new(width, color)));
+    }
+}
+
+/// Antigravity mark: a rainbow arch.
+fn paint_antigravity_mark(painter: &egui::Painter, rect: Rect) {
+    const STOPS: [[u8; 3]; 6] =
+        [[49, 134, 255], [144, 98, 255], [255, 70, 65], [255, 163, 26], [255, 211, 20], [0, 185, 92]];
+    let c = rect.center();
+    let r = rect.width().min(rect.height()) * 0.5;
+    let (span, top, bottom) = (r * 0.58, c.y - r * 0.12, c.y + r * 0.78);
+    let mut points = vec![];
+    for i in 0..8 {
+        points.push(Pos2::new(c.x - span, bottom - (bottom - top) * i as f32 / 7.));
+    }
+    for k in 1..24 {
+        let t = std::f32::consts::PI * (1. + k as f32 / 24.);
+        points.push(Pos2::new(c.x + span * t.cos(), top + span * t.sin()));
+    }
+    for i in 0..8 {
+        points.push(Pos2::new(c.x + span, top + (bottom - top) * i as f32 / 7.));
+    }
+    let width = (r * 0.36).max(1.5);
+    let last = points.len() - 1;
+    for (i, pair) in points.windows(2).enumerate() {
+        let f = i as f32 / (last - 1).max(1) as f32 * (STOPS.len() - 1) as f32;
+        let j = (f as usize).min(STOPS.len() - 2);
+        let t = f - j as f32;
+        let mixc = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t) as u8;
+        let color = Color32::from_rgb(
+            mixc(STOPS[j][0], STOPS[j + 1][0]),
+            mixc(STOPS[j][1], STOPS[j + 1][1]),
+            mixc(STOPS[j][2], STOPS[j + 1][2]),
+        );
+        painter.line_segment([pair[0], pair[1]], Stroke::new(width, color));
+        painter.circle_filled(pair[0], width * 0.5, color);
+        if i + 1 == last {
+            painter.circle_filled(pair[1], width * 0.5, color);
+        }
+    }
+}
+
 fn paint_engine_icon(painter: &egui::Painter, rect: Rect, backend: &str) {
+    match backend {
+        "codex" => return paint_openai_mark(painter, rect),
+        "agy" => return paint_antigravity_mark(painter, rect),
+        "claude" | "pet" => return paint_claude_mark(painter, rect),
+        _ => {}
+    }
     use relay_desktop::agent_icons::{pixels, SIZE};
     let scale = painter.ctx().pixels_per_point();
     let extent = rect.width().min(rect.height());
@@ -1320,7 +1415,7 @@ pub fn toggle(ui: &mut egui::Ui, value: &mut bool, text: &str, p: Palette) -> Re
     ui.painter().circle_filled(
         egui::pos2(track.left() + 9.5 + t * 13., track.center().y),
         6.5,
-        if *value { Color32::WHITE } else { p.muted },
+        if *value { on_accent() } else { p.muted },
     );
     ui.painter().text(
         egui::pos2(r.left() + 43., r.center().y),

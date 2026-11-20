@@ -146,6 +146,14 @@ fun RelayApp(vm: RelayViewModel) {
         muted = animateColorAsState(target.muted, tween(280), label = "muted").value,
         accent = animateColorAsState(target.accent, tween(280), label = "accent").value,
     )
+    val lifecycle = androidx.compose.ui.platform.LocalLifecycleOwner.current.lifecycle
+    androidx.compose.runtime.DisposableEffect(lifecycle) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) vm.reconnectNow()
+        }
+        lifecycle.addObserver(observer)
+        onDispose { lifecycle.removeObserver(observer) }
+    }
     CompositionLocalProvider(LocalPalette provides p) {
         Box(Modifier.fillMaxSize().background(p.base).statusBarsPadding().navigationBarsPadding().imePadding()) {
             AnimatedContent(
@@ -515,6 +523,17 @@ fun PixelMascot(backend: String, size: Dp = 22.dp, modifier: Modifier = Modifier
             }
         }
     }
+    if (backend in setOf("claude", "pet", "codex", "agy")) {
+        val light = LocalPalette.current.light
+        Canvas(modifier.size(size)) {
+            when (backend) {
+                "codex" -> drawOpenAiMark(if (light) Color(0xFF141414) else Color(0xFFECECEC))
+                "agy" -> drawAntigravityMark()
+                else -> drawClaudeMark()
+            }
+        }
+        return
+    }
     val icon = icons[backend] ?: icons.getValue("claude")
     Canvas(modifier.size(size)) {
         val extent = minOf(this.size.width, this.size.height)
@@ -547,6 +566,8 @@ fun Modifier.specularBorder(
 fun OrbitalEmblem(color: Color, active: Boolean = true, size: Dp = 30.dp, modifier: Modifier = Modifier) {
     val tone by animateColorAsState(color, tween(220), label = "orbTone")
     val boost by animateFloatAsState(if (active) 1f else 0.65f, tween(220), label = "orbBoost")
+    val spin = loopPhase(active, 1600, idle = 0f, label = "orbSpin")
+    val pulse = breathing(active, 1500, label = "orbPulse")
     Canvas(modifier.size(size)) {
         val w = this.size.width
         val r = this.size.minDimension * 0.44f
@@ -557,7 +578,7 @@ fun OrbitalEmblem(color: Color, active: Boolean = true, size: Dp = 30.dp, modifi
         drawCircle(tone.copy(alpha = 0.16f), r, c, style = outerStroke)
         drawArc(
             color = tone.copy(alpha = 0.92f * boost),
-            startAngle = -55f,
+            startAngle = -55f + spin * 360f,
             sweepAngle = 215f,
             useCenter = false,
             topLeft = Offset(c.x - r, c.y - r),
@@ -567,16 +588,16 @@ fun OrbitalEmblem(color: Color, active: Boolean = true, size: Dp = 30.dp, modifi
         val rInner = r * 0.64f
         drawArc(
             color = tone.copy(alpha = 0.65f * boost),
-            startAngle = 125f,
+            startAngle = 125f - spin * 540f,
             sweepAngle = 175f,
             useCenter = false,
             topLeft = Offset(c.x - rInner, c.y - rInner),
             size = Size(rInner * 2f, rInner * 2f),
             style = innerStroke,
         )
-        drawCircle(tone, r * 0.24f, c)
+        drawCircle(tone, r * (0.21f + 0.07f * pulse), c)
         if (active) {
-            val ang = Math.toRadians(-35.0)
+            val ang = Math.toRadians(-35.0 + spin * 360.0)
             val sat = Offset(c.x + (r * cos(ang)).toFloat(), c.y + (r * sin(ang)).toFloat())
             drawCircle(tone, (w * 0.075f).coerceAtLeast(1.8f), sat)
         }
@@ -588,8 +609,10 @@ fun OrbitalEmblem(color: Color, active: Boolean = true, size: Dp = 30.dp, modifi
 fun NeuralWaveform(color: Color, active: Boolean = true, width: Dp = 22.dp, height: Dp = 13.dp) {
     val tone by animateColorAsState(color, tween(220), label = "waveColor")
     val gain by animateFloatAsState(if (active) 1f else 0.45f, tween(220), label = "waveGain")
+    val phase = loopPhase(active, 1100, idle = -1f, label = "wave")
     Canvas(Modifier.width(width).height(height)) {
-        val levels = floatArrayOf(0.42f, 0.82f, 1.0f, 0.68f, 0.46f)
+        val levels = if (phase < 0f) floatArrayOf(0.42f, 0.82f, 1.0f, 0.68f, 0.46f)
+        else FloatArray(5) { i -> 0.3f + 0.7f * kotlin.math.abs(kotlin.math.sin((phase * 2f * Math.PI + i * 0.85).toFloat())) }
         val sw = (size.width * 0.11f).coerceAtLeast(1.6f)
         val gap = (size.width - sw) / (levels.size - 1).coerceAtLeast(1)
         for (i in levels.indices) {
@@ -666,6 +689,7 @@ fun GlyphButton(glyph: Glyph, hint: String, tint: Color = LocalPalette.current.m
         Modifier
             .size(44.dp)
             .clip(RoundedCornerShape(12.dp))
+            .pressBounce()
             .background(if (highlighted) tint.copy(alpha = 0.14f) else Color.Transparent)
             .then(if (highlighted) Modifier.border(1.dp, tint.copy(alpha = 0.38f), RoundedCornerShape(11.dp)) else Modifier)
             .semantics { contentDescription = hint }
@@ -682,6 +706,7 @@ fun PrimaryButton(text: String, enabled: Boolean = true, modifier: Modifier = Mo
     val shape = RoundedCornerShape(12.dp)
     Box(
         modifier
+            .pressBounce(0.95f)
             .clip(shape)
             .background(if (enabled) p.accent else p.line)
             .clickable(enabled = enabled, onClick = onClick)
@@ -704,6 +729,7 @@ fun SecondaryPillButton(text: String, glyph: Glyph? = null, tint: Color = LocalP
     val shape = RoundedCornerShape(10.dp)
     Row(
         Modifier
+            .pressBounce(0.94f)
             .clip(shape)
             .background(p.elevated)
             .specularBorder(shape, p.specularTop, p.borderSubtle)
@@ -804,10 +830,7 @@ fun TopBar(
             if (onBack != null) {
                 IconButton(Icons.AutoMirrored.Filled.ArrowBack, "Назад", p.text, onBack)
             } else {
-                Spacer(Modifier.width(8.dp))
-                PixelMascot("claude", size = 20.dp)
-                Spacer(Modifier.width(4.dp))
-                PixelMascot("agy", size = 15.dp)
+                Spacer(Modifier.width(6.dp))
             }
             Column(Modifier.weight(1f).padding(horizontal = 6.dp)) {
                 Label(title, 16.5.sp, p.text, FontWeight.SemiBold, maxLines = 1)
@@ -1310,6 +1333,7 @@ fun SessionsScreen(vm: RelayViewModel) {
     var searching by rememberSaveable { mutableStateOf(false) }
     var renaming by remember { mutableStateOf<Session?>(null) }
     var moving by remember { mutableStateOf<Session?>(null) }
+    var iconEditing by remember { mutableStateOf<Folder?>(null) }
     var naming by remember { mutableStateOf<Pair<Folder?, Session?>?>(null) }
     var locking by remember { mutableStateOf<Session?>(null) }
     var agentsSheet by remember { mutableStateOf(false) }
@@ -1385,7 +1409,7 @@ fun SessionsScreen(vm: RelayViewModel) {
                     if (q.isNotEmpty() && inside.isEmpty()) continue
                     val open = folder.id !in vm.collapsed || q.isNotEmpty()
                     item(key = "f-" + folder.id) {
-                        FolderHeading(folder, inside.size, open, { vm.toggleFolder(folder) }, { naming = folder to null }, { vm.deleteFolder(folder) })
+                        FolderHeading(folder, inside.size, open, { vm.toggleFolder(folder) }, { naming = folder to null }, { iconEditing = folder }, { vm.deleteFolder(folder) })
                     }
                     if (open) {
                         if (inside.isEmpty()) {
@@ -1447,9 +1471,17 @@ fun SessionsScreen(vm: RelayViewModel) {
     if (agentsSheet) AgentsSheet(vm) { agentsSheet = false }
     if (radarSheet) AgentRadarSheet(vm) { radarSheet = false }
     renaming?.let { s ->
-        NameDialog("Название сессии", s.title, "Пусто — вернуть название от агента", { renaming = null }) {
+        val locked = s.isLockedGate()
+        NameDialog(if (locked) "Имя в списке" else "Название сессии", s.title,
+            if (locked) "Метка на этом устройстве" else "Пусто — вернуть название от агента", { renaming = null }) {
             vm.rename(s, it)
             renaming = null
+        }
+    }
+    iconEditing?.let { folder ->
+        ProjectIconEditor(folder, close = { iconEditing = null }) { icon ->
+            vm.saveFolderIcon(folder, icon)
+            iconEditing = null
         }
     }
     naming?.let { (folder, session) ->
@@ -1507,7 +1539,7 @@ fun ActiveAgentsBanner(activeSessions: List<Session>, onClick: () -> Unit) {
                 Label("$count $word на сервере", 13.sp, p.text, FontWeight.SemiBold, maxLines = 1)
                 NeuralWaveform(leadTone, active = true, width = 18.dp, height = 11.dp)
             }
-            val names = activeSessions.joinToString(" · ") { if (it.isLockedGate()) "Защищённая сессия" else it.title }
+            val names = activeSessions.joinToString(" · ") { it.title.ifBlank { lockedSessionTitle(it.modified) } }
             Label(names, 11.5.sp, p.muted, maxLines = 1)
         }
         Row(
@@ -1648,7 +1680,7 @@ fun Heading(glyph: Glyph?, text: String, count: Int) {
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun FolderHeading(folder: Folder, count: Int, open: Boolean, toggle: () -> Unit, rename: () -> Unit, delete: () -> Unit) {
+fun FolderHeading(folder: Folder, count: Int, open: Boolean, toggle: () -> Unit, rename: () -> Unit, editIcon: () -> Unit, delete: () -> Unit) {
     val p = LocalPalette.current
     var menu by remember { mutableStateOf(false) }
     val turn by animateFloatAsState(if (open) 90f else 0f, tween(180), label = "chevron")
@@ -1664,13 +1696,14 @@ fun FolderHeading(folder: Folder, count: Int, open: Boolean, toggle: () -> Unit,
         ) {
             Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = p.muted, modifier = Modifier.size(18.dp).rotate(turn))
             Spacer(Modifier.width(4.dp))
-            VectorGlyph(if (open) Glyph.FolderOpen else Glyph.Folder, p.accent, size = 16.dp)
+            ProjectFolderIcon(folder, open)
             Spacer(Modifier.width(8.dp))
             Label(folder.name, 14.sp, p.text, FontWeight.SemiBold, 1, Modifier.weight(1f, fill = false))
             Spacer(Modifier.width(8.dp))
             Label(count.toString(), 12.sp, p.muted)
         }
         DropdownMenu(menu, { menu = false }, Modifier.background(p.elevated)) {
+            DropdownMenuItem({ Label("Значок проекта…") }, { menu = false; editIcon() })
             DropdownMenuItem({ Label("Переименовать папку") }, { menu = false; rename() })
             DropdownMenuItem({ Label("Удалить папку", color = p.red) }, { menu = false; delete() })
         }
@@ -1744,7 +1777,7 @@ fun SessionRow(
                         Box(Modifier.size(6.dp).clip(CircleShape).background(engineTone.copy(alpha = if (busy) 1f else 0.7f)))
                     }
                     Label(
-                        text = if (lockedGate && s.title.isBlank()) "Защищённая сессия" else s.title,
+                        text = s.title.ifBlank { lockedSessionTitle(s.modified) },
                         size = 15.sp,
                         color = if (selected || busy) p.text else p.mix(p.text, p.muted, 0.12f),
                         weight = if (selected || busy) FontWeight.SemiBold else FontWeight.Medium,
@@ -1781,7 +1814,9 @@ fun SessionRow(
                 DropdownMenuItem({ Label("Сменить или снять пароль") }, { menu = false; lockAction() })
             }
             HorizontalDivider(color = p.line)
-            if (!lockedGate) {
+            if (lockedGate) {
+                DropdownMenuItem({ Label("Имя в списке…") }, { menu = false; rename() })
+            } else {
                 DropdownMenuItem({ Label(if (s.pinned > 0) "Открепить" else "Закрепить сверху") }, { menu = false; vm.pin(s, s.pinned == 0.0) })
                 DropdownMenuItem({ Label("Переименовать") }, { menu = false; rename() })
                 DropdownMenuItem({ Label("Переместить в папку") }, { menu = false; move() })
@@ -1854,14 +1889,34 @@ fun ChatScreen(vm: RelayViewModel) {
 
     val version = chat.version
     val items = remember(version, chat.sid) { timeline(chat.transcript.messages) }
+    // Messages already there when the chat opened appear at once; new ones slide in.
+    val appearFrom = remember(chat.sid, chat.loaded) { if (chat.loaded) chat.transcript.messages.size else Int.MAX_VALUE }
     val busy = chat.transcript.busy
     val lockedGate = chat.isLockedGate()
     val activeBackend = chat.activeBackend()
     val engineTone = backendColor(p, activeBackend)
-    val list = rememberLazyListState()
+    val list = key(chat.sid) { rememberLazyListState() }
+    val attributions = remember(version, activeBackend, busy) {
+        computeAttributions(chat.transcript.messages, activeBackend, busy)
+    }
+    var positioned by remember(chat.sid) { mutableStateOf(false) }
+    var lastItems by remember(chat.sid) { mutableStateOf(0) }
 
-    LaunchedEffect(items.size, version) {
-        if (items.isNotEmpty() && !lockedGate) list.animateScrollToItem(items.size + 1)
+    LaunchedEffect(chat.sid, items.size, version, lockedGate) {
+        if (lockedGate) {
+            positioned = false
+        } else if (items.isNotEmpty()) {
+            val newItems = items.size - lastItems
+            val layout = list.layoutInfo
+            val visibleEnd = layout.visibleItemsInfo.lastOrNull()?.index ?: 0
+            val nearEnd = visibleEnd >= layout.totalItemsCount - 2 - newItems.coerceAtLeast(0)
+            if (!list.isScrollInProgress && (!positioned || nearEnd)) {
+                // Continuous token updates follow the tail without repeatedly starting a scroll animation.
+                list.requestScrollToItem(items.size + 1)
+            }
+            positioned = true
+        }
+        lastItems = items.size
     }
 
     Box(Modifier.fillMaxSize()) {
@@ -1869,7 +1924,7 @@ fun ChatScreen(vm: RelayViewModel) {
         Column(Modifier.fillMaxSize()) {
             val folder = vm.sessions.firstOrNull { it.id == chat.sid }?.folder?.let { f -> vm.folders.firstOrNull { it.id == f }?.name }
             TopBar(
-                title = if (lockedGate) "Защищённая сессия" else chat.title,
+                title = chat.title.ifBlank { lockedSessionTitle(0.0) },
                 subtitle = listOfNotNull(folder, folderName(chat.cwd)).joinToString(" · "),
                 link = vm.link,
                 onBack = { vm.screen = Screen.Sessions },
@@ -1917,10 +1972,14 @@ fun ChatScreen(vm: RelayViewModel) {
                         }
                     }
                     items(items, key = { when (it) { is Item.Text -> "m${it.index}"; is Item.Actions -> "a${it.start}" } }) { item ->
-                        val attributions = remember(version, activeBackend, busy) {
-                            computeAttributions(chat.transcript.messages, activeBackend, busy)
-                        }
-                        Box(Modifier.animateItem()) {
+                        val itemIndex = when (item) { is Item.Text -> item.index; is Item.Actions -> item.start }
+                        val fresh = remember(chat.sid) { itemIndex >= appearFrom }
+                        val shown = remember { MutableTransitionState(!fresh).apply { targetState = true } }
+                        AnimatedVisibility(
+                            shown,
+                            Modifier.animateItem(),
+                            enter = fadeIn(tween(260)) + slideInVertically(tween(320)) { it / 3 },
+                        ) {
                             when (item) {
                                 is Item.Text -> if (item.message.role == "user") {
                                     UserBubble(
@@ -2225,7 +2284,7 @@ fun MissingCliBanner(vm: RelayViewModel, activeBackend: String) {
 @Composable
 fun UserBubble(m: Message, attr: MessageAttribution? = null) {
     val p = LocalPalette.current
-    val bubbleShape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp, bottomEnd = 6.dp, bottomStart = 20.dp)
+    val bubbleShape = RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp, bottomEnd = 9.dp, bottomStart = 22.dp)
     Column(Modifier.fillMaxWidth().padding(vertical = 6.dp), horizontalAlignment = Alignment.End) {
         if (attr != null && (attr.who.isNotEmpty() || attr.toWhom.isNotEmpty())) {
             val bTone = backendColor(p, attr.backend)
@@ -2249,12 +2308,11 @@ fun UserBubble(m: Message, attr: MessageAttribution? = null) {
             Modifier
                 .widthIn(max = 324.dp)
                 .clip(bubbleShape)
-                .background(p.mix(p.surface, p.accent, 0.13f))
-                .specularBorder(bubbleShape, p.mix(p.line, p.accent, 0.45f), p.mix(p.line, p.accent, 0.22f))
+                .background(p.mix(p.elevated, p.accent, if (p.light) 0.07f else 0.045f))
                 .padding(horizontal = 14.dp, vertical = 10.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            if (m.text.isNotBlank()) Text(m.text, color = p.text, fontSize = 15.sp)
+            if (m.text.isNotBlank()) Text(m.text, color = p.text, fontSize = 15.5.sp, lineHeight = 22.sp)
             if (m.images > 0) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                     VectorGlyph(Glyph.Image, p.accent, size = 13.dp)
@@ -2779,81 +2837,18 @@ fun AgentTelemetryPod(
     onOpenRadar: () -> Unit,
 ) {
     val p = LocalPalette.current
-    val engineTone = backendColor(p, backend)
-    val podShape = RoundedCornerShape(18.dp)
-    val violet = phaseColor(ToolPhase.Subagent, p.light)
-
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 10.dp)
-            .padding(top = 6.dp)
-            .clip(podShape)
-            .background(p.elevated)
-            .specularBorder(podShape, engineTone.copy(alpha = 0.55f), p.line)
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-        verticalArrangement = Arrangement.spacedBy(7.dp),
+    val tone = backendColor(p, backend)
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(9.dp),
     ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            PixelMascot(backend, size = 28.dp)
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Label(engineSignatureTitle(backend), 11.sp, engineTone, FontWeight.Bold, maxLines = 1)
-                    NeuralWaveform(engineTone, active = true, width = 20.dp, height = 11.dp)
-                    if (telemetry.totalActions > 0) {
-                        PhaseBadge(telemetry.activePhase)
-                        Label("${telemetry.doneActions}/${telemetry.totalActions}", 11.sp, p.muted, FontWeight.SemiBold, maxLines = 1)
-                    } else {
-                        Box(
-                            Modifier
-                                .clip(RoundedCornerShape(5.dp))
-                                .background(engineTone.copy(alpha = 0.16f))
-                                .padding(horizontal = 5.dp, vertical = 1.dp),
-                        ) {
-                            Label("LIVE", 9.5.sp, engineTone, FontWeight.Bold)
-                        }
-                    }
-                }
-                Label(telemetry.activeHeadline, 13.sp, p.text, FontWeight.SemiBold, maxLines = 1)
-                if (telemetry.activeTarget.isNotEmpty()) {
-                    Text(
-                        telemetry.activeTarget,
-                        color = p.muted,
-                        fontSize = 11.sp,
-                        fontFamily = FontFamily.Monospace,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-            }
-            GlyphButton(Glyph.Radar, "Радар агентов", tint = engineTone, highlighted = true, onClick = onOpenRadar)
+        NeuralWaveform(tone, active = true, width = 19.dp, height = 11.dp)
+        Label(telemetry.activeHeadline, 12.sp, p.muted, maxLines = 1, modifier = Modifier.weight(1f))
+        if (telemetry.totalActions > 0) {
+            Label("${telemetry.doneActions}/${telemetry.totalActions}", 11.sp, p.muted)
         }
-
-        if (telemetry.subagents.isNotEmpty()) {
-            FlowRow(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                for (sub in telemetry.subagents.take(4)) {
-                    Row(
-                        Modifier
-                            .clip(RoundedCornerShape(999.dp))
-                            .background(violet.copy(alpha = if (p.light) 0.12f else 0.18f))
-                            .border(1.dp, violet.copy(alpha = 0.38f), RoundedCornerShape(999.dp))
-                            .padding(horizontal = 8.dp, vertical = 3.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    ) {
-                        VectorGlyph(Glyph.Orbit, violet, size = 11.dp)
-                        Label(sub.role, 10.5.sp, violet, FontWeight.SemiBold, maxLines = 1)
-                    }
-                }
-            }
-        }
+        GlyphButton(Glyph.Radar, "Радар агентов", tint = tone, onClick = onOpenRadar)
     }
 }
 
@@ -2966,6 +2961,86 @@ fun Composer(vm: RelayViewModel, chat: Chat, onOpenAgents: () -> Unit = {}) {
     var apiSettings by remember { mutableStateOf(false) }
     if (apiSettings) vm.current?.let { server -> ApiDialog(vm, server) { apiSettings = false } }
 
+    val catalog = vm.catalogFor(activeBackend)
+    val currentModel = vm.modelForChat(chat)
+    var settingsOpen by remember(chat.sid) { mutableStateOf(false) }
+
+    if (settingsOpen) {
+        Sheet({ settingsOpen = false }) {
+            Column(Modifier.heightIn(max = 460.dp).verticalScroll(rememberScrollState())) {
+                Label("Настройки ответа", 18.sp, p.text, FontWeight.SemiBold)
+                FlowRow(
+                    Modifier.fillMaxWidth().padding(top = 7.dp),
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                    verticalArrangement = Arrangement.spacedBy(5.dp),
+                ) {
+                    Selector(
+                        label = backendShortLabel(activeBackend),
+                        options = listOf(
+                            "claude" to "Claude Code",
+                            "codex" to "Codex",
+                            "agy" to "Antigravity",
+                            "api" to "API",
+                            "agents" to "Установить агентов…",
+                            "settings" to "Настроить API…",
+                        ),
+                        accent = true,
+                        accentColor = engineTone,
+                    ) { source ->
+                        when (source) {
+                            "agents" -> {
+                                settingsOpen = false
+                                onOpenAgents()
+                            }
+                            "settings" -> {
+                                settingsOpen = false
+                                apiSettings = true
+                            }
+                            else -> {
+                                vm.setBackend(chat, source)
+                                if (source == "api" && vm.current?.api?.baseUrl.isNullOrBlank()) {
+                                    settingsOpen = false
+                                    apiSettings = true
+                                }
+                            }
+                        }
+                    }
+
+                    Selector(
+                        label = modelLabel(catalog, currentModel),
+                        options = catalog.filter { explicitModel(it.value) }.map { it.value to modelLabel(catalog, it.value) },
+                    ) {
+                        chat.updateSelectedModel(it)
+                        vm.liveChange(chat)
+                    }
+
+                    Selector(
+                        label = when (chat.mode) { "auto" -> "Авто"; "acceptEdits" -> "Правки"; "plan" -> "План"; else -> "Подтверждение" },
+                        options = listOf("auto" to "Авто", "manual" to "С подтверждением", "acceptEdits" to "Правки файлов", "plan" to "Планирование"),
+                        accent = chat.mode == "auto",
+                    ) {
+                        chat.mode = it
+                        vm.liveChange(chat)
+                    }
+
+                    if (activeBackend != "agy") {
+                        Selector(
+                            label = "Глубина: " + concreteEffort(chat.effort),
+                            options = listOf("low" to "Низкая", "medium" to "Средняя", "high" to "Высокая", "xhigh" to "Очень высокая", "max" to "Максимальная"),
+                        ) {
+                            chat.effort = it
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(12.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    GhostButton("Готово") { settingsOpen = false }
+                }
+            }
+        }
+    }
+
     val focus = remember(chat.sid) { FocusRequester() }
     var editor by remember(chat.sid) { mutableStateOf(TextFieldValue(chat.draft, TextRange(chat.draft.length))) }
     LaunchedEffect(chat.draft) {
@@ -2991,6 +3066,32 @@ fun Composer(vm: RelayViewModel, chat: Chat, onOpenAgents: () -> Unit = {}) {
         ) {
             Label("В очереди: ${chat.queued.size} — ответ придёт по порядку, даже если закрыть приложение", 12.sp, p.muted)
             for ((i, q) in chat.queued.withIndex()) Label("${i + 1}  $q", 13.sp, p.text, maxLines = 1, modifier = Modifier.padding(top = 4.dp))
+        }
+    }
+    AnimatedVisibility(
+        chat.outbox.isNotEmpty(),
+        enter = fadeIn(tween(200)) + expandVertically(tween(220)),
+        exit = fadeOut(tween(160)) + shrinkVertically(tween(180)),
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp)
+                .padding(top = 6.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(p.side)
+                .border(1.dp, p.amber.copy(alpha = 0.5f), RoundedCornerShape(12.dp))
+                .padding(10.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Dots(p.amber)
+                Spacer(Modifier.width(8.dp))
+                Label(
+                    if (vm.link == Link.Online) "Отправляем ${chat.outbox.size}…" else "Нет связи · ${chat.outbox.size} уйдёт после переподключения",
+                    12.sp, p.muted,
+                )
+            }
+            for ((i, q) in chat.outbox.withIndex()) Label("${i + 1}  $q", 13.sp, p.text, maxLines = 1, modifier = Modifier.padding(top = 4.dp))
         }
     }
     AnimatedVisibility(suggestions.isNotEmpty()) {
@@ -3031,19 +3132,48 @@ fun Composer(vm: RelayViewModel, chat: Chat, onOpenAgents: () -> Unit = {}) {
         if (uris.isNotEmpty()) vm.pick(uris)
     }
 
-    val containerShape = RoundedCornerShape(22.dp)
+    val summary = chat.turnSummary.takeIf { it.backend == activeBackend }
+    AnimatedVisibility(
+        visible = summary?.let { it.diff != null || it.context != null } == true,
+        enter = fadeIn(tween(160)) + expandVertically(tween(160)),
+        exit = fadeOut(tween(140)) + shrinkVertically(tween(140)),
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(start = 18.dp, end = 18.dp, top = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(9.dp, Alignment.End),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            summary?.diff?.let { (added, removed) ->
+                Label("+${added}", 12.sp, p.green, FontWeight.SemiBold)
+                Label("−${removed}", 12.sp, p.red, FontWeight.SemiBold)
+            }
+            summary?.context?.let { (used, limit) ->
+                val progress = (used.toFloat() / limit.toFloat()).coerceIn(0f, 1f)
+                Canvas(Modifier.size(14.dp).semantics { contentDescription = "Окно контекста" }) {
+                    drawCircle(p.line, style = Stroke(1.6.dp.toPx()))
+                    drawArc(engineTone, -90f, progress * 360f, useCenter = false,
+                        style = Stroke(1.6.dp.toPx(), cap = StrokeCap.Round))
+                }
+                fun short(n: Long) = when {
+                    n >= 1_000_000 -> String.format(Locale.ROOT, "%.2fM", n / 1_000_000.0)
+                    n >= 1_000 -> String.format(Locale.ROOT, "%.1fk", n / 1_000.0)
+                    else -> n.toString()
+                }
+                Label("${short(used)}/${short(limit)}", 12.sp, p.muted,
+                    modifier = Modifier.semantics { contentDescription = "Токены окна контекста: $used из $limit" })
+            }
+        }
+    }
+
+    val containerShape = RoundedCornerShape(25.dp)
     Column(
         Modifier
             .fillMaxWidth()
-            .padding(horizontal = 10.dp, vertical = 8.dp)
+            .padding(horizontal = 12.dp, vertical = 7.dp)
             .clip(containerShape)
             .background(p.surface)
-            .specularBorder(
-                shape = containerShape,
-                topColor = if (chat.draft.isNotEmpty() || busy) engineTone.copy(alpha = 0.48f) else p.specularTop,
-                bottomColor = if (chat.draft.isNotEmpty()) p.mix(p.line, engineTone, 0.25f) else p.line,
-            )
-            .padding(start = 14.dp, end = 10.dp, top = 11.dp, bottom = 8.dp),
+            .border(1.dp, p.borderSubtle, containerShape)
+            .padding(start = 11.dp, end = 10.dp, top = 11.dp, bottom = 7.dp),
     ) {
         if (chat.picked.isNotEmpty()) {
             Row(
@@ -3084,7 +3214,8 @@ fun Composer(vm: RelayViewModel, chat: Chat, onOpenAgents: () -> Unit = {}) {
             },
             textStyle = TextStyle(color = p.text, fontSize = 15.sp),
             cursorBrush = SolidColor(engineTone),
-            modifier = Modifier.fillMaxWidth().heightIn(min = 26.dp, max = 160.dp).focusRequester(focus),
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp).animateContentSize(tween(160)).heightIn(min = 26.dp, max = 148.dp).focusRequester(focus)
+                .semantics { contentDescription = "Поле сообщения" },
             decorationBox = { inner ->
                 Box {
                     if (chat.draft.isEmpty()) {
@@ -3093,7 +3224,7 @@ fun Composer(vm: RelayViewModel, chat: Chat, onOpenAgents: () -> Unit = {}) {
                                 !online -> "Нет связи с сервером"
                                 busy && vm.canSend(chat) -> "Добавь уточнение — ${backendShortLabel(activeBackend)} учтёт по ходу работы…"
                                 busy -> "${backendShortLabel(activeBackend)} отвечает…"
-                                else -> "Напиши задачу… или / для команд"
+                                else -> "Сообщение для ${backendShortLabel(activeBackend)}"
                             },
                             15.sp,
                             p.muted,
@@ -3104,62 +3235,6 @@ fun Composer(vm: RelayViewModel, chat: Chat, onOpenAgents: () -> Unit = {}) {
             },
         )
 
-        FlowRow(
-            Modifier.fillMaxWidth().padding(top = 7.dp),
-            horizontalArrangement = Arrangement.spacedBy(5.dp),
-            verticalArrangement = Arrangement.spacedBy(5.dp),
-        ) {
-            Selector(
-                label = backendShortLabel(activeBackend),
-                options = listOf(
-                    "claude" to "Claude Code",
-                    "codex" to "Codex",
-                    "agy" to "Antigravity",
-                    "api" to "API",
-                    "agents" to "Установить агентов…",
-                    "settings" to "Настроить API…",
-                ),
-                accent = true,
-                accentColor = engineTone,
-            ) { source ->
-                when (source) {
-                    "agents" -> onOpenAgents()
-                    "settings" -> apiSettings = true
-                    else -> {
-                        vm.setBackend(chat, source)
-                        if (source == "api" && vm.current?.api?.baseUrl.isNullOrBlank()) apiSettings = true
-                    }
-                }
-            }
-
-            val catalog = vm.catalogFor(activeBackend)
-            val currentModel = chat.selectedModel(vm.current)
-            Selector(
-                label = modelLabel(catalog, currentModel),
-                options = catalog.map {
-                    it.value to if (it.value == "default") "Авто · ${it.description}".trimEnd(' ', '·') else modelLabel(catalog, it.value)
-                },
-            ) {
-                chat.updateSelectedModel(it)
-                vm.liveChange(chat)
-            }
-
-            Selector(
-                label = when (chat.mode) { "auto" -> "Авто"; "acceptEdits" -> "Правки"; "plan" -> "План"; else -> "Подтверждение" },
-                options = listOf("auto" to "Авто", "manual" to "С подтверждением", "acceptEdits" to "Правки файлов", "plan" to "Планирование"),
-                accent = chat.mode == "auto",
-            ) {
-                chat.mode = it
-                vm.liveChange(chat)
-            }
-
-            Selector(
-                label = "Глубина: " + if (chat.effort == "default") "авто" else chat.effort,
-                options = listOf("default" to "Автоматически", "low" to "Низкая", "medium" to "Средняя", "high" to "Высокая", "xhigh" to "Очень высокая", "max" to "Максимальная"),
-            ) {
-                chat.effort = it
-            }
-        }
 
         Row(
             Modifier.fillMaxWidth().padding(top = 7.dp),
@@ -3178,8 +3253,19 @@ fun Composer(vm: RelayViewModel, chat: Chat, onOpenAgents: () -> Unit = {}) {
                 Icon(Icons.Default.Add, "Прикрепить файлы или фото", tint = p.text, modifier = Modifier.size(22.dp))
             }
 
-            Spacer(Modifier.weight(1f))
-            // Tap the active engine icon to open slash commands.
+            Row(
+                Modifier.weight(1f).clip(RoundedCornerShape(12.dp))
+                    .semantics { contentDescription = "Настройки ответа" }
+                    .clickable { settingsOpen = true }
+                    .padding(horizontal = 7.dp, vertical = 9.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(3.dp),
+            ) {
+                Label(modelLabel(catalog, currentModel), 12.sp, p.text, FontWeight.Medium,
+                    maxLines = 1, modifier = Modifier.weight(1f, fill = false))
+                Icon(Icons.Default.KeyboardArrowDown, null, tint = p.muted, modifier = Modifier.size(16.dp))
+            }
+            // The companion opens slash commands.
             Box(
                 Modifier
                     .size(42.dp)
@@ -3190,13 +3276,14 @@ fun Composer(vm: RelayViewModel, chat: Chat, onOpenAgents: () -> Unit = {}) {
                     },
                 contentAlignment = Alignment.Center,
             ) {
-                PixelMascot(activeBackend, size = 27.dp)
+                PixelMascot("pet", size = 29.dp)
             }
 
-            val ready = (chat.draft.isNotBlank() || chat.picked.isNotEmpty()) && (vm.canSend(chat) || chat.draft.trim().startsWith("/"))
+            // Always usable: offline the message waits in the outbox and goes once the server is back.
+            val ready = (chat.draft.isNotBlank() || chat.picked.isNotEmpty()) && !chat.isLockedGate()
             if (busy) {
                 Box(
-                    Modifier.size(42.dp).clip(CircleShape).background(p.elevated).border(1.dp, p.line, CircleShape).clickable { vm.stop() },
+                    Modifier.size(42.dp).pressBounce().clip(CircleShape).background(p.elevated).border(1.dp, p.line, CircleShape).clickable { vm.stop() },
                     contentAlignment = Alignment.Center,
                 ) {
                     Box(Modifier.size(12.dp).clip(RoundedCornerShape(3.dp)).background(p.red))
@@ -3209,7 +3296,8 @@ fun Composer(vm: RelayViewModel, chat: Chat, onOpenAgents: () -> Unit = {}) {
                         .clip(CircleShape)
                         .background(if (ready) p.accent else p.elevated)
                         .border(1.dp, if (ready) p.accent else p.borderSubtle, CircleShape)
-                        .clickable(enabled = ready) { vm.submit() },
+                        .pressBounce()
+                        .clickable { if (ready) vm.submit() else if (vm.link == Link.Off) vm.reconnectNow() },
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(
@@ -3561,7 +3649,7 @@ fun AgentRadarSheet(vm: RelayViewModel, close: () -> Unit) {
             } else null
             RadarNode(
                 sid = s.id,
-                title = if (s.isLockedGate() && s.title.isBlank()) "Защищённая сессия" else s.title,
+                title = s.title.ifBlank { lockedSessionTitle(s.modified) },
                 cwd = s.cwd,
                 backend = b,
                 active = isBusy,

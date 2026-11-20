@@ -7,12 +7,36 @@ import sqlite3
 import tempfile
 import time
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 import uuid
 
 SPEC = importlib.util.spec_from_file_location("relay_bridge_codex_test", Path(__file__).parents[1] / "bridge/relay_bridge.py")
 bridge = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(bridge)
+
+class CodexResumeLifecycleTest(unittest.TestCase):
+    def test_failed_reopen_reuses_handshake_and_resumes_same_thread(self):
+        spec = importlib.util.spec_from_file_location("codex_reopen", Path(__file__).parents[1] / "bridge/codex_engine.py")
+        engine = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(engine)
+        thread = str(uuid.uuid4())
+        run = SimpleNamespace(
+            thread_id=None, initialized=False, linked_thread_id=thread, mode="manual",
+            mcp_servers={}, model="default", cwd="/tmp", system_prompt="",
+            _send_json=mock.Mock(), _load_relay_context=mock.Mock(),
+            _rpc=mock.Mock(side_effect=[{}, {}, *[ValueError("thread already has an active writer")] * 5,
+                                        {"thread": {"id": thread}}]),
+        )
+        with mock.patch.object(engine, "has_native_session", return_value=True), mock.patch.object(engine.time, "sleep"):
+            with self.assertRaisesRegex(ValueError, "тред Codex"):
+                engine.CodexRun._ensure_thread(run)
+            engine.CodexRun._ensure_thread(run)
+        methods = [call.args[0] for call in run._rpc.call_args_list]
+        self.assertEqual(methods.count("initialize"), 1)
+        self.assertNotIn("thread/start", methods)
+        self.assertEqual(run.thread_id, thread)
+
 
 FAKE_CODEX = """#!/usr/bin/env python3
 import json, os, sys

@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import androidx.activity.ComponentActivity
 import android.graphics.Canvas
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.core.app.ApplicationProvider
@@ -122,6 +123,17 @@ class UiScreenshotTest {
             """.trimIndent().replace('§', '$')),
         ))
         vm.handle(JSONObject().put("type", "history").put("sid", "a").put("messages", messages))
+    }
+
+    @Test fun composerOpensSettingsWithoutAddingASecondControlsRow() {
+        val vm = connected()
+        vm.open(vm.sessions.first { it.id == "c" })
+        rule.setContent { RelayApp(vm) }
+        rule.onNodeWithText("Настройки ответа").assertDoesNotExist()
+        rule.onNodeWithContentDescription("Настройки ответа").performClick()
+        rule.onNodeWithText("Настройки ответа").assertExists()
+        rule.onNodeWithText("Готово").performClick()
+        rule.onNodeWithText("Настройки ответа").assertDoesNotExist()
     }
 
     @Test fun chatWithFormulas() {

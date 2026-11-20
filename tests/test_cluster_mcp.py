@@ -37,7 +37,12 @@ class ClusterMcpTests(unittest.TestCase):
         out=subprocess.run([sys.executable,str(SOURCE)],input=data,text=True,capture_output=True,check=True,timeout=3)
         frames=[json.loads(s) for s in out.stdout.splitlines()]
         self.assertEqual(frames[0]['result']['protocolVersion'],'2025-06-18')
-        self.assertEqual({t['name'] for t in frames[1]['result']['tools']},cluster.NAMES)
+        tools={t['name'] for t in frames[1]['result']['tools']}
+        self.assertEqual(tools,cluster.NAMES)
+        self.assertIn('create_worker',tools)
+        self.assertIn('remove_worker',tools)
+        self.assertIn('create_worker',cluster.LEADER_INSTRUCTIONS)
+        self.assertIn('dynamic_workers',cluster.LEADER_INSTRUCTIONS)
 
     def test_dispatch_and_result_travel_over_the_existing_connection_with_bound_scope(self):
         result=self.call('dispatch_task',{'worker':'ui','task':'Implement the UI'})
