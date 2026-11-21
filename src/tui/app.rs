@@ -903,6 +903,13 @@ impl App {
             WorkspaceAction::OpenInstall => self.picker(Picker::Install),
         }
     }
+    fn ultra_available(&self) -> bool {
+        self.chat().filter(|c| c.backend == "codex").is_some_and(|c| {
+            self.active.as_ref().and_then(|id| self.remote.get(id))
+                .is_some_and(|r| r.codex_models.iter().any(|m| m.value == c.model && m.ultra))
+        })
+    }
+
     pub fn picker(&mut self, kind: Picker) {
         self.popup = Some(Popup::Picker {
             kind,
@@ -1193,8 +1200,8 @@ impl App {
                 detail: id.into(),
             })
             .collect(),
-            Picker::Efforts => ["low", "medium", "high", "xhigh", "max"]
-                .into_iter()
+            Picker::Efforts => ["low", "medium", "high", "xhigh", "max", "ultra"]
+                .into_iter().filter(|s| *s != "ultra" || self.ultra_available())
                 .map(|s| Item {
                     id: s.into(),
                     label: s.into(),
@@ -2294,7 +2301,7 @@ impl App {
             "/model"=>if arg.is_empty(){self.picker(Picker::Models);}else if relay_desktop::model::explicit_model(arg)&&arg.len()<=160&&!arg.chars().any(char::is_control){if let Some(c)=self.chat_mut(){c.model=arg.into();}self.control("model",arg);}else{self.notice="Выбери конкретную модель через /model".into();},
             "/mode"=>if arg.is_empty(){self.picker(Picker::Modes);}else if ["auto","manual","acceptEdits","plan"].contains(&arg){if let Some(c)=self.chat_mut(){c.mode=arg.into();}self.control("mode",arg);}else{self.notice="Режим: auto, manual, acceptEdits или plan".into();},
             "/effort" if self.chat().is_some_and(|c| c.backend == "agy") => { self.notice="В Antigravity глубина выбирается вместе с моделью.".into(); },
-            "/effort"=>if arg.is_empty(){self.picker(Picker::Efforts);}else if ["low","medium","high","xhigh","max"].contains(&arg){if let Some(c)=self.chat_mut(){c.effort=arg.into();}self.notice="Глубина применится к следующему ответу".into();}else{self.notice="Глубина: low, medium, high, xhigh, max".into();},
+            "/effort"=>if arg.is_empty(){self.picker(Picker::Efforts);}else if ["low","medium","high","xhigh","max"].contains(&arg) || (arg=="ultra" && self.ultra_available()){if let Some(c)=self.chat_mut(){c.effort=arg.into();}self.notice="Глубина применится к следующему ответу".into();}else{self.notice="Глубина: low, medium, high, xhigh, max".into();},
             "/backend" => {
                 if arg.is_empty() {
                     self.picker(Picker::Backends);

@@ -20,6 +20,18 @@ import org.robolectric.annotation.Config
 class UiNewFeaturesTest {
     @get:Rule val rule = createAndroidComposeRule<ComponentActivity>()
 
+    @Test @Config(sdk = [34], qualifiers = "w320dp-h480dp-xhdpi")
+    fun narrowChatOpensPhoneTestsAndKeepsComposerAccessible() {
+        val vm = RelayViewModel(ApplicationProvider.getApplicationContext())
+        vm.attach(ServerProfile(name = "PC", host = "localhost"))
+        vm.handle(JSONObject().put("type","hello").put("home","/tmp").put("protocol",4))
+        vm.newChat()
+        rule.setContent { RelayApp(vm) }
+        rule.onAllNodesWithContentDescription("Поле сообщения")[0].assertExists()
+        rule.onAllNodesWithContentDescription("Тесты на ПК")[0].performClick()
+        rule.onNodeWithText("Связать с ПК").assertExists()
+    }
+
     @Test fun oneClickAgentInstallBannerAndLockedSessionShield() {
         val vm = RelayViewModel(ApplicationProvider.getApplicationContext())
         val sent = mutableListOf<JSONObject>()

@@ -199,10 +199,11 @@ class AgyEngineTests(unittest.TestCase):
             {"role": "user", "text": "Проверь сайт"},
             {"role": "assistant", "text": "Редактор ролей проверен, все маршруты доступны."},
         ]
-        self.host.dispatch({"op": "prompt", "sid": sid, "cwd": str(self.project), "backend": "agy", "text": "Что было сделано?"})
+        self.host.dispatch({"op": "prompt", "sid": sid, "cwd": str(self.root / "stale"), "backend": "agy", "text": "Что было сделано?"})
         result, _ = self.wait_for(lambda e: e.get("type") == "claude" and e["data"].get("type") == "result")
         self.assertFalse(result["data"]["is_error"])
         self.assertEqual(result["sid"], sid)
+        self.assertEqual(self.host.runs[sid].cwd, str(self.project))
         calls = [json.loads(line) for line in self.rpc_log.read_text().splitlines()]
         sent = next(m for m in calls if m.get("method") == "session/prompt")["params"]["prompt"][0]["text"]
         self.assertIn("Редактор ролей проверен, все маршруты доступны.", sent)

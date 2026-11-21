@@ -11,6 +11,7 @@ import stat
 import sys
 import tempfile
 import threading
+import time
 import uuid
 
 TOOLS = [
@@ -19,6 +20,14 @@ TOOLS = [
 ,
     {"name":"minecraft_test", "description":"Run an automated in-game test on the user's computer: Relay starts its own hidden Minecraft (Fabric) copy with the given mods, executes the scenario and returns report.json, steps.log, the game log and PNG screenshots saved on THIS server (read them with your file tools). The user's normal game profile is not touched and the window never takes focus. Depending on the user's Relay setting the test runs immediately or the user is asked first; if they skip it, continue without claiming in-game verification. Scenario: one step per line, '#' comments. Steps: wait <sec>; wait_screen <ScreenClassOrTitle|none> [timeout]; wait_world [timeout]; test_world (create and enter a flat creative world); join <host:port> (offline-mode server); command </cmd>; chat <text>; key <key.inventory|e|escape|...>; click <button text|key:translation.key>; screen (log current screen and its buttons); screenshot <name>; log <text>; quit. Finish with quit. A failing step stops the run with a 'failure' screenshot.", "inputSchema":{"type":"object","properties":{"purpose":{"type":"string","description":"One short sentence shown to the user: what this test checks."},"scenario":{"type":"string"},"mods":{"type":"array","items":{"type":"string"},"description":"Absolute server paths of mod jars to load (the mod under test and its dependencies such as fabric-api)."},"minecraft_version":{"type":"string","description":"Default 1.21.8 (the only version the Relay test bot supports now)."},"loader_version":{"type":"string","description":"Fabric loader; default latest stable."},"timeout_seconds":{"type":"integer","minimum":60,"maximum":900}},"required":["purpose","scenario","mods"],"additionalProperties":False}}
 ]
+# Only a paired phone advertises screenshot return paths for local commands.
+PHONE_COMMAND = dict(TOOLS[1], inputSchema={
+    **TOOLS[1]["inputSchema"],
+    "properties": {**TOOLS[1]["inputSchema"]["properties"], "preview_files": {
+        "type":"array","maxItems":4,"items":{"type":"string"},
+        "description":"Image files produced by this command, relative to the PC workspace, to show on the phone."
+    }}
+})
 MAX_FILE = 512*1024*1024
 MAX_UPLOAD = 64*1024*1024
 TEST_ROOT = Path.home()/".cache/relay-desktop/gametest"
@@ -33,18 +42,22 @@ class RelayDesktop:
         self.socket.bind(self.path);os.chmod(self.path,0o600);self.socket.listen(8)
         self.socket.settimeout(1)
         self.closed=False;self.lock=threading.RLock();self.tokens={};self.pending={}
+        self.phone_history = {}
+        self.can_save_phone_result = lambda sid: False
+        self.phone_socket = Path.home() / ".cache/relay-desktop/phone/worker.sock"
         threading.Thread(target=self.accept,daemon=True).start()
 
-    def config(self,sid,tools=("download_file","run_local_command")):
+    def config(self,sid,tools=("download_file","run_local_command"),phone=False):
         self.cancel(sid,revoke=True)
         token=secrets.token_urlsafe(32)
         with self.lock:
-            self.tokens={k:v for k,v in self.tokens.items() if v!=sid};self.tokens[token]=sid
+            if phone: tools = tuple(t for t in tools if t in ("minecraft_test", "run_local_command"))
+            self.tokens[token] = (sid, tuple(tools), phone)
         script=Path(self.temp.name)/"mcp.py"
         if not script.exists():
             # Source is supplied by the desktop, never fetched from the network.
             script.write_text(SOURCE,encoding="utf-8");script.chmod(0o600)
-        return json.dumps({"mcpServers":{"relay_desktop":{"type":"stdio","command":sys.executable,"args":[str(script)],"env":{"RELAY_DESKTOP_SOCKET":self.path,"RELAY_DESKTOP_TOKEN":token,"RELAY_DESKTOP_TOOLS":",".join(tools)}}}})
+        return json.dumps({"mcpServers":{"relay_desktop":{"type":"stdio","command":sys.executable,"args":[str(script)],"env":{"RELAY_DESKTOP_SOCKET":self.path,"RELAY_DESKTOP_TOKEN":token,"RELAY_DESKTOP_TOOLS":",".join(tools),"RELAY_PAIRED_PHONE":"1" if phone else "0"}}}})
 
     def accept(self):
         while not self.closed:
@@ -61,13 +74,21 @@ class RelayDesktop:
                 line=stream.readline(65537)
             if len(line)>65536:raise ValueError("Request too large")
             request=json.loads(line)
-            with self.lock:sid=self.tokens.get(request.get("token"))
-            if not sid:raise ValueError("Desktop connection expired")
+            with self.lock: grant = self.tokens.get(request.get("token"))
+            if not grant:raise ValueError("Desktop connection expired")
+            sid, allowed, phone = grant
             tool=request.get("tool");args=request.get("input")
-            if tool not in ("download_file","run_local_command","minecraft_test") or not isinstance(args,dict):raise ValueError("Unknown desktop action")
+            if tool not in allowed or (phone and tool not in ("minecraft_test", "run_local_command")) or not isinstance(args,dict):raise ValueError("Unknown desktop action")
             field={"download_file":"server_path","run_local_command":"command","minecraft_test":"scenario"}[tool]
             text=args.get(field)
             if not isinstance(text,str) or not text.strip() or len(text)>(65536 if tool=="minecraft_test" else 16000) or "\x00" in text:raise ValueError("Invalid action")
+            if phone and tool == "run_local_command":
+                paths = args.get("preview_files", [])
+                if not isinstance(paths, list) or len(paths)>4 or not all(
+                    isinstance(p,str) and 0<len(p)<256 and not Path(p).is_absolute() and ".." not in Path(p).parts
+                    and Path(p).suffix.lower() in (".jpg",".jpeg",".png",".webp") for p in paths
+                ):
+                    raise ValueError("Ожидалось до четырёх путей к изображениям в рабочей папке ПК")
             wait=600
             if tool=="minecraft_test":
                 args,wait=self.test_input(args)
@@ -81,25 +102,148 @@ class RelayDesktop:
                 if destination is not None:args["destination"]=destination
             ident=str(uuid.uuid4());item={"sid":sid,"tool":tool,"input":args,"event":threading.Event(),"result":None,"streaming":False,"streamed":set(),"uploads":{},"uploaded":0}
             with self.lock:
-                if self.closed or self.tokens.get(request.get("token"))!=sid:raise ValueError("Desktop connection expired")
+                if self.closed or self.tokens.get(request.get("token"))!=grant:raise ValueError("Desktop connection expired")
                 if self.closed or len(self.pending)>=8:raise ValueError("Desktop is unavailable or busy")
                 self.pending[ident]=item
-            self.send({"type":"desktop_request","id":ident,"sid":sid,"tool":tool,"input":args})
+            event = {"type":"desktop_request","id":ident,"sid":sid,"tool":tool,"input":args}
             try:
+                if phone:
+                    try:
+                        self.run_phone(event, item, wait)
+                    except (OSError, ValueError) as error:
+                        if not item["event"].is_set(): self.result(ident, {"ok":False,"message":str(error)[:500]})
+                else:
+                    self.send(event)
                 if not item["event"].wait(wait):raise ValueError("Desktop approval timed out")
                 result=item["result"]
-                if tool=="minecraft_test" and isinstance(result,dict):
+                if (tool=="minecraft_test" or (phone and args.get("preview_files"))) and isinstance(result,dict):
                     folder=TEST_ROOT/ident
                     result["files"]=sorted(str(p) for p in folder.glob("*") if p.is_file() and not p.name.endswith(".part"))
                     result["folder"]=str(folder)
+                if phone:
+                    self.phone_update(ident, sid, stage="done", payload="", result=result)
+                    self.save_phone_result(ident, sid)
             finally:
                 with self.lock:self.pending.pop(ident,None)
-                self.send({"type":"desktop_cancel","id":ident,"sid":sid})
+                if not phone:self.send({"type":"desktop_cancel","id":ident,"sid":sid})
             client.sendall((json.dumps(result,ensure_ascii=False)+"\n").encode())
         except Exception as error:
             try:client.sendall((json.dumps({"ok":False,"message":str(error)[:500]})+"\n").encode())
             except OSError:pass
         finally:client.close()
+
+    def phone_update(self, ident, sid, **fields):
+        with self.lock:
+            row = self.phone_history.setdefault(ident, {"sid":sid, "id":ident})
+            row.update(fields)
+            # Active jobs stay visible while the user returns to the conversation.
+            if len(self.phone_history) > 100:
+                oldest = next((k for k,v in self.phone_history.items() if v.get("stage") == "done"), None)
+                if oldest: self.phone_history.pop(oldest)
+
+    def save_phone_result(self, ident, sid):
+        if not self.can_save_phone_result(sid): return
+        # Result files live with the other test artifacts. Never serialize the
+        # challenge, signature or approval payload into the session index.
+        folder = TEST_ROOT / "sessions" / str(uuid.UUID(sid))
+        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with self.lock:
+            row = self.phone_history.get(ident)
+            if not row: return
+            summary = {key:row[key] for key in ("id","sid","stage","tool","result")}
+        target = folder / (ident + ".json")
+        with tempfile.NamedTemporaryFile("w", dir=folder, delete=False) as temp:
+            json.dump(summary, temp, ensure_ascii=False)
+        os.replace(temp.name, target)
+        entries = sorted(folder.glob("*.json"), key=lambda p:p.name)
+        if len(entries)>30:
+            for p in sorted(entries, key=lambda f:f.stat().st_mtime)[:-30]: p.unlink(missing_ok=True)
+
+    def phone_state(self, sid):
+        with self.lock:
+            rows = [dict(row) for row in reversed(list(self.phone_history.values())) if row["sid"] == sid][:10]
+        if len(rows)<10 and self.can_save_phone_result(sid):
+            folder = TEST_ROOT / "sessions" / str(uuid.UUID(sid))
+            known = {row["id"] for row in rows}
+            for p in sorted(folder.glob("*.json"), key=lambda f:f.stat().st_mtime, reverse=True):
+                if p.stem in known: continue
+                try:
+                    row = json.loads(p.read_bytes())
+                    if row.get("sid") == sid and row.get("stage") == "done": rows.append(row)
+                except (ValueError,OSError): continue
+                if len(rows)>=10: break
+        online = False
+        if self.phone_socket.is_socket():
+            import fcntl
+            try:
+                with self.phone_socket.with_name("worker.lock").open() as guard:
+                    fcntl.flock(guard, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError: online = True
+            except OSError: pass
+        return {"type":"phone_tests", "sid":sid, "online":online, "jobs":rows}
+
+    def phone_decide(self, sid, ident, signature):
+        with self.lock:
+            item = self.pending.get(ident)
+            if not item or item["sid"] != sid or "decision" not in item:
+                raise ValueError("Запрос теста устарел")
+            if signature and not re.fullmatch(r"[A-Za-z0-9+/]{43}=", signature):
+                raise ValueError("Некорректная подпись телефона")
+            if not item["decision"].is_set():
+                item["signature"] = signature
+                item["decision"].set()
+
+    def run_phone(self, event, item, wait):
+        ident, sid = event["id"], event["sid"]
+        self.phone_update(ident, sid, stage="connecting", tool=event["tool"])
+        for mod in event["input"].get("mods", []):
+            digest = hashlib.sha256()
+            with open(mod["server_path"], "rb") as jar:
+                for block in iter(lambda: jar.read(1024*1024), b""):
+                    digest.update(block)
+            mod["sha256"] = digest.hexdigest()
+        with socket.socket(socket.AF_UNIX) as conn:
+            conn.settimeout(12)
+            try:
+                conn.connect(str(self.phone_socket))
+            except OSError as error:
+                raise ValueError("Фоновый Relay на ПК сейчас недоступен") from error
+            with conn.makefile("rb") as stream:
+                def read():
+                    line = stream.readline(400001)
+                    if not line or len(line) > 400000: raise ValueError("Связь с ПК прервана")
+                    return json.loads(line)
+                def write(frame):
+                    conn.sendall((json.dumps(frame, separators=(",",":"))+"\n").encode())
+                greeting = read()
+                if greeting.get("op") != "phone_challenge":
+                    raise ValueError("На ПК уже выполняется другой тест")
+                payload = json.dumps(dict(event, nonce=greeting["nonce"]), ensure_ascii=False, separators=(",",":"))
+                with self.lock:
+                    item["decision"] = threading.Event()
+                    self.phone_update(ident, sid, stage="approval", payload=payload)
+                if not item["decision"].wait(240) or not item.get("signature") or item["event"].is_set():
+                    raise ValueError("Телефон не подтвердил запуск")
+                conn.settimeout(min(wait, 1800))
+                write({"type":"phone_approved","payload":payload,"signature":item["signature"]})
+                self.phone_update(ident, sid, stage="running", payload="")
+                with self.lock:
+                    item["connection"] = conn
+                while not item["event"].is_set():
+                    frame = read()
+                    op = frame.get("op")
+                    if op == "phone_error": raise ValueError(frame.get("message") or "ПК отклонил запуск")
+                    if frame.get("id") != ident: continue
+                    if op == "desktop_download":
+                        self.download(ident, frame.get("index"), write)
+                    elif op == "desktop_upload":
+                        self.upload(ident, frame.get("name"), frame.get("sequence"), frame.get("data"))
+                    elif op == "desktop_upload_end":
+                        self.upload_end(ident, frame.get("name"))
+                    elif op == "phone_progress":
+                        self.phone_update(ident, sid, message=str(frame.get("message") or "")[:512])
+                    elif op == "desktop_result":
+                        self.result(ident, frame.get("result") or {"ok":False})
 
     def test_input(self,args):
         mods=args.get("mods")
@@ -123,7 +267,8 @@ class RelayDesktop:
     def upload(self,ident,name,sequence,data):
         with self.lock:
             item=self.pending.get(ident)
-            if not item or item["tool"]!="minecraft_test" or item["event"].is_set():return
+            if not item or item["event"].is_set():return
+            if item["tool"]!="minecraft_test" and name not in {Path(p).name for p in item["input"].get("preview_files", [])}:return
             if not isinstance(name,str) or not re.fullmatch(r"[\w][\w.-]{0,79}",name):return
             state=item["uploads"].setdefault(name,{"sequence":0})
             if sequence!=state["sequence"] or len(item["uploads"])>64:return
@@ -147,7 +292,8 @@ class RelayDesktop:
             if item:
                 item["result"]=result;item["event"].set()
 
-    def download(self,ident,index=None):
+    def download(self,ident,index=None,send=None):
+        send = send or self.send
         with self.lock:
             item=self.pending.get(ident)
             if not item or item["event"].is_set():return
@@ -170,19 +316,33 @@ class RelayDesktop:
                     total+=len(body)
                     if total>MAX_FILE:raise ValueError("File grew beyond 512 MiB")
                     digest.update(body)
-                    self.send({"type":"desktop_chunk","id":ident,"sequence":sequence,"data":base64.b64encode(body).decode()});sequence+=1
-            self.send({"type":"desktop_end","id":ident,"size":total,"sha256":digest.hexdigest()})
+                    send({"type":"desktop_chunk","id":ident,"sequence":sequence,"data":base64.b64encode(body).decode()});sequence+=1
+            send({"type":"desktop_end","id":ident,"size":total,"sha256":digest.hexdigest()})
         except OSError as error:
-            self.send({"type":"desktop_end","id":ident,"error":str(error)[:300]})
+            send({"type":"desktop_end","id":ident,"error":str(error)[:300]})
         except ValueError as error:
-            self.send({"type":"desktop_end","id":ident,"error":str(error)})
+            send({"type":"desktop_end","id":ident,"error":str(error)})
+
+    def cancel_phone(self, sid, ident):
+        with self.lock:
+            item = self.pending.get(ident)
+            if not item or item["sid"] != sid: return
+            self.result(ident, {"ok": False, "message": "Остановлено с телефона"})
+            if item.get("decision"): item["decision"].set()
+            if item.get("connection"):
+                try: item["connection"].shutdown(socket.SHUT_RDWR)
+                except OSError: pass
 
     def cancel(self,sid=None,revoke=False):
         with self.lock:
             for item in self.pending.values():
                 if sid is None or item["sid"]==sid:
                     item["result"]={"ok":False,"message":"Desktop action cancelled"};item["event"].set()
-            if revoke:self.tokens={k:v for k,v in self.tokens.items() if sid is not None and v!=sid}
+                    if item.get("decision"): item["decision"].set()
+                    if item.get("connection"):
+                        try: item["connection"].shutdown(socket.SHUT_RDWR)
+                        except OSError: pass
+            if revoke:self.tokens={k:v for k,v in self.tokens.items() if sid is not None and v[0]!=sid}
 
     def close(self):
         self.closed=True;self.cancel(revoke=True);self.socket.close();self.temp.cleanup()
@@ -200,7 +360,7 @@ def mcp_main():
             elif method=="ping":result={}
             elif method=="tools/list":
                 allowed=os.environ.get("RELAY_DESKTOP_TOOLS","download_file,run_local_command").split(",")
-                result={"tools":[t for t in TOOLS if t["name"] in allowed]}
+                result={"tools":[PHONE_COMMAND if t["name"]=="run_local_command" and os.environ.get("RELAY_PAIRED_PHONE")=="1" else t for t in TOOLS if t["name"] in allowed]}
             elif method=="tools/call":
                 params=req.get("params",{})
                 with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as client:

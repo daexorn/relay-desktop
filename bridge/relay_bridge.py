@@ -1498,7 +1498,9 @@ def claude_binary():
     raise ValueError("Claude Code не найден у этого пользователя. Установи и авторизуй его на сервере.")
 
 
-def validate_effort(effort):
+def validate_effort(effort, backend="claude"):
+    if backend == "codex" and effort == "ultra":
+        return effort
     if not isinstance(effort, str) or effort not in ("default", "low", "medium", "high", "xhigh", "max"):
         raise ValueError("Неизвестный уровень усилий.")
     return effort
@@ -1582,7 +1584,8 @@ class Run:
             local=bool(context.get("local",True))
             tests=context.get("tests","off") if context.get("tests") in ("auto","ask") else "off"
             tools=(("download_file","run_local_command") if local else ())+(("minecraft_test",) if tests!="off" else ())
-            servers.update(json.loads(owner.desktop.config(sid,tools))["mcpServers"])
+            config = owner.desktop.config(sid,tools,phone=True) if context.get("phone") else owner.desktop.config(sid,tools)
+            servers.update(json.loads(config)["mcpServers"])
             env["MCP_TOOL_TIMEOUT"]="2000000"
         if servers:
             args += ["--mcp-config", json.dumps({"mcpServers": servers})]
@@ -1772,6 +1775,37 @@ class FileTransfers:
     """Downloads explicitly initiated by the desktop UI, independent of PC control."""
     def __init__(self,send):
         self.send=send;self.lock=threading.RLock();self.items={}
+
+    def preview(self, sid, path, cwd):
+        event = {"type":"image_preview", "sid":sid, "path":path, "data":""}
+        try:
+            if not isinstance(path, str) or len(path) > 4096: return
+            requested = Path(path).expanduser()
+            if not requested.is_absolute(): requested = directory(cwd) / requested
+            if requested.suffix.lower() not in (".png",".jpg",".jpeg",".webp",".gif"): return
+            fd = os.open(requested, os.O_RDONLY | os.O_NONBLOCK)
+            with os.fdopen(fd, "rb") as source:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= 24*1024*1024: return
+                try:
+                    from PIL import Image
+                except ImportError:
+                    if info.st_size > 512*1024: return
+                    body = source.read(512*1024+1)
+                    if not body.startswith((b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF8")) and not (body[:4] == b"RIFF" and body[8:12] == b"WEBP"): return
+                else:
+                    import io
+                    with Image.open(source, formats=("JPEG","PNG","WEBP","GIF")) as picture:
+                        if picture.width * picture.height > 24000000: return
+                        picture.thumbnail((900,700))
+                        buffer = io.BytesIO()
+                        picture.convert("RGB").save(buffer, "JPEG", quality=80)
+                        body = buffer.getvalue()
+                event["data"] = base64.b64encode(body).decode()
+        except (OSError, ValueError, SyntaxError):
+            pass
+        finally:
+            self.send(event)
 
     def info(self,ident,path,cwd):
         source=None
@@ -2637,12 +2671,13 @@ class Bridge:
             eff_map = {"low": "low", "быстро": "low", "medium": "medium", "средне": "medium", "high": "high", "глубоко": "high", "max": "max", "макс": "max"}
             if backend == "codex":
                 eff_map["xhigh"] = "xhigh"
+                eff_map["ultra"] = "ultra"
             eff = eff_map.get(value.lower())
             if not eff:
-                extra = ", `/effort xhigh`" if backend == "codex" else ""
+                extra = ", `/effort xhigh`, `/effort ultra`" if backend == "codex" else ""
                 reply = f"**{agent}** · `/effort low`, `/effort medium`, `/effort high`, `/effort max`{extra}."
             else:
-                previous = validate_effort(settings.get("effort", "default"))
+                previous = validate_effort(settings.get("effort", "default"), backend)
                 self.slash_efforts[sid, backend] = (previous, eff)
                 self.send({"type": "effort_changed", "sid": sid, "effort": eff, "backend": backend})
                 reply = f"**{agent}** · глубина рассуждений `{eff}` со следующего хода."
@@ -2822,6 +2857,16 @@ class Bridge:
         if self.last_backend in ("codex", "agy") and backends[self.last_backend]["installed"]:
             self.probe_backend_catalog(self.last_backend)
 
+    def desktop_adapter(self):
+        if self.desktop is None:
+            source = globals().get("DESKTOP_SOURCE")
+            if not source: raise ValueError("Обнови Relay для работы с ПК.")
+            namespace = {"__name__":"relay_desktop_adapter", "SOURCE":source}
+            exec(source, namespace)
+            self.desktop = namespace["RelayDesktop"](self.send)
+            self.desktop.can_save_phone_result = lambda sid: not self.meta.is_locked(sid) and not self.meta.session_folder_grant(sid)
+        return self.desktop
+
     def dispatch(self, req):
         op = req.get("op")
         claimed = False
@@ -2830,6 +2875,20 @@ class Bridge:
                 grant = self.meta.session_folder_grant(valid_id(req.get("sid")))
                 if grant and grant not in self._caller_unlocked():
                     raise ValueError("Сначала открой папку паролем.")
+            if op in ("phone_tests", "phone_decide", "phone_stop"):
+                sid = valid_id(req.get("sid"))
+                self._require_unlocked(sid)
+                with self.run_lock:
+                    desktop = self.desktop_adapter()
+                if op == "phone_decide":
+                    desktop.phone_decide(sid, req.get("id"), req.get("signature", ""))
+                if op == "phone_stop":
+                    with desktop.lock:
+                        job = desktop.phone_history.get(req.get("id"), {})
+                        if job.get("sid") == sid and job.get("stage") in ("approval","running"):
+                            desktop.cancel_phone(sid, req["id"])
+                self.send(desktop.phone_state(sid))
+                return
             if op == "auth_start":
                 owner=getattr(CLIENT,'value',None)
                 provider = req.get('provider')
@@ -2994,6 +3053,10 @@ class Bridge:
                 for backend in BACKEND_LABELS:
                     self.slash_efforts.pop((sid, backend), None)
                 self.send({'type': 'session_deleted', 'sid': sid})
+            elif op == "image_preview":
+                sid = valid_id(req.get("sid"))
+                self._require_unlocked(sid)
+                self.files.preview(sid, req.get("path"), req.get("cwd"))
             elif op == "file_info":
                 self.files.info(req.get("id"),req.get("path"),req.get("cwd"))
             elif op == "file_stream":
@@ -3120,9 +3183,8 @@ class Bridge:
                     raise ValueError('До восьми вложений общим размером 512 МБ.')
                 if inline > 16*1024*1024:
                     raise ValueError('Изображения в одном сообщении — до 16 МБ. Остальные файлы — до 512 МБ.')
-                cwd = str(directory(req.get("cwd")))
                 mode, model = req.get("mode", "manual"), req.get("model", "default")
-                effort = "default" if backend == "agy" else validate_effort(req.get("effort", "default"))
+                effort = "default" if backend == "agy" else validate_effort(req.get("effort", "default"), backend)
                 original_effort = effort
                 pending_effort = self.slash_efforts.get((sid, backend))
                 if pending_effort and original_effort == pending_effort[0]:
@@ -3150,17 +3212,13 @@ class Bridge:
                         self.cluster_instructions=namespace["LEADER_INSTRUCTIONS"]
                     self.agent_role = agent_role
                     desktop_enabled=bool(req.get("desktop_enabled",False))
-                    if desktop_enabled and self.desktop is None:
-                        namespace={"__name__":"relay_desktop_adapter"}
-                        source=globals().get("DESKTOP_SOURCE")
-                        if not source:raise ValueError("Обнови Relay для работы с этим ПК.")
-                        namespace["SOURCE"]=source
-                        exec(source,namespace)
-                        self.desktop=namespace["RelayDesktop"](self.send)
+                    if desktop_enabled:
+                        self.desktop_adapter()
                     self.desktop_requested=desktop_enabled
                     self.actor=str(req.get("actor") or "")[:80]
                     self.desktop_context=json.dumps(req.get("desktop_context",{}),ensure_ascii=False)[:5000] if desktop_enabled else ""
                     run = self.runs.get(sid)
+                    cwd = run.cwd if run else req.get("cwd")
                     if run and run.busy and not run.closed and getattr(run,'backend','claude')!=backend:
                         raise ValueError('Дождись завершения ответа перед переключением между агентами.')
                     steer = bool(run and run.busy and run.turns > 0 and not run.closed and run.process.poll() is None and backend in ('claude', 'codex'))
@@ -3198,18 +3256,19 @@ class Bridge:
                             else:
                                 raise ValueError("Уже работают 24 разговора. Дождись завершения одного из них.")
                         existing = self.transcripts.find(sid)
-                        if existing and self.transcripts.metadata(existing)["cwd"] != cwd:
-                            raise ValueError("Открой исходную рабочую папку этой сессии.")
                         native_codex = not existing and self._scan_codex_native() and self.codex["has_native_session"](sid)
                         native_agy = not existing and not native_codex and self._scan_agy_native() and self.agy["has_native_session"](sid)
-                        if native_codex:
-                            ncwd = self.codex["native_cwd"](sid)
-                            if ncwd and Path(ncwd).is_dir() and ncwd != cwd:
-                                raise ValueError("Открой исходную рабочую папку этой сессии.")
-                        elif native_agy:
-                            ncwd = self.agy["native_cwd"](sid)
-                            if ncwd and Path(ncwd).is_dir() and ncwd != cwd:
-                                raise ValueError("Открой исходную рабочую папку этой сессии.")
+                        if existing:
+                            cwd = self.transcripts.metadata(existing)["cwd"]
+                        elif native_codex or native_agy:
+                            adapter = self.codex if native_codex else self.agy
+                            cwd = adapter["native_cwd"](sid) or cwd
+                        try:
+                            cwd = str(directory(cwd))
+                        except ValueError:
+                            if existing or native_codex or native_agy:
+                                raise ValueError(f"Рабочая папка чата недоступна на сервере: {cwd}") from None
+                            raise
                         native_backend = 'codex' if native_codex else 'agy' if native_agy else None
                         if native_backend and backend != native_backend:
                             adapter = self.codex if native_codex else self.agy

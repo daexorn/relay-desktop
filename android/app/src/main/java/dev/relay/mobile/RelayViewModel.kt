@@ -39,6 +39,9 @@ class Chat(val sid: String, cwd: String, title: String, model: String, mode: Str
     var mode by mutableStateOf(mode)
     var effort by mutableStateOf(concreteEffort(effort))
     var draft by mutableStateOf("")
+    val previews = mutableStateMapOf<String, String>()
+    var phoneOnline by mutableStateOf(false)
+    var phoneJobs by mutableStateOf<List<JSONObject>>(emptyList())
     var turnSummary by mutableStateOf(TurnSummary())
     var loading by mutableStateOf(false)
     var loaded by mutableStateOf(false)
@@ -177,6 +180,43 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
     fun chooseActor(name: String) {
         actor = name
         store.actor = name
+    }
+
+    fun phoneKey() = current?.let { store.password("phone-tests:${it.id}") }.orEmpty()
+
+    fun pairPhone(key: String): Boolean {
+        val server = current ?: return false
+        if (key.isNotEmpty() && !key.matches(Regex("[a-f0-9]{32}"))) return false
+        store.setPassword("phone-tests:${server.id}", key.takeIf { it.isNotEmpty() })
+        return phoneKey() == key
+    }
+
+    fun preview(c: Chat, path: String) {
+        if (link != Link.Online || demo || c.isLockedGate() || path in c.previews) return
+        if (c.previews.size >= 16) c.previews.remove(c.previews.keys.first())
+        c.previews[path] = ""
+        send(JSONObject().put("op","image_preview").put("sid",c.sid).put("path",path).put("cwd",c.cwd))
+    }
+
+    fun pollPhone(c: Chat) {
+        if (link == Link.Online && !c.isLockedGate() && !demo) send(JSONObject().put("op","phone_tests").put("sid",c.sid))
+    }
+
+    fun decidePhone(c: Chat, job: JSONObject, approve: Boolean) {
+        val raw = job.optString("payload")
+        val request = runCatching { JSONObject(raw) }.getOrNull() ?: return
+        if (c.isLockedGate() || request.optString("sid") != c.sid || request.optString("id") != job.optString("id")) return
+        val signature = if (approve) {
+            val key = phoneKey().takeIf { it.isNotBlank() } ?: return
+            val mac = javax.crypto.Mac.getInstance("HmacSHA256")
+            mac.init(javax.crypto.spec.SecretKeySpec(key.toByteArray(Charsets.UTF_8), "HmacSHA256"))
+            Base64.getEncoder().encodeToString(mac.doFinal(raw.toByteArray(Charsets.UTF_8)))
+        } else ""
+        send(JSONObject().put("op","phone_decide").put("sid",c.sid).put("id",job.optString("id")).put("signature",signature))
+    }
+
+    fun stopPhone(c: Chat, id: String) {
+        if (!c.isLockedGate()) send(JSONObject().put("op","phone_stop").put("sid",c.sid).put("id",id))
     }
 
     fun savedPassword(server: ServerProfile) = store.password(server.id)
@@ -568,11 +608,21 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                     saveServer(trusted, null, false)
                 }
                 send(JSONObject().put("op", "sessions"))
+                chats.values.forEach { it.previews.clear() }
                 selected?.let { s ->
                     val chat = chats[s]
                     if (chat == null || !chat.isLockedGate()) send(JSONObject().put("op", "history").put("sid", s))
                 }
                 schedulePoll()
+            }
+            "image_preview" -> chats[sid]?.takeUnless { it.isLockedGate() }?.let { c ->
+                val path = value.optString("path")
+                if (path in c.previews) c.previews[path] = value.optString("data")
+            }
+            "phone_tests" -> chats[sid]?.takeUnless { it.isLockedGate() }?.let { c ->
+                c.phoneOnline = value.optBoolean("online")
+                val rows = value.optJSONArray("jobs") ?: JSONArray()
+                c.phoneJobs = (0 until rows.length()).mapNotNull { rows.optJSONObject(it) }
             }
             "backends_status" -> parseBackends(value.optJSONObject("backends"))
             "agent_install" -> {
@@ -802,7 +852,7 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
             "catalog" -> {
                 val b = value.optString("backend").ifBlank { "claude" }
                 val parsedModels = value.optJSONArray("models")?.let { a -> (0 until a.length()).mapNotNull { a.optJSONObject(it) }.map {
-                    ModelInfo(it.optString("value"), it.optString("displayName"), it.optString("description"))
+                    ModelInfo(it.optString("value"), it.optString("displayName"), it.optString("description"), it.optBoolean("ultra"))
                 } }.orEmpty().filter { it.value.isNotEmpty() }
                 val parsedCommands = value.optJSONArray("commands")?.let { a -> (0 until a.length()).mapNotNull { a.optJSONObject(it) }.map {
                     CommandInfo(it.optString("name"), it.optString("description"), it.optString("hint"))
@@ -1046,6 +1096,7 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                     "medium", "средне" -> "medium"
                     "high", "глубоко" -> "high"
                     "xhigh" -> "xhigh"
+                    "ultra" -> "ultra".takeIf { catalogFor(c.activeBackend()).any { m -> m.value == modelForChat(c) && m.ultra } }
                     "max", "макс" -> "max"
                     else -> null
                 } ?: run {
@@ -1200,6 +1251,7 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         c.transcript.turnBackend = activeBackend
         c.transcript.turnModel = selectedModel
         c.transcript.turnMode = c.mode
+        if (c.effort == "ultra" && !catalogFor(activeBackend).any { it.value == selectedModel && it.ultra }) c.effort = "medium"
         val turnEffort = if (activeBackend == "agy") "" else c.effort
         c.transcript.turnEffort = turnEffort
         c.transcript.turnActor = actorStr
@@ -1208,6 +1260,7 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                 "user",
                 text,
                 images = images.length(),
+                imageData = (0 until images.length()).map { images.getJSONObject(it).getString("data") },
                 files = attached.filter { !it.image }.map { it.name },
                 backend = activeBackend,
                 model = selectedModel,
@@ -1235,8 +1288,8 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
             .put("mode", c.mode)
             .put("effort", turnEffort.ifBlank { "default" })
             .put("actor", actor.ifBlank { "Relay Android" })
-            .put("desktop_enabled", false)
-            .put("desktop_context", JSONObject())
+            .put("desktop_enabled", activeBackend != "api" && phoneKey().isNotBlank())
+            .put("desktop_context", JSONObject().put("phone",true).put("local",true).put("tests","ask"))
             .put("backend", activeBackend)
         if (activeBackend == "api" && !quickSlash) {
             request.put("api", profile.api.request(store.apiKey(profile.id).orEmpty(), c.apiModel))

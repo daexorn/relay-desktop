@@ -1956,11 +1956,13 @@ mod tests {
         }
         app.remote.get_mut(&a.id).unwrap().agy_models = vec![
             crate::model::ModelInfo {
+                ultra: false,
                 value: "gemini-4-neon-high".into(),
                 display_name: "Gemini 4 Neon (High)".into(),
                 description: "Deep reasoning".into(),
             },
             crate::model::ModelInfo {
+                ultra: false,
                 value: "gemini-4-carbon-medium".into(),
                 display_name: "Gemini 4 Carbon (Medium)".into(),
                 description: "Balanced".into(),

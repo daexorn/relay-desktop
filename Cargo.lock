@@ -4210,7 +4210,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "relay-desktop"
-version = "0.20.2"
+version = "0.20.3"
 dependencies = [
  "ab_glyph",
  "anyhow",
@@ -4221,6 +4221,7 @@ dependencies = [
  "dirs",
  "eframe",
  "egui_commonmark",
+ "hmac 0.12.1",
  "image",
  "keyring",
  "pulldown-cmark",

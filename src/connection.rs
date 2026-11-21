@@ -116,6 +116,9 @@ impl Controller {
         )
     }
     pub fn connect(&mut self, server: Server, password: String) {
+        self.connect_with_worker(server, password, None);
+    }
+    pub(crate) fn connect_with_worker(&mut self, server: Server, password: String, worker: Option<Zeroizing<String>>) {
         self.disconnect(&server.id);
         let (tx, rx) = async_mpsc::unbounded_channel();
         self.channels.insert(server.id.clone(), tx);
@@ -123,7 +126,7 @@ impl Controller {
         bus.epoch = Some((server.id.clone(), self.generations[&server.id]));
         self.runtime.spawn(async move {
             let id = server.id.clone();
-            if let Err(error) = run(server, Zeroizing::new(password), bus.clone(), rx).await {
+            if let Err(error) = run(server, Zeroizing::new(password), bus.clone(), rx, worker).await {
                 bus.send(Event::Error {
                     server: id.clone(),
                     message: format!("{error:#}"),
@@ -231,6 +234,7 @@ async fn run(
     password: Zeroizing<String>,
     bus: Bus,
     mut requests: async_mpsc::UnboundedReceiver<Value>,
+    worker: Option<Zeroizing<String>>,
 ) -> Result<()> {
     let config = Arc::new(client::Config {
         inactivity_timeout: None,
@@ -262,7 +266,7 @@ async fn run(
     anyhow::ensure!(auth.success(), "Сервер не принял логин или пароль.");
     drop(password);
     let mut channel = session.channel_open_session().await?;
-    let helper = format!(
+    let helper = if worker.is_some() { include_str!("../bridge/phone_worker.py").to_owned() } else { format!(
         "DESKTOP_SOURCE = {}\nBOARD_SOURCE = {}\nCLUSTER_SOURCE = {}\nATTACHMENTS_SOURCE = {}\nAPI_SOURCE = {}\nCODEX_SOURCE = {}\nAGY_SOURCE = {}\nINSTALLER_SOURCE = {}\nAUTH_SOURCE = {}\nBROWSER_SOURCE = {}\nAPI_DEFAULT = {}\nDEFAULT_BACKEND = {}\n{}",
         serde_json::to_string(include_str!("../bridge/desktop_mcp.py"))?,
         serde_json::to_string(include_str!("../bridge/board.py"))?,
@@ -277,7 +281,7 @@ async fn run(
         if server.effective_backend() == "api" { "True" } else { "False" },
         serde_json::to_string(server.effective_backend())?,
         include_str!("../bridge/relay_bridge.py")
-    );
+    ) };
     channel
         .exec(
             true,
@@ -296,6 +300,13 @@ async fn run(
     let (local_tx, mut local_rx) = async_mpsc::unbounded_channel::<Value>();
     let mut desktop =
         crate::desktop::Desktop::new(local_tx.clone(), bus.clone(), server.id.clone());
+    let mut gate = crate::phone_tests::Gate::default();
+    if worker.is_some() {
+        desktop.local(&json!({"op":"_tests_policy","mode":if server.tests == "off" { "off" } else { "auto" }}));
+        if server.local_control {
+            desktop.local(&json!({"op":"_desktop_workspace","path":server.local_workspace}));
+        }
+    }
     let mut uploads: HashMap<String, (String, oneshot::Sender<()>)> = HashMap::new();
     let mut buffer = Vec::new();
     let mut stderr = String::new();
@@ -376,7 +387,23 @@ async fn run(
                         let line:Vec<_>=buffer.drain(..=end).collect();
                         let value:Value=serde_json::from_slice(&line).context("Сервер вернул некорректный ответ.")?;
                         if value["type"]=="hello" {greeted=true;}
-                        if !desktop.incoming(&value){bus.send(Event::Data{server:server.id.clone(),value});}
+                        if let Some(key) = worker.as_deref() {
+                            match value["type"].as_str() {
+                                Some("hello") if value.get("id").is_none() => bus.send(Event::Data{server:server.id.clone(),value}),
+                                Some("phone_open") => { local_tx.send(gate.challenge()?)?; }
+                                Some("phone_approved") => {
+                                    match gate.approve(&value, key) {
+                                        Ok(request) => {
+                                            desktop.local(&json!({"op":"_desktop_policy","sid":request["sid"],"auto":true}));
+                                            desktop.incoming(&request);
+                                        }
+                                        Err(error) => { local_tx.send(json!({"op":"phone_error","message":error.to_string()}))?; }
+                                    }
+                                }
+                                _ if gate.permits(&value)? => { desktop.incoming(&value); }
+                                _ => {}
+                            }
+                        } else if !desktop.incoming(&value){bus.send(Event::Data{server:server.id.clone(),value});}
                     }
                 },
                 Some(ChannelMsg::ExtendedData{data,..})=>{if stderr.len()<4000 {stderr.push_str(&String::from_utf8_lossy(&data));}},

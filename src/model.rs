@@ -39,16 +39,19 @@ pub fn default_backend_models(b: &str) -> Vec<ModelInfo> {
     match b {
         "codex" => vec![
             ModelInfo {
+                ultra: false,
                 value: "gpt-5.4".into(),
                 display_name: "GPT-5.4".into(),
                 description: "Основная агентная модель OpenAI Codex".into(),
             },
             ModelInfo {
+                ultra: false,
                 value: "gpt-5.3-codex".into(),
                 display_name: "GPT-5.3 Codex".into(),
                 description: "Специализированная модель для кода".into(),
             },
             ModelInfo {
+                ultra: false,
                 value: "gpt-5.4-mini".into(),
                 display_name: "GPT-5.4 Mini".into(),
                 description: "Быстрая модель для простых задач".into(),
@@ -56,16 +59,19 @@ pub fn default_backend_models(b: &str) -> Vec<ModelInfo> {
         ],
         "agy" => vec![
             ModelInfo {
+                ultra: false,
                 value: "gemini-4-carbon-medium".into(),
                 display_name: "Gemini 4 Carbon (Medium)".into(),
                 description: "Средняя глубина".into(),
             },
             ModelInfo {
+                ultra: false,
                 value: "gemini-4-carbon-high".into(),
                 display_name: "Gemini 4 Carbon (High)".into(),
                 description: "Высокая глубина".into(),
             },
             ModelInfo {
+                ultra: false,
                 value: "gemini-4-carbon-low".into(),
                 display_name: "Gemini 4 Carbon (Low)".into(),
                 description: "Низкая глубина".into(),
@@ -586,6 +592,8 @@ impl Session {
 /// A model exactly as the server's Claude Code lists it: `fable`, `opus`, a full id…
 #[derive(Clone, Default, Deserialize, Debug, PartialEq)]
 pub struct ModelInfo {
+    #[serde(default)]
+    pub ultra: bool,
     pub value: String,
     #[serde(default, rename = "displayName")]
     pub display_name: String,
@@ -748,6 +756,7 @@ pub fn effort_short_label(effort: &str) -> &'static str {
         "low" => "Быстро",
         "medium" => "Средне",
         "high" => "Глубоко",
+        "ultra" => "Ultra",
         "max" | "xhigh" => "Макс",
         _ => "",
     }

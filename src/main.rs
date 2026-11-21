@@ -20,6 +20,19 @@ fn main() -> eframe::Result {
         println!("Relay {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
+    if let [_, mode, profile] = args.as_slice() {
+        if mode == "--phone-tests" || mode == "--phone-pair" {
+            let result = relay_desktop::phone_tests::profile(profile).and_then(|server| {
+                if mode == "--phone-pair" {
+                    println!("{}", relay_desktop::phone_tests::pair(&server)?);
+                    Ok(())
+                } else {
+                    relay_desktop::phone_tests::serve(server)
+                }
+            });
+            return result.map_err(|e| eframe::Error::AppCreation(e.into()));
+        }
+    }
     if let Some(i) = args.iter().position(|a| a == "--game-test") {
         // Debug entry: relay --game-test <scenario> <mods dir> <out dir>; writes <out>/result.json.
         let arg = |n: usize| args.get(i + n).cloned().unwrap_or_default();

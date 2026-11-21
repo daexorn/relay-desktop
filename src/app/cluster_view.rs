@@ -1383,6 +1383,12 @@ fn build_editor_catalogs(app: &RelayApp) -> HashMap<String, ServerCatalogSnapsho
         .collect()
 }
 
+fn effort_choices(backend: &str, model: &str, inherited: &str, models: &[crate::model::ModelInfo]) -> impl Iterator<Item=&'static str> {
+    let selected = if model == "inherit" || model.is_empty() { inherited } else { model };
+    let ultra = backend == "codex" && models.iter().any(|m| m.value == selected && m.ultra);
+    crate::model::backend_effort_options(backend).iter().copied().chain(ultra.then_some("ultra"))
+}
+
 fn format_model_choice(models: &[crate::model::ModelInfo], value: &str, host_model: &str) -> String {
     let trimmed = value.trim();
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("default") {
@@ -1567,8 +1573,8 @@ fn model_slot_editor(
                     );
                     ui.selectable_value(&mut slot.effort, "default".into(), "По умолчанию движка");
                     ui.separator();
-                    for id in crate::model::backend_effort_options(&eff_backend) {
-                        ui.selectable_value(&mut slot.effort, (*id).into(), *id);
+                    for id in effort_choices(&eff_backend, &slot.model, host_model, models) {
+                        ui.selectable_value(&mut slot.effort, id.into(), id);
                     }
                 });
         } else {
@@ -1842,8 +1848,8 @@ fn agent_editor(
                             );
                             ui.selectable_value(&mut a.effort, "default".into(), "По умолчанию движка");
                             ui.separator();
-                            for id in crate::model::backend_effort_options(eff_backend) {
-                                ui.selectable_value(&mut a.effort, (*id).into(), *id);
+                            for id in effort_choices(eff_backend, &a.model, host_model, models) {
+                                ui.selectable_value(&mut a.effort, id.into(), id);
                             }
                         });
                 } else {

@@ -2,6 +2,7 @@
 pub mod attachments;
 pub mod cluster;
 pub mod connection;
+pub mod phone_tests;
 pub mod desktop;
 pub mod gametest;
 pub mod model;

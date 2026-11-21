@@ -516,7 +516,7 @@ class ProtocolTests(unittest.TestCase):
         # The real CLI persists the transcript before returning the turn's result.
         project=self.host.transcripts.root/'project';project.mkdir(parents=True)
         (project/(self.sid+'.jsonl')).write_text(json.dumps({'type':'user','uuid':'first','cwd':str(self.root),'message':{'content':'test'}})+'\n')
-        self.host.dispatch(dict(request,effort='high'))
+        self.host.dispatch(dict(request,effort='high',cwd=str(self.root/'stale')))
         self.wait('permission')
         second=self.host.runs[self.sid]
         self.addCleanup(cleanup,second)

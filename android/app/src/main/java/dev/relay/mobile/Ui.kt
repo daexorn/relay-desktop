@@ -827,6 +827,11 @@ fun TopBar(
     actions: @Composable () -> Unit = {},
 ) {
     val p = LocalPalette.current
+    val compact = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp < 430
+    val buttons: @Composable () -> Unit = {
+        Row(Modifier.horizontalScroll(rememberScrollState()), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(2.dp)) { actions() }
+    }
     Column(Modifier.fillMaxWidth().background(p.mix(p.rail, p.side, 0.55f).copy(alpha = 0.92f))) {
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 7.dp),
@@ -846,10 +851,9 @@ fun TopBar(
                     }
                 }
             }
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                actions()
-            }
+            if (!compact) buttons()
         }
+        if (compact) Box(Modifier.align(Alignment.End).padding(horizontal = 8.dp)) { buttons() }
         HorizontalDivider(thickness = 1.dp, color = p.borderSubtle)
     }
 }
@@ -911,6 +915,7 @@ fun Sheet(onDismiss: () -> Unit, content: @Composable () -> Unit) {
                             indication = null,
                             onClick = {},
                         )
+                        .verticalScroll(rememberScrollState())
                         .padding(horizontal = 20.dp, vertical = 16.dp),
                 ) {
                     Box(
@@ -1934,6 +1939,16 @@ fun ChatScreen(vm: RelayViewModel) {
     val attributions = remember(version, activeBackend, busy) {
         computeAttributions(chat.transcript.messages, activeBackend, busy)
     }
+    var phoneSheet by remember(chat.sid) { mutableStateOf(false) }
+    LaunchedEffect(chat.sid, lockedGate, vm.link, phoneSheet) {
+        if (!lockedGate && vm.link == Link.Online && (phoneSheet || vm.phoneKey().isNotBlank())) {
+            while (true) {
+                vm.pollPhone(chat)
+                kotlinx.coroutines.delay(if (phoneSheet) 1800L else 4000L)
+            }
+        }
+    }
+    if (phoneSheet && !lockedGate) PhoneTests(vm, chat) { phoneSheet = false }
     var positioned by remember(chat.sid) { mutableStateOf(false) }
     var lastItems by remember(chat.sid) { mutableStateOf(0) }
 
@@ -1965,6 +1980,7 @@ fun ChatScreen(vm: RelayViewModel) {
                 onBack = { vm.screen = Screen.Sessions },
             ) {
                 BackendBadge(activeBackend, showDot = true) { agentsSheet = true }
+                if (!lockedGate) GlyphButton(Glyph.Terminal, "Тесты на ПК", highlighted = chat.phoneJobs.any { it.optString("stage") == "approval" }) { phoneSheet = true }
                 GlyphButton(
                     glyph = Glyph.Radar,
                     hint = "Радар агентов",
@@ -1983,6 +1999,9 @@ fun ChatScreen(vm: RelayViewModel) {
                 }
             }
             if (vm.notice.isNotEmpty()) Notice(vm.notice) { vm.notice = "" }
+            if (!lockedGate && !phoneSheet && chat.phoneJobs.any { it.optString("stage") == "approval" }) {
+                GhostButton("Подтвердить тест на ПК", p.accent) { phoneSheet = true }
+            }
 
             if (lockedGate) {
                 LockedSessionCard(vm, chat, Modifier.weight(1f))
@@ -2028,6 +2047,7 @@ fun ChatScreen(vm: RelayViewModel) {
                                         backend = attr?.backend?.ifBlank { activeBackend } ?: activeBackend,
                                         attr = attr,
                                         streaming = busy && item.index == chat.transcript.messages.lastIndex,
+                                        preview = { path -> ServerImagePreview(vm, chat, path) },
                                     ) { path -> vm.download(path, chat.cwd) }
                                 }
                                 is Item.Actions -> {
@@ -2348,7 +2368,8 @@ fun UserBubble(m: Message, attr: MessageAttribution? = null) {
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             if (m.text.isNotBlank()) Text(m.text, color = p.text, fontSize = 15.5.sp, lineHeight = 22.sp)
-            if (m.images > 0) {
+            for (data in m.imageData) ImageAttachmentPreview(data)
+            if (m.images > m.imageData.size) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                     VectorGlyph(Glyph.Image, p.accent, size = 13.dp)
                     Label("Изображений: ${m.images}", 12.sp, p.muted)
@@ -2378,6 +2399,7 @@ fun AssistantText(
     backend: String = "claude",
     attr: MessageAttribution? = null,
     streaming: Boolean = false,
+    preview: (@Composable (String) -> Unit)? = null,
     onFile: ((String) -> Unit)? = null,
 ) {
     val p = LocalPalette.current
@@ -2409,6 +2431,7 @@ fun AssistantText(
         if (onFile != null && files.isNotEmpty()) {
             Column(Modifier.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 for (path in files) {
+                    preview?.invoke(path)
                     val dlShape = RoundedCornerShape(12.dp)
                     Row(
                         Modifier
@@ -2974,6 +2997,7 @@ fun TransferCard(vm: RelayViewModel, t: Transfer) {
             }
             IconButton(Icons.Default.Close, if (t.done || t.error.isNotEmpty()) "Убрать" else "Отменить") { vm.dismiss(t) }
         }
+        if (t.mime.startsWith("image/")) t.uri?.let { DownloadPreview(it) }
         if (!t.done && t.error.isEmpty() && t.size > 0) {
             Box(Modifier.padding(top = 6.dp).fillMaxWidth().height(3.dp).clip(RoundedCornerShape(2.dp)).background(p.line)) {
                 Box(Modifier.fillMaxWidth(progress).fillMaxHeight().background(p.accent))
@@ -2991,7 +3015,9 @@ fun Composer(vm: RelayViewModel, chat: Chat, onOpenAgents: () -> Unit = {}) {
     val busy = chat.version >= 0 && chat.transcript.busy
     val activeBackend = chat.activeBackend()
     val engineTone = backendColor(p, activeBackend)
-    for (t in vm.transfers.take(3)) key(t.id) { TransferCard(vm, t) }
+    if (vm.transfers.isNotEmpty()) Column(Modifier.heightIn(max = 140.dp).verticalScroll(rememberScrollState())) {
+        for (t in vm.transfers) key(t.id) { TransferCard(vm, t) }
+    }
     val online = vm.link == Link.Online
     var apiSettings by remember { mutableStateOf(false) }
     if (apiSettings) vm.current?.let { server -> ApiDialog(vm, server) { apiSettings = false } }
@@ -3061,7 +3087,8 @@ fun Composer(vm: RelayViewModel, chat: Chat, onOpenAgents: () -> Unit = {}) {
                     if (activeBackend != "agy") {
                         Selector(
                             label = "Глубина: " + concreteEffort(chat.effort),
-                            options = listOf("low" to "Низкая", "medium" to "Средняя", "high" to "Высокая", "xhigh" to "Очень высокая", "max" to "Максимальная"),
+                            options = listOf("low" to "Низкая", "medium" to "Средняя", "high" to "Высокая", "xhigh" to "Очень высокая", "max" to "Максимальная") +
+                                if (catalog.any { it.value == currentModel && it.ultra }) listOf("ultra" to "Ультра") else emptyList(),
                         ) {
                             chat.effort = it
                         }
@@ -3311,7 +3338,7 @@ fun Composer(vm: RelayViewModel, chat: Chat, onOpenAgents: () -> Unit = {}) {
                     },
                 contentAlignment = Alignment.Center,
             ) {
-                PixelMascot("pet", size = 29.dp)
+                PixelMascot(activeBackend, size = 29.dp)
             }
 
             // Always usable: offline the message waits in the outbox and goes once the server is back.

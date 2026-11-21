@@ -179,7 +179,7 @@ data class AuthFlowState(
 }
 
 /** A model or slash command reported by a server CLI engine or API. */
-data class ModelInfo(val value: String, val name: String, val description: String)
+data class ModelInfo(val value: String, val name: String, val description: String, val ultra: Boolean = false)
 data class CommandInfo(val name: String, val description: String, val hint: String)
 
 fun explicitModel(value: String) = value.isNotBlank() && value.trim().lowercase() !in setOf("default", "auto")
@@ -245,6 +245,7 @@ data class Message(
     val toolId: String = "",
     val failed: Boolean = false,
     val images: Int = 0,
+    val imageData: List<String> = emptyList(),
     /** Names of files sent with this message from the phone. */
     val files: List<String> = emptyList(),
     var backend: String = "",
@@ -552,6 +553,9 @@ class Transcript {
                     toolId = r.optString("tool_id"),
                     failed = r.optBoolean("failed"),
                     images = r.optJSONArray("images")?.length() ?: 0,
+                    imageData = r.optJSONArray("images")?.let { pictures ->
+                        (0 until pictures.length()).mapNotNull { pictures.optJSONObject(it)?.optString("data")?.takeIf(String::isNotEmpty) }
+                    }.orEmpty(),
                     backend = r.optString("backend"),
                     model = r.optString("model"),
                     actor = r.optString("actor"),

@@ -218,6 +218,15 @@ class CodexEngineTests(unittest.TestCase):
         cat, _ = self.wait_for(lambda e: e.get("type") == "catalog" and e.get("backend") == "codex")
         self.assertEqual([m["value"] for m in cat["models"]], ["gpt-5.4", "gpt-5.3-codex"])
 
+    def test_astra_ultra_reaches_turn_start(self):
+        sid = str(uuid.uuid4())
+        self.host.dispatch({"op":"prompt", "backend":"codex", "sid":sid, "cwd":str(self.project),
+                            "text":"fixture", "model":"gpt-6.2-astra", "mode":"auto", "effort":"ultra"})
+        self.wait_for(lambda e: e.get("type") == "claude" and e["data"].get("type") == "result")
+        frames = map(json.loads, self.rpc_log.read_text().splitlines())
+        params = next(row["params"] for row in frames if row.get("method") == "turn/start")
+        self.assertEqual((params["model"], params["effort"]), ("gpt-6.2-astra","ultra"))
+
     def test_codex_turn_streaming_tools_mcp_and_shared_history(self):
         sid = str(uuid.uuid4())
         cluster_src = (Path(__file__).parents[1] / "bridge/cluster_mcp.py").read_text(encoding="utf-8")

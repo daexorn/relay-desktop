@@ -17,7 +17,11 @@ spec=importlib.util.spec_from_file_location('desktop_mcp',SOURCE)
 mcp=importlib.util.module_from_spec(spec);spec.loader.exec_module(mcp);mcp.SOURCE=SOURCE.read_text()
 
 class DesktopTests(unittest.TestCase):
-    def setUp(self):self.events=queue.Queue();self.service=mcp.RelayDesktop(self.events.put);self.config=json.loads(self.service.config('test-session'));self.token=self.config['mcpServers']['relay_desktop']['env']['RELAY_DESKTOP_TOKEN']
+    def setUp(self):
+        self.events = queue.Queue()
+        self.service = mcp.RelayDesktop(self.events.put)
+        self.config = json.loads(self.service.config("test-session", tuple(t["name"] for t in mcp.TOOLS)))
+        self.token = self.config["mcpServers"]["relay_desktop"]["env"]["RELAY_DESKTOP_TOKEN"]
     def tearDown(self):self.service.close()
     def call(self,tool,args,token=None):
         result=queue.Queue()

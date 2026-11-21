@@ -536,7 +536,8 @@ class AgyRun:
             tests = ctx.get("tests", "off") if ctx.get("tests") in ("auto", "ask") else "off"
             tools = (("download_file", "run_local_command") if local else ()) + (("minecraft_test",) if tests != "off" else ())
             if tools:
-                raw_mcp = json.loads(self.owner.desktop.config(self.sid, tools)).get("mcpServers", {})
+                config = self.owner.desktop.config(self.sid, tools, phone=True) if ctx.get("phone") else self.owner.desktop.config(self.sid, tools)
+                raw_mcp = json.loads(config).get("mcpServers", {})
                 for name, spec in raw_mcp.items():
                     add_mcp(name, spec["command"], spec.get("args", []), spec.get("env", {}))
         if self.custom_prompt:

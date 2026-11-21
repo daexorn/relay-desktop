@@ -1999,6 +1999,7 @@ impl RelayApp {
                     "medium" | "средне" => "medium",
                     "high" | "глубоко" => "high",
                     "xhigh" => "xhigh",
+                    "ultra" if backend == "codex" && models.iter().any(|m| m.value == c.model && m.ultra) => "ultra",
                     "max" | "макс" => "max",
                     _ => {
                         c.error = "Глубина: low, medium, high, xhigh или max.".into();
@@ -4789,7 +4790,7 @@ impl RelayApp {
                             Vec2::splat(26.),
                             egui::Sense::click(),
                         );
-                        design::engine_icon(ui, pet_rect, "pet");
+                        design::engine_icon(ui, pet_rect, &backend);
                         if pet_resp
                             .on_hover_cursor(egui::CursorIcon::PointingHand)
                             .on_hover_text("Меню команд (/usage, /cost, /status, /help)")
@@ -6340,6 +6341,8 @@ fn composer_selectors(
                 }
             });
         if backend != "agy" {
+            let ultra = backend == "codex" && models.iter().any(|m| m.value == *selected_model && m.ultra);
+            if chat.effort == "ultra" && !ultra && (backend != "codex" || models.iter().any(|m| m.value == *selected_model)) { chat.effort = "medium".into(); }
             design::wrap_control(ui,&format!("Глубина: {}", chat.effort));
             egui::ComboBox::from_id_salt("effort-selector")
                 .selected_text(
@@ -6361,7 +6364,8 @@ fn composer_selectors(
                         ("high", "Высокая · High"),
                         ("xhigh", "Очень высокая · xHigh"),
                         ("max", "Максимальная · Max"),
-                    ] {
+                        ("ultra", "Ультра · Ultra"),
+                    ].into_iter().filter(|(id, _)| *id != "ultra" || ultra) {
                         ui.selectable_value(&mut chat.effort, id.into(), name);
                     }
                 })

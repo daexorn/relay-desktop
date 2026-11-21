@@ -112,6 +112,7 @@ def models_from_cache():
                 continue
             out.append({
                 "value": slug,
+                "ultra": any(isinstance(level, dict) and level.get("effort") == "ultra" for level in (m.get("supported_reasoning_levels") or [])),
                 "displayName": str(m.get("display_name") or m.get("displayName") or slug),
                 "description": str(m.get("description") or "")[:240],
             })
@@ -135,6 +136,7 @@ def probe_catalog(binary=None):
             value = model.get("model") or model["id"]
             models.append({
                 "value": value,
+                "ultra": any(isinstance(level, dict) and level.get("reasoningEffort") == "ultra" for level in (model.get("supportedReasoningEfforts") or [])),
                 "displayName": str(model.get("displayName") or value),
                 "description": str(model.get("description") or "")[:240],
             })
@@ -562,7 +564,7 @@ def _mode_policies(mode):
 
 
 def _map_effort(effort):
-    if effort in ("low", "medium", "high", "xhigh"):
+    if effort in ("low", "medium", "high", "xhigh", "ultra"):
         return effort
     if effort == "max":
         return "xhigh"
@@ -730,7 +732,8 @@ class CodexRun:
             tests = ctx.get("tests", "off") if ctx.get("tests") in ("auto", "ask") else "off"
             tools = (("download_file", "run_local_command") if local else ()) + (("minecraft_test",) if tests != "off" else ())
             if tools:
-                raw_mcp = json.loads(self.owner.desktop.config(self.sid, tools)).get("mcpServers", {})
+                config = self.owner.desktop.config(self.sid, tools, phone=True) if ctx.get("phone") else self.owner.desktop.config(self.sid, tools)
+                raw_mcp = json.loads(config).get("mcpServers", {})
                 for name, spec in raw_mcp.items():
                     servers[name] = {"command": spec["command"], "args": spec.get("args", []), "env": spec.get("env", {})}
         if self.custom_prompt:
@@ -1021,6 +1024,7 @@ class CodexRun:
                     {
                         "value": m.get("model") or m.get("id"),
                         "displayName": str(m.get("displayName") or m.get("model") or m.get("id")),
+                        "ultra": any(isinstance(level, dict) and level.get("reasoningEffort") == "ultra" for level in (m.get("supportedReasoningEfforts") or [])),
                         "description": str(m.get("description") or "")[:240],
                     }
                     for m in (res.get("data") or [])

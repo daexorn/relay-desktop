@@ -286,6 +286,7 @@ impl Desktop {
                             .as_str()
                             .unwrap_or("")
                             .to_owned();
+                        let preview_files = request["input"]["preview_files"].as_array().cloned().unwrap_or_default();
                         let timeout = request["input"]["timeout_seconds"]
                             .as_u64()
                             .unwrap_or(60)
@@ -305,6 +306,20 @@ impl Desktop {
                                     Ok(v) => v,
                                     Err(e) => json!({"ok":false,"message":e.to_string()}),
                                 };
+                            for entry in preview_files.iter().take(4) {
+                                let Some(name) = entry.as_str() else { continue };
+                                let Ok(path) = cwd.join(name).canonicalize() else { continue };
+                                let Some(basename) = path.file_name().and_then(|s|s.to_str()) else { continue };
+                                if !path.starts_with(&cwd) || !matches!(path.extension().and_then(|s|s.to_str()).map(str::to_ascii_lowercase).as_deref(),Some("png"|"jpg"|"jpeg"|"webp")) { continue; }
+                                let Ok(meta) = path.metadata() else { continue };
+                                if !meta.is_file() || meta.len()>8*1024*1024 { continue; }
+                                let Ok(body) = fs::read(&path) else { continue };
+                                if body.len()>8*1024*1024 { continue; }
+                                for (sequence, chunk) in body.chunks(128*1024).enumerate() {
+                                    let _ = requests.send(json!({"op":"desktop_upload","id":id,"name":basename,"sequence":sequence,"data":STANDARD.encode(chunk)}));
+                                }
+                                let _ = requests.send(json!({"op":"desktop_upload_end","id":id,"name":basename}));
+                            }
                             closed.store(true, Ordering::Relaxed);
                             bus.send(Event::Data {
                                 server,
@@ -630,6 +645,7 @@ impl Desktop {
 }
 impl Drop for Desktop {
     fn drop(&mut self) {
+        for job in self.jobs.values() { job.cancel.store(true, Ordering::Relaxed); }
         self.commands
             .values()
             .for_each(|cancel| cancel.store(true, Ordering::Relaxed));
