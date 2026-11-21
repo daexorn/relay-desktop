@@ -17,6 +17,8 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 
+const val SSH_PASSWORD_REJECTED = "Сервер не принял логин или пароль."
+
 /**
  * One SSH connection running Relay's server helper, the same Python bridge the desktop app
  * uses. Protocol: JSON objects, one per line, both ways.
@@ -94,7 +96,7 @@ class Bridge(
                 closed -> null
                 e is com.jcraft.jsch.JSchChangedHostKeyException || e.message?.contains("has been changed") == true ->
                     "Ключ сервера изменился. Если сервер переустанавливали, нажми «⋮» у сервера → «Забыть ключ» и сверь новый отпечаток."
-                e.message?.contains("Auth", ignoreCase = true) == true -> "Сервер не принял логин или пароль."
+                e is com.jcraft.jsch.JSchException && e.message.orEmpty().startsWith("Auth fail", ignoreCase = true) -> SSH_PASSWORD_REJECTED
                 e.message?.contains("UnknownHostKey") == true || e.message?.contains("reject HostKey") == true ->
                     "Ключ сервера не подтверждён."
                 e.message?.contains("timeout", ignoreCase = true) == true -> "Сервер не ответил. Проверь адрес и порт."

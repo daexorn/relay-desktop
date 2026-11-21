@@ -941,14 +941,14 @@ fun Sheet(onDismiss: () -> Unit, content: @Composable () -> Unit) {
 fun ServersScreen(vm: RelayViewModel) {
     val p = LocalPalette.current
     var editing by remember { mutableStateOf<ServerProfile?>(null) }
-    var asking by remember { mutableStateOf<ServerProfile?>(null) }
+    var asking by vm::passwordRequest
     var apiEditing by remember { mutableStateOf<ServerProfile?>(null) }
     var agentsSheet by remember { mutableStateOf(false) }
 
     Box(Modifier.fillMaxSize()) {
         AtmosphericHorizon(p.accent)
         Column(Modifier.fillMaxSize()) {
-            TopBar("Relay", "Claude Code · Codex · Antigravity · API") {
+            TopBar("Relay") {
                 IconButton(Icons.Default.Settings, "Настройки") { vm.screen = Screen.Settings }
             }
             if (vm.notice.isNotEmpty()) Notice(vm.notice) { vm.notice = "" }
@@ -983,21 +983,10 @@ fun ServersScreen(vm: RelayViewModel) {
                                 OrbitalEmblem(p.accent, active = true, size = 40.dp)
                             }
                             Spacer(Modifier.height(18.dp))
-                            Label("Все проекты. Одно пространство.", 20.sp, p.text, FontWeight.SemiBold)
+                            Label("Подключение к серверу", 20.sp, p.text, FontWeight.SemiBold)
                             Spacer(Modifier.height(8.dp))
-                            Label(
-                                "Подключи свой сервер по SSH и продолжай общие сессии с ПК — процессы работают на сервере даже без приложения.",
-                                13.5.sp,
-                                p.muted,
-                            )
-                            Spacer(Modifier.height(16.dp))
-                            Row(
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                for (b in BACKENDS) BackendBadge(b, showDot = true)
-                            }
-                            Spacer(Modifier.height(18.dp))
+                            Label("Добавь SSH-сервер, чтобы открыть свои чаты.", 13.5.sp, p.muted)
+                            Spacer(Modifier.height(12.dp))
                             SecondaryPillButton("Посмотреть без сервера — демо", Glyph.Spark, p.accent) { vm.startDemo() }
                         }
                     }
@@ -1087,7 +1076,7 @@ fun ServersScreen(vm: RelayViewModel) {
     if (agentsSheet) AgentsSheet(vm) { agentsSheet = false }
     asking?.let { s ->
         var password by remember { mutableStateOf("") }
-        var rememberPw by remember { mutableStateOf(true) }
+        var rememberPw by remember(s.id) { mutableStateOf(s.rememberPassword) }
         Sheet({ asking = null }) {
             Label("Пароль для ${s.user}@${s.host}", 17.sp, p.text, FontWeight.SemiBold)
             Spacer(Modifier.height(12.dp))
@@ -1097,8 +1086,9 @@ fun ServersScreen(vm: RelayViewModel) {
                 GhostButton("Отмена") { asking = null }
                 Spacer(Modifier.width(6.dp))
                 PrimaryButton("Подключиться", password.isNotEmpty()) {
-                    if (rememberPw) vm.saveServer(s, password, true)
-                    vm.connect(s, password)
+                    val profile = s.copy(rememberPassword = rememberPw)
+                    vm.saveServer(profile, null, rememberPw)
+                    vm.connect(profile, password)
                     asking = null
                 }
             }
@@ -1174,7 +1164,7 @@ fun ServerDialog(vm: RelayViewModel, initial: ServerProfile, existing: Boolean, 
     var cwd by remember { mutableStateOf(initial.cwd) }
     var defaultBackend by remember { mutableStateOf(initial.effectiveBackend()) }
     var password by remember { mutableStateOf("") }
-    var rememberPw by remember { mutableStateOf(true) }
+    var rememberPw by remember { mutableStateOf(initial.rememberPassword) }
     Sheet(close) {
         Label(if (existing) "Настройки сервера" else "Новое подключение", 18.sp, p.text, FontWeight.SemiBold)
         Spacer(Modifier.height(12.dp))
@@ -1220,6 +1210,7 @@ fun ServerDialog(vm: RelayViewModel, initial: ServerProfile, existing: Boolean, 
                 GhostButton("Отмена", onClick = close)
                 Spacer(Modifier.width(6.dp))
                 val profile = initial.copy(
+                    rememberPassword = rememberPw,
                     name = name.trim(),
                     host = host,
                     port = port.toIntOrNull() ?: 22,
@@ -1229,7 +1220,7 @@ fun ServerDialog(vm: RelayViewModel, initial: ServerProfile, existing: Boolean, 
                     api = initial.api.copy(enabled = defaultBackend == "api"),
                 )
                 PrimaryButton(if (existing) "Сохранить" else "Подключиться", host.isNotEmpty() && (existing || password.isNotEmpty())) {
-                    vm.saveServer(profile, password.takeIf { it.isNotEmpty() }, rememberPw)
+                    vm.saveServer(profile, password.takeIf { existing && it.isNotEmpty() }, rememberPw)
                     if (!existing) vm.connect(profile, password)
                     close()
                 }
@@ -1393,7 +1384,7 @@ fun SessionsScreen(vm: RelayViewModel) {
             if (vm.link == Link.Off && server != null) {
                 Box(Modifier.padding(14.dp)) {
                     PrimaryButton("Подключиться снова", modifier = Modifier.fillMaxWidth()) {
-                        vm.savedPassword(server)?.let { vm.connect(server, it) } ?: run { vm.screen = Screen.Servers }
+                        vm.savedPassword(server)?.let { vm.connect(server, it) } ?: run { vm.passwordRequest = server; vm.screen = Screen.Servers }
                     }
                 }
             }
@@ -1776,21 +1767,7 @@ fun SessionRow(
                 .fillMaxWidth()
                 .clip(shape)
                 .background(if (selected || busy) p.elevated else p.surface.copy(alpha = 0.80f))
-                .specularBorder(
-                    shape = shape,
-                    topColor = when {
-                        busy -> engineTone.copy(alpha = 0.55f)
-                        selected -> p.accent.copy(alpha = 0.58f)
-                        lockedGate -> p.amber.copy(alpha = 0.42f)
-                        else -> p.specularTop.copy(alpha = 0.7f)
-                    },
-                    bottomColor = when {
-                        busy -> engineTone.copy(alpha = 0.22f)
-                        selected -> p.accent.copy(alpha = 0.25f)
-                        lockedGate -> p.amber.copy(alpha = 0.22f)
-                        else -> p.borderSubtle
-                    },
-                )
+                .border(1.dp, if (selected) p.line else p.borderSubtle, shape)
                 .combinedClickable(onClick = { vm.open(s) }, onLongClick = { menu = true })
                 .padding(start = if (selected || busy) 0.dp else 12.dp, top = 10.dp, bottom = 10.dp, end = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -1813,8 +1790,6 @@ fun SessionRow(
                             tint = if (s.unlocked) p.accent else p.amber,
                             size = 14.dp,
                         )
-                    } else {
-                        Box(Modifier.size(6.dp).clip(CircleShape).background(engineTone.copy(alpha = if (busy) 1f else 0.7f)))
                     }
                     Label(
                         text = s.title.ifBlank { lockedSessionTitle(s.modified) },
@@ -2022,7 +1997,7 @@ fun ChatScreen(vm: RelayViewModel) {
                     }
                     if (items.isEmpty() && !chat.loading) {
                         item {
-                            ChatEmptyState(vm, chat)
+                            ChatEmptyState(chat)
                         }
                     }
                     items(items, key = { when (it) { is Item.Text -> "m${it.index}"; is Item.Actions -> "a${it.start}" } }) { item ->
@@ -2169,120 +2144,26 @@ fun LockedSessionCard(vm: RelayViewModel, chat: Chat, modifier: Modifier = Modif
     }
 }
 
-private data class StarterMission(val title: String, val subtitle: String, val prompt: String, val glyph: Glyph, val phase: ToolPhase)
-
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun ChatEmptyState(vm: RelayViewModel, chat: Chat) {
+fun ChatEmptyState(chat: Chat) {
     val p = LocalPalette.current
-    val active = chat.activeBackend()
-    val activeTone = backendColor(p, active)
-    val crestShape = RoundedCornerShape(22.dp)
-
+    var expanded by rememberSaveable(chat.sid) { mutableStateOf(false) }
     Column(
-        Modifier.fillMaxWidth().padding(top = 24.dp, bottom = 14.dp),
+        Modifier.fillMaxWidth().padding(vertical = 20.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Box(
-            Modifier
-                .size(68.dp)
-                .clip(crestShape)
-                .background(p.surface)
-                .specularBorder(crestShape, activeTone.copy(alpha = 0.55f), activeTone.copy(alpha = 0.20f)),
-            contentAlignment = Alignment.Center,
-        ) {
-            OrbitalEmblem(activeTone, active = true, size = 44.dp)
-        }
-        Spacer(Modifier.height(14.dp))
-        Label("С чего начнём?", 23.sp, p.text, FontWeight.SemiBold)
-        Spacer(Modifier.height(6.dp))
-        Row(
-            Modifier
-                .clip(RoundedCornerShape(9.dp))
-                .background(p.side)
-                .specularBorder(RoundedCornerShape(9.dp), p.specularTop, p.borderSubtle)
-                .padding(horizontal = 10.dp, vertical = 4.5.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            VectorGlyph(Glyph.Folder, p.muted, size = 13.dp)
-            Label("Папка ${folderName(chat.cwd)}", 12.5.sp, p.muted, maxLines = 1)
-        }
-        Spacer(Modifier.height(16.dp))
-        Row(
-            Modifier.horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            val engineChoices = listOf(
-                "claude" to "Claude Code",
-                "codex" to "Codex",
-                "agy" to "Antigravity",
-                "api" to "API",
-            )
-            for ((b, title) in engineChoices) {
-                val chosen = active == b
-                val tone = backendColor(p, b)
-                val pillShape = RoundedCornerShape(999.dp)
-                Row(
-                    Modifier
-                        .clip(pillShape)
-                        .background(if (chosen) tone.copy(alpha = if (p.light) 0.15f else 0.20f) else p.surface)
-                        .specularBorder(
-                            pillShape,
-                            if (chosen) tone.copy(alpha = 0.72f) else p.specularTop,
-                            if (chosen) tone.copy(alpha = 0.35f) else p.borderSubtle,
-                        )
-                        .clickable { vm.setBackend(chat, b) }
-                        .padding(horizontal = 10.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(5.dp),
-                ) {
-                    Box(Modifier.size(6.5.dp).clip(CircleShape).background(if (chosen) tone else tone.copy(alpha = 0.55f)))
-                    Label(title, 12.sp, if (chosen) tone else p.muted, FontWeight.SemiBold, maxLines = 1)
-                }
-            }
-        }
-        Spacer(Modifier.height(18.dp))
-        val missions = listOf(
-            StarterMission("Архитектура", "Карта модулей и связей", "Разобрать архитектуру проекта и ключевые модули", Glyph.Layers, ToolPhase.Research),
-            StarterMission("Найти и починить", "Диагностика и патч", "Найти ошибку и предложить чистый фикс", Glyph.Bolt, ToolPhase.Edit),
-            StarterMission("Сборка и тесты", "Git status и прогон", "Проверить git status и запустить тесты", Glyph.Terminal, ToolPhase.Terminal),
-            StarterMission("Рой субагентов", "Параллельный аудит", "Разделить задачу между субагентами и свести отчёт", Glyph.Orbit, ToolPhase.Subagent),
-        )
-        Column(Modifier.fillMaxWidth().padding(horizontal = 4.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            for (row in missions.chunked(2)) {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    for (m in row) {
-                        val mColor = phaseColor(m.phase, p.light)
-                        val cardShape = RoundedCornerShape(15.dp)
-                        Column(
-                            Modifier
-                                .weight(1f)
-                                .clip(cardShape)
-                                .background(p.surface.copy(alpha = 0.88f))
-                                .specularBorder(cardShape, mColor.copy(alpha = 0.38f), p.borderSubtle)
-                                .clickable { chat.draft = m.prompt }
-                                .padding(horizontal = 12.dp, vertical = 11.dp),
-                            verticalArrangement = Arrangement.spacedBy(5.dp),
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                Box(
-                                    Modifier
-                                        .size(24.dp)
-                                        .clip(RoundedCornerShape(7.dp))
-                                        .background(mColor.copy(alpha = 0.15f)),
-                                    contentAlignment = Alignment.Center,
-                                ) {
-                                    VectorGlyph(m.glyph, mColor, size = 13.5.dp)
-                                }
-                                Label(m.title, 13.sp, p.text, FontWeight.SemiBold, maxLines = 1)
-                            }
-                            Label(m.subtitle, 11.5.sp, p.muted, maxLines = 1)
-                        }
-                    }
-                }
-            }
+        PixelMascot(chat.activeBackend(), size = 30.dp)
+        Label("С чего начнём?", 19.sp, p.text, FontWeight.SemiBold)
+        Label(folderName(chat.cwd), 13.sp, p.muted)
+        GhostButton(if (expanded) "Скрыть примеры" else "Примеры запросов", p.muted) { expanded = !expanded }
+        if (expanded) {
+            for ((title, prompt) in listOf(
+                "Архитектура" to "Разобрать архитектуру проекта и ключевые модули",
+                "Найти и починить" to "Найти ошибку и предложить чистый фикс",
+                "Сборка и тесты" to "Проверить git status и запустить тесты",
+                "Рой субагентов" to "Разделить задачу между субагентами и свести отчёт",
+            )) GhostButton(title) { chat.draft = prompt }
         }
     }
 }

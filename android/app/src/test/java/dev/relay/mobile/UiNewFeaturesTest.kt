@@ -20,6 +20,16 @@ import org.robolectric.annotation.Config
 class UiNewFeaturesTest {
     @get:Rule val rule = createAndroidComposeRule<ComponentActivity>()
 
+    @Test fun temporaryPasswordWorksWhenReopeningSameServerAndClearsOnHostChange() {
+        val vm = RelayViewModel(ApplicationProvider.getApplicationContext())
+        val server = ServerProfile(host = "first", rememberPassword = false)
+        vm.saveServer(server, "fixture", false)
+        assertEquals("fixture", vm.savedPassword(server))
+        val moved = server.copy(host = "second")
+        vm.saveServer(moved, null, false)
+        assertEquals(null, vm.savedPassword(moved))
+    }
+
     @Test @Config(sdk = [34], qualifiers = "w320dp-h480dp-xhdpi")
     fun narrowChatOpensPhoneTestsAndKeepsComposerAccessible() {
         val vm = RelayViewModel(ApplicationProvider.getApplicationContext())

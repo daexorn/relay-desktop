@@ -60,7 +60,10 @@ data class ServerProfile(
     val defaultBackend: String = "",
     val codexModel: String = "default",
     val agyModel: String = "default",
+    val rememberPassword: Boolean = true,
 ) {
+    fun sameLogin(other: ServerProfile?) = other != null && id == other.id && host == other.host && port == other.port && user == other.user
+
     fun effectiveBackend(): String =
         if (defaultBackend in BACKENDS) defaultBackend
         else if (api.enabled) "api"
@@ -81,10 +84,12 @@ data class ServerProfile(
         .put("default_backend", defaultBackend)
         .put("codex_model", codexModel)
         .put("agy_model", agyModel)
+        .put("remember_password", rememberPassword)
 
     companion object {
         fun from(o: JSONObject) = ServerProfile(
             id = o.optString("id"),
+            rememberPassword = o.optBoolean("remember_password", true),
             name = o.optString("name"),
             host = o.optString("host"),
             port = o.optInt("port", 22),
@@ -388,9 +393,12 @@ class Store(context: Context) {
         set(value) = prefs.edit().putStringSet("collapsed", value).apply()
 
     fun password(id: String): String? = runCatching { secrets.getString(id, null) }.getOrNull()
-    fun setPassword(id: String, value: String?) {
-        runCatching { secrets.edit().apply { if (value == null) remove(id) else putString(id, value) }.apply() }
-    }
+    fun setPassword(id: String, value: String?) = runCatching {
+        secrets.edit().apply { if (value == null) remove(id) else putString(id, value) }.commit()
+    }.getOrDefault(false)
+    var lastServer: String?
+        get() = prefs.getString("last-server", null)
+        set(value) { prefs.edit().putString("last-server", value).apply() }
     fun apiKey(id: String): String? = runCatching { secrets.getString("api:$id", null) }.getOrNull()
     fun setApiKey(id: String, value: String): Result<Unit> = runCatching {
         check(secrets.edit().apply { if (value.isBlank()) remove("api:$id") else putString("api:$id", value) }.commit()) { "Не удалось сохранить API-ключ" }

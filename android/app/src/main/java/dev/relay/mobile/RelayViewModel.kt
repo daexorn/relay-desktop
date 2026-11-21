@@ -95,7 +95,8 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
     private var poller: Runnable? = null
     private var reconnector: Runnable? = null
     private var reconnectAttempts = 0
-    private var lastPassword: String? = null
+    private val loginPasswords = mutableMapOf<String, String>()
+    var passwordRequest by mutableStateOf<ServerProfile?>(null)
 
     var theme by mutableStateOf(store.theme)
         private set
@@ -219,7 +220,14 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         if (!c.isLockedGate()) send(JSONObject().put("op","phone_stop").put("sid",c.sid).put("id",id))
     }
 
-    fun savedPassword(server: ServerProfile) = store.password(server.id)
+    fun savedPassword(server: ServerProfile): String? =
+        loginPasswords[server.id] ?: store.password(server.id).takeIf { server.rememberPassword }
+
+    fun restoreLastServer() {
+        if (current != null || demo) return
+        val server = servers.firstOrNull { it.id == store.lastServer && it.rememberPassword } ?: return
+        savedPassword(server)?.let { connect(server, it) }
+    }
     fun savedApiKey(server: ServerProfile) = store.apiKey(server.id).orEmpty()
     fun apiCatalog(): List<ModelInfo> = apiModels.ifEmpty { current?.api?.models.orEmpty().map { ModelInfo(it, it, "") } }
 
@@ -324,15 +332,29 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
     fun saveServer(profile: ServerProfile, password: String?, remember: Boolean) {
         val list = servers.toMutableList()
         val at = list.indexOfFirst { it.id == profile.id }
-        if (at >= 0) list[at] = profile else list.add(profile)
+        val old = list.getOrNull(at)
+        val moved = old != null && !profile.sameLogin(old)
+        val saved = if (moved) profile.copy(fingerprint = null) else profile
+        if (moved) {
+            if (current?.id == profile.id) disconnect()
+            loginPasswords.remove(profile.id)
+            store.setPassword(profile.id, null)
+        }
+        if (at >= 0) list[at] = saved else list.add(saved)
         servers = list
         store.servers = list
-        if (password != null) store.setPassword(profile.id, if (remember) password else null)
-        if (current?.id == profile.id) current = profile
+        if (password != null) {
+            loginPasswords[profile.id] = password
+            if (!store.setPassword(profile.id, password.takeIf { remember }) && remember)
+                notice = "Пароль доступен до закрытия Relay. Хранилище Android не смогло его сохранить."
+        } else if (!profile.rememberPassword && old?.rememberPassword == true) store.setPassword(profile.id, null)
+        if (current?.id == profile.id) current = saved.takeUnless { moved }
     }
 
     fun deleteServer(profile: ServerProfile) {
-        if (current?.id == profile.id) disconnect()
+        if (current?.id == profile.id) { disconnect(); current = null }
+        loginPasswords.remove(profile.id)
+        if (store.lastServer == profile.id) store.lastServer = null
         servers = servers.filter { it.id != profile.id }
         store.servers = servers
         store.setPassword(profile.id, null)
@@ -344,11 +366,17 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         trust = null
     }
 
-    fun connect(profile: ServerProfile, password: String) = connect(profile, password, fresh = true)
+    fun connect(profile: ServerProfile, password: String) {
+        val same = profile.sameLogin(current)
+        current = profile
+        screen = Screen.Sessions
+        passwordRequest = null
+        connect(profile, password, fresh = !same)
+    }
 
     private fun connect(profile: ServerProfile, password: String, fresh: Boolean) {
         disconnect()
-        lastPassword = password
+        loginPasswords[profile.id] = password
         if (!fresh) {
             link = Link.Connecting
             open(profile, password)
@@ -446,13 +474,24 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                 c.changed()
             }
         }
+        if (error == SSH_PASSWORD_REJECTED) {
+            current?.let { server ->
+                loginPasswords.remove(server.id)
+                store.setPassword(server.id, null)
+                if (store.lastServer == server.id) store.lastServer = null
+                passwordRequest = server
+            }
+            notice = error
+            screen = Screen.Servers
+            return
+        }
         scheduleReconnect(error)
     }
 
     /** A dropped connection comes back by itself; chats, drafts and the outbox stay as they are. */
     private fun scheduleReconnect(error: String?) {
         val profile = current ?: return
-        val password = lastPassword ?: store.password(profile.id)
+        val password = savedPassword(profile)
         if (password == null || demo) {
             if (!error.isNullOrBlank()) notice = error
             return
@@ -474,7 +513,7 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         if (bridge != null || demo || current == null) return
         reconnectAttempts = 0
         val profile = current ?: return
-        val password = lastPassword ?: store.password(profile.id) ?: return
+        val password = savedPassword(profile) ?: return
         connect(profile, password, fresh = false)
     }
 
@@ -602,6 +641,12 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                 claudeVersion = value.optString("version")
                 parseBackends(value.optJSONObject("backends"))
                 val c = current
+                if (!demo && bridge != null && c != null) {
+                    store.lastServer = c.id.takeIf { c.rememberPassword }
+                    val password = loginPasswords[c.id]
+                    if (c.rememberPassword && password != null && store.password(c.id) != password &&
+                        !store.setPassword(c.id, password)) notice = "Хранилище Android недоступно. Пароль сохранён до закрытия Relay."
+                }
                 if (c != null && c.fingerprint == null && bridge?.fingerprint != null) {
                     val trusted = c.copy(fingerprint = bridge?.fingerprint, cwd = if (c.cwd == "~") home else c.cwd)
                     current = trusted

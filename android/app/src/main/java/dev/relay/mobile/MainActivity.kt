@@ -17,6 +17,7 @@ class MainActivity : ComponentActivity() {
         Thread { Formulas.init(applicationContext) }.start()
         setContent {
             val vm: RelayViewModel = viewModel()
+            androidx.compose.runtime.LaunchedEffect(vm) { vm.restoreLastServer() }
             // Status bar icons follow the theme: dark icons on light themes.
             val light = isLight(vm.theme)
             DisposableEffect(light) {
