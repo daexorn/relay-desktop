@@ -39,7 +39,19 @@ internal fun ImageAttachmentPreview(data: String) {
 internal fun ServerImagePreview(vm: RelayViewModel, chat: Chat, path: String) {
     if (!Downloads.mime(path).startsWith("image/")) return
     LaunchedEffect(chat.sid, path, vm.link) { vm.preview(chat, path) }
-    chat.previews[path]?.takeIf { it.isNotEmpty() }?.let { ImageAttachmentPreview(it) }
+    val data = chat.previews[path] ?: return
+    when {
+        data == "pending" -> androidx.compose.material3.Text("Загрузка снимка…")
+        data.isNotEmpty() -> ImageAttachmentPreview(data)
+        else -> {
+            val transfer = vm.transfers.firstOrNull { it.path == path }
+            val uri = transfer?.uri
+            if (uri != null) DownloadPreview(uri)
+            else GhostButton(if (transfer != null && transfer.error.isEmpty()) "Загрузка оригинала…" else "Показать оригинал") {
+                vm.download(path, chat.cwd)
+            }
+        }
+    }
 }
 
 @Composable

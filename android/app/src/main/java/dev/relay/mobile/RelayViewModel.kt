@@ -195,7 +195,7 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
     fun preview(c: Chat, path: String) {
         if (link != Link.Online || demo || c.isLockedGate() || path in c.previews) return
         if (c.previews.size >= 16) c.previews.remove(c.previews.keys.first())
-        c.previews[path] = ""
+        c.previews[path] = "pending"
         send(JSONObject().put("op","image_preview").put("sid",c.sid).put("path",path).put("cwd",c.cwd))
     }
 
@@ -203,10 +203,33 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         if (link == Link.Online && !c.isLockedGate() && !demo) send(JSONObject().put("op","phone_tests").put("sid",c.sid))
     }
 
-    fun decidePhone(c: Chat, job: JSONObject, approve: Boolean) {
+    private fun repeatableTest(request: JSONObject): String? {
+        val args = request.optJSONObject("input") ?: return null
+        when (request.optString("tool")) {
+            "minecraft_test" -> {
+                val mods = args.optJSONArray("mods") ?: return null
+                if (mods.length() == 0 || (0 until mods.length()).any {
+                    !Regex("[0-9a-f]{64}").matches(mods.optJSONObject(it)?.optString("sha256").orEmpty())
+                }) return null
+            }
+            "run_local_command" -> {
+                if (args.optString("command") !in setOf("cargo test", "cargo test --locked --offline", "python3 -m unittest discover -s tests", "./gradlew testDebugUnitTest")) return null
+            }
+            else -> return null
+        }
+        val sid = request.optString("sid").takeIf { it.isNotBlank() } ?: return null
+        val identity = JSONArray(listOf(phoneKey(), sid, request.optString("tool"), args.toString())).toString()
+        val digest = java.security.MessageDigest.getInstance("SHA-256").digest(identity.toByteArray(Charsets.UTF_8))
+        return "approved-test:" + Base64.getEncoder().encodeToString(digest)
+    }
+
+    fun mayRememberTest(payload: JSONObject) = repeatableTest(payload) != null
+
+    fun decidePhone(c: Chat, job: JSONObject, approve: Boolean, remember: Boolean = false) {
         val raw = job.optString("payload")
         val request = runCatching { JSONObject(raw) }.getOrNull() ?: return
         if (c.isLockedGate() || request.optString("sid") != c.sid || request.optString("id") != job.optString("id")) return
+        if (approve && remember) repeatableTest(request)?.let { store.setPassword(it, "yes") }
         val signature = if (approve) {
             val key = phoneKey().takeIf { it.isNotBlank() } ?: return
             val mac = javax.crypto.Mac.getInstance("HmacSHA256")
@@ -223,9 +246,39 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
     fun savedPassword(server: ServerProfile): String? =
         loginPasswords[server.id] ?: store.password(server.id).takeIf { server.rememberPassword }
 
+    var updateApk by mutableStateOf<java.io.File?>(null)
+        private set
+    private var checkingUpdate = false
+    fun checkUpdate() {
+        if (demo || checkingUpdate) return
+        checkingUpdate = true
+        Thread {
+            val file = runCatching { Updates.check(getApplication()) }.getOrNull()
+            main.post { updateApk = file; checkingUpdate = false }
+        }.start()
+    }
+    fun installUpdate() {
+        updateApk?.let { file ->
+            runCatching { Updates.install(getApplication(), file) }.onFailure { notice = "Не удалось открыть установщик: ${it.message}" }
+        }
+    }
+
+    fun routeChanged() {
+        val profile = current ?: return
+        if (demo || passwordRequest != null || trust != null || savedPassword(profile) == null) return
+        if (bridge != null) {
+            val previous = bridge
+            closed("Сеть изменилась")
+            previous?.close()
+            // closed clears the active bridge; its queued callbacks are ignored.
+        }
+        reconnectNow()
+    }
+
     fun restoreLastServer() {
         if (current != null || demo) return
-        val server = servers.firstOrNull { it.id == store.lastServer && it.rememberPassword } ?: return
+        val server = servers.firstOrNull { it.id == store.lastServer && it.rememberPassword }
+            ?: servers.singleOrNull()?.takeIf { store.lastServer == null && it.rememberPassword } ?: return
         savedPassword(server)?.let { connect(server, it) }
     }
     fun savedApiKey(server: ServerProfile) = store.apiKey(server.id).orEmpty()
@@ -634,6 +687,9 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         val sid = value.optString("sid")
         when (value.optString("type")) {
             "hello" -> {
+                triedUnlock.clear()
+                chats.values.forEach { it.unlocking = false }
+                pendingUnlock.clear()
                 link = Link.Online
                 reconnectAttempts = 0
                 home = value.optString("home", "~")
@@ -668,6 +724,16 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                 c.phoneOnline = value.optBoolean("online")
                 val rows = value.optJSONArray("jobs") ?: JSONArray()
                 c.phoneJobs = (0 until rows.length()).mapNotNull { rows.optJSONObject(it) }
+                for (job in c.phoneJobs.filter { it.optString("stage") == "approval" }) {
+                    val payload = runCatching { JSONObject(job.getString("payload")) }.getOrNull() ?: continue
+                    val args = payload.optJSONObject("input") ?: continue
+                    val approvalKey = repeatableTest(payload) ?: continue
+                    // Only the fixed test invocations above can run immediately.
+                    // New mod binaries or requested local files require an exact saved grant.
+                    val standard = payload.optString("tool") == "run_local_command" &&
+                        !args.has("preview_files") && args.keys().asSequence().all { it == "command" || it == "timeout_seconds" }
+                    if (standard || store.password(approvalKey) == "yes") decidePhone(c, job, true)
+                }
             }
             "backends_status" -> parseBackends(value.optJSONObject("backends"))
             "agent_install" -> {
@@ -801,6 +867,7 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                             c.transcript.messages.clear()
                             c.permissions.clear()
                             c.changed()
+                            if (c.sid == selected) restoreUnlock(c)
                         }
                     }
                 }
@@ -822,6 +889,16 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
             }
             "session_unlock_result" -> {
                 val ok = value.optBoolean("ok", false)
+                val entered = pendingUnlock.remove(sid)
+                unlockKey(sid)?.let { key ->
+                    if (!ok) {
+                        verifiedUnlocks.remove(key)
+                        store.setPassword(key, null)
+                    } else if (entered != null) {
+                        verifiedUnlocks[key] = entered
+                        store.setPassword(key, entered)
+                    }
+                }
                 if (ok) {
                     sessions = sessions.map { if (it.id == sid) it.copy(unlocked = true) else it }
                 }
@@ -1096,6 +1173,7 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         selected = session.id
+        restoreUnlock(c)
         screen = Screen.Chat
     }
 
@@ -1363,7 +1441,21 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         )
     }
 
+    private val verifiedUnlocks = mutableMapOf<String, String>()
+    private val pendingUnlock = mutableMapOf<String, String>()
+    private val triedUnlock = mutableSetOf<String>()
+    private fun unlockKey(sid: String): String? = current?.let {
+        val pin = it.fingerprint ?: return null
+        "session-key:${it.id}:${it.user}@${it.host}:${it.port}:$pin:$sid"
+    }
+    private fun restoreUnlock(chat: Chat) {
+        if (!chat.isLockedGate() || chat.unlocking || link != Link.Online || !triedUnlock.add(chat.sid)) return
+        val key = unlockKey(chat.sid) ?: return
+        (verifiedUnlocks[key] ?: store.password(key))?.let { unlockSession(chat.sid, it) }
+    }
+
     fun unlockSession(sid: String, password: String) {
+        pendingUnlock[sid] = password
         chats[sid]?.let {
             it.unlocking = true
             it.lockError = ""
@@ -1372,6 +1464,9 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun relockSession(sid: String) {
+        pendingUnlock.remove(sid)
+        triedUnlock.add(sid)
+        unlockKey(sid)?.let { verifiedUnlocks.remove(it); store.setPassword(it, null) }
         send(JSONObject().put("op", "session_relock").put("sid", sid))
     }
 

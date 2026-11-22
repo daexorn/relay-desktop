@@ -139,7 +139,25 @@ impl RelayApp {
         }
     }
 
+    pub(super) fn unlock_slot(&self, server: &str, sid: &str) -> Option<String> {
+        if self.demo { return None; }
+        let profile = self.settings.servers.iter().find(|s| s.id == server)?;
+        Some(format!("chat:{server}:{}@{}:{}:{}:{sid}",profile.user,profile.host,profile.port,profile.fingerprint.as_ref()?))
+    }
+
+    pub(super) fn restore_session_access(&mut self, server: &str, sid: &str) {
+        if !self.connected(server) || !self.session_unlock_attempts.insert((server.into(),sid.into())) { return; }
+        if let Some(pw) = self.unlock_slot(server,sid).and_then(|slot| self.verified_session_keys.get(&slot).map(|pw| pw.to_string()).or_else(|| storage::password(&slot))) {
+            if self.controller.send(server, json!({"op":"session_unlock","sid":sid,"password":pw})) {
+                if let Some(c) = self.chats.get_mut(&key(server,sid)) { c.unlocking = true; }
+            }
+        }
+    }
+
     pub(super) fn relock_session(&mut self, server: &str, sid: &str) {
+        self.pending_session_keys.remove(&key(server,sid));
+        self.session_unlock_attempts.insert((server.into(),sid.into()));
+        if let Some(slot) = self.unlock_slot(server,sid) { self.verified_session_keys.remove(&slot); storage::forget(&slot); }
         self.remember_lock_title(server, sid);
         let title = self.locked_sidebar_title(server, sid);
         if let Some(c) = self.chats.get_mut(&key(server, sid)) {
@@ -192,6 +210,7 @@ impl RelayApp {
                 "password": password,
             }),
         ) {
+            self.pending_session_keys.insert(key(server,sid), zeroize::Zeroizing::new(password.clone()));
             c.unlocking = true;
             c.unlock_error.clear();
         } else {

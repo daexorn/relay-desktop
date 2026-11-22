@@ -221,6 +221,7 @@ impl Drop for FolderPassword {
 
 pub struct RelayApp {
     folder_password: Option<FolderPassword>,
+    phone_pairing: Option<(String, zeroize::Zeroizing<String>)>,
     /// Drafts and queued messages from the last run, not yet put back into a chat.
     pending: crate::model::PendingStore,
     pending_saved: crate::model::PendingStore,
@@ -240,6 +241,10 @@ pub struct RelayApp {
     deleted_sessions: std::collections::HashSet<String>,
     /// Servers whose connection dropped: next automatic attempt and how many were made.
     reconnect: HashMap<String, (Instant, u32)>,
+    session_unlock_attempts: std::collections::HashSet<(String,String)>,
+    login_passwords: HashMap<String, zeroize::Zeroizing<String>>,
+    verified_session_keys: HashMap<String, zeroize::Zeroizing<String>>,
+    pending_session_keys: HashMap<String, zeroize::Zeroizing<String>>,
     /// Session being renamed in the sidebar, with the text typed so far.
     renaming: Option<(String, String)>,
     folder_dialog: Option<session_actions::FolderDialog>,
@@ -315,11 +320,16 @@ impl RelayApp {
             selected_chat: HashMap::new(),
             delete_chat: None,
             folder_password: None,
+            phone_pairing: None,
             lock_dialog: None,
             agents_open: None,
             radar_open: None,
             deleted_sessions: Default::default(),
             reconnect: Default::default(),
+            session_unlock_attempts: Default::default(),
+            login_passwords: Default::default(),
+            verified_session_keys: Default::default(),
+            pending_session_keys: Default::default(),
             renaming: None,
             folder_dialog: None,
             icon_dialog: None,
@@ -539,6 +549,9 @@ impl RelayApp {
             }
         }
         if !demo {
+            if app.server().is_none() && app.settings.servers.len() == 1 {
+                app.settings.selected = Some(app.settings.servers[0].id.clone());
+            }
             if let Some(server) = app.server() {
                 if let Some(sid) = server.last_session.clone() {
                     let mut c =
@@ -709,6 +722,7 @@ impl RelayApp {
                 self.controller
                     .send(&s.id, json!({"op":"history","sid":session.id}));
             }
+            if locked_gate { self.restore_session_access(&s.id, &session.id); }
             self.selected_chat.insert(s.id.clone(), session.id.clone());
             if let Some(p) = self.settings.servers.iter_mut().find(|p| p.id == s.id) {
                 p.cwd = session.cwd;
@@ -828,14 +842,19 @@ impl RelayApp {
         }
         self.notice.clear();
         self.remote.entry(server.id.clone()).or_default().connecting = true;
+        if let Some(password) = self.login_passwords.get(&server.id) {
+            self.establish(server, password.to_string());
+            return;
+        }
         let bus = self.controller.bus.clone();
         self.controller.runtime.spawn_blocking(move || {
-            let password = storage::password(&server.id);
+            let password = if server.remember { storage::password(&server.id) } else { None };
             bus.send(Event::Password { server, password });
         });
     }
     fn establish(&mut self, server: Server, password: String) {
         self.remote.entry(server.id.clone()).or_default().connecting = true;
+        self.login_passwords.insert(server.id.clone(), zeroize::Zeroizing::new(password.clone()));
         self.controller.connect(server, password);
     }
     fn request_folders(&mut self) {
@@ -967,6 +986,10 @@ impl RelayApp {
                     }
                 }
                 Event::Error { server, message } => {
+                    if message.contains("Сервер не принял логин или пароль.") {
+                        self.login_passwords.remove(&server);
+                        storage::forget(&server);
+                    }
                     self.notice = message;
                     self.remote.entry(server).or_default().connecting = false;
                 }
@@ -1130,6 +1153,8 @@ impl RelayApp {
                 self.notice = value["message"].as_str().unwrap_or("").into();
             }
             "hello" => {
+                self.session_unlock_attempts.retain(|(host,_)| host != &server);
+                self.pending_session_keys.retain(|k,_| !k.starts_with(&format!("{server}/")));
                 self.reconnect.remove(&server);
                 let r = self.remote.entry(server.clone()).or_default();
                 r.connected = true;
@@ -1451,6 +1476,9 @@ impl RelayApp {
                         }
                     }
                 }
+                if let Some(s) = sessions.iter().find(|s| s.is_locked_gate() && Some(&s.id) == selected_sid.as_ref()) {
+                    self.restore_session_access(&server, &s.id);
+                }
                 if !self.selected_chat.contains_key(&server)
                     && self.settings.selected.as_deref() == Some(&server)
                 {
@@ -1491,6 +1519,18 @@ impl RelayApp {
             }
             "session_unlock_result" => {
                 let sid = value["sid"].as_str().unwrap_or("");
+                let pending = self.pending_session_keys.remove(&key(&server,sid));
+                if let Some(slot) = self.unlock_slot(&server,sid) {
+                    if value["ok"] == true {
+                        if let Some(pw) = pending {
+                            let _ = storage::remember(&slot, &pw);
+                            self.verified_session_keys.insert(slot, pw);
+                        }
+                    } else {
+                        self.verified_session_keys.remove(&slot);
+                        storage::forget(&slot);
+                    }
+                }
                 if let Some(c) = self.chats.get_mut(&key(&server, sid)) {
                     c.unlocking = false;
                     if value["ok"] == true {
@@ -2729,6 +2769,12 @@ impl RelayApp {
                                         }
                                     });
                                     ui.add_space(4.);
+                                    if design::service_action(ui, "Связать телефон", Icon::Terminal, false, p).clicked() && !self.demo {
+                                        match relay_desktop::phone_tests::start_from_ui(&server) {
+                                            Ok(code) => self.phone_pairing = Some((server.id.clone(), zeroize::Zeroizing::new(code))),
+                                            Err(error) => self.notice = error.to_string(),
+                                        }
+                                    }
                                     let login_btn = design::service_action(ui, primary_label, Icon::Key, false, p)
                                         .on_hover_text(format!("{primary_hint} (ПКМ — выбрать другого агента)"));
                                     if login_btn.clicked() {
@@ -5482,6 +5528,24 @@ impl RelayApp {
         );
         self.deletion_dialog(ctx, p, modal_t);
         self.lock_dialog(ctx, p, modal_t);
+        if let Some((id, code)) = self.phone_pairing.as_ref() {
+            let mut open = true;
+            egui::Window::new("Связать телефон").open(&mut open).resizable(false).collapsible(false).show(ctx, |ui| {
+                ui.label("На телефоне открой чат на этом же сервере и выбери «Тесты на ПК».");
+                ui.horizontal(|ui| {
+                    ui.monospace(code.as_str());
+                    if ui.button("Копировать код").clicked() { ctx.copy_text(code.to_string()); }
+                });
+                #[cfg(target_os = "linux")]
+                if let Ok(entry) = relay_desktop::phone_tests::login_entry(id) {
+                    let mut enabled = entry.exists();
+                    if ui.checkbox(&mut enabled, "Запускать тесты на этом ПК при входе в систему").changed() {
+                        if let Err(e) = relay_desktop::phone_tests::set_login_start(id, enabled) { self.notice = e.to_string(); }
+                    }
+                }
+            });
+            if !open { self.phone_pairing = None; }
+        }
         if let Some(mut dialog) = self.folder_password.take() {
             let mut open = true;
             let mut submit = false;
@@ -5686,6 +5750,7 @@ impl RelayApp {
                 self.controller.disconnect(&editor.server.id);
                 self.reconnect.remove(&editor.server.id);
                 self.settings.servers.retain(|s| s.id != editor.server.id);
+                self.login_passwords.remove(&editor.server.id);
                 storage::forget(&editor.server.id);
                 let _ = storage::remember_api_key(&editor.server.id, "");
                 if self.settings.selected.as_deref() == Some(&editor.server.id) {
@@ -5714,10 +5779,16 @@ impl RelayApp {
                                 )
                             {
                                 editor.server.fingerprint = None;
+                                if editor.password.is_empty() {
+                                    editor.error = "Введи пароль для нового адреса сервера.".into();
+                                    self.editor = Some(editor);
+                                    return;
+                                }
+                                self.login_passwords.remove(&editor.server.id);
                             }
                         }
                         if editor.password.is_empty() {
-                            if let Some(password) = storage::password(&editor.server.id) {
+                            if let Some(password) = self.login_passwords.get(&editor.server.id).map(|p| p.to_string()).or_else(|| storage::password(&editor.server.id)) {
                                 editor.password = password;
                             } else {
                                 editor.error = "Введи пароль сервера.".into();

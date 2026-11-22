@@ -176,6 +176,7 @@ fn restore_input(mouse: bool) {
 
 fn run() -> Result<()> {
     let args = parse()?;
+    if !args.demo && args.snapshot.is_none() { relay_desktop::updates::start(true); }
     let mut app = App::new(args.demo || args.snapshot.is_some())?;
     if args.list {
         for server in app.servers() {

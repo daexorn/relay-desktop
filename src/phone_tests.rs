@@ -22,12 +22,82 @@ pub fn pair(server: &Server) -> Result<String> {
     Ok(secret)
 }
 
+/// Launch the paired worker independently of the current Relay window.
+pub fn start_from_ui(server: &Server) -> Result<String> {
+    let server = profile(&server.id)?;
+    ensure!(storage::password(&server.id).is_some(), "Сохрани пароль подключения в профиле сервера.");
+    let secret = pair(&server)?;
+    let mut cmd = std::process::Command::new(std::env::current_exe()?);
+    cmd.args(["--phone-tests", &server.id]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut child = cmd.spawn()?;
+    thread::spawn(move || { let _ = child.wait(); });
+    Ok(secret)
+}
+
+#[cfg(target_os = "linux")]
+pub fn login_entry(id: &str) -> Result<std::path::PathBuf> {
+    // The name is stable even for an imported profile with a non-UUID id.
+    use sha2::Digest;
+    let name = format!("relay-phone-{:x}.desktop", sha2::Sha256::digest(id.as_bytes()));
+    Ok(dirs::config_dir().context("Не найдена папка настроек")?.join("autostart").join(name))
+}
+
+#[cfg(target_os = "linux")]
+pub fn set_login_start(id: &str, enabled: bool) -> Result<()> {
+    let file = login_entry(id)?;
+    if !enabled {
+        if file.exists() { std::fs::remove_file(file)?; }
+        return Ok(());
+    }
+    fn argument(value: &str) -> Result<String> {
+        ensure!(!value.contains(['\n', '\r']), "Недопустимый путь автозапуска");
+        let mut result = String::from("\"");
+        for ch in value.chars() {
+            if matches!(ch, '\\' | '"' | '$' | '`') { result.push('\\'); }
+            if ch == '%' { result.push('%'); }
+            result.push(ch);
+        }
+        result.push('"');
+        Ok(result.replace('\\', "\\\\"))
+    }
+    let exe = std::env::current_exe()?;
+    let exec = argument(exe.to_str().context("Недопустимый путь Relay")?)?;
+    let profile = argument(id)?;
+    std::fs::create_dir_all(file.parent().context("Нет папки автозапуска")?)?;
+    std::fs::write(file, format!("[Desktop Entry]\nType=Application\nName=Relay — тесты с телефона\nExec={exec} --phone-tests {profile}\nTerminal=false\n"))?;
+    Ok(())
+}
+
 pub fn serve(server: Server) -> Result<()> {
+    use sha2::Digest;
+    let dir = storage::directory();
+    std::fs::create_dir_all(&dir)?;
+    let lock_path = dir.join(format!("worker-{:x}.lock", sha2::Sha256::digest(server.id.as_bytes())));
+    let lock = std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(lock_path)?;
+    match lock.try_lock() {
+        Ok(()) => {},
+        Err(std::fs::TryLockError::WouldBlock) => return Ok(()),
+        Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
+    }
     let (mut controller, rx) = Controller::headless();
     let mut delay = 1;
     loop {
-        let key = storage::password(&format!("phone-tests:{}",server.id)).context("Сначала создай код сопряжения")?;
-        let password = storage::password(&server.id).context("Пароль профиля недоступен")?;
+        let credentials = storage::password(&format!("phone-tests:{}", server.id))
+            .zip(storage::password(&server.id));
+        let Some((key, password)) = credentials else {
+            // The desktop keyring can become available after the worker starts.
+            thread::sleep(Duration::from_secs(delay));
+            delay = (delay * 2).min(30);
+            continue;
+        };
         controller.connect_with_worker(server.clone(), password, Some(Zeroizing::new(key)));
         loop {
             if let Event::Epoch { server: id, generation, event } = rx.recv()? {

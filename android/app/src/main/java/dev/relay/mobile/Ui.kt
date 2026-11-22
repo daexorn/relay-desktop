@@ -49,6 +49,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -149,29 +150,35 @@ fun RelayApp(vm: RelayViewModel) {
     val lifecycle = androidx.compose.ui.platform.LocalLifecycleOwner.current.lifecycle
     androidx.compose.runtime.DisposableEffect(lifecycle) {
         val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
-            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) vm.reconnectNow()
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) { vm.reconnectNow(); vm.checkUpdate() }
         }
         lifecycle.addObserver(observer)
         onDispose { lifecycle.removeObserver(observer) }
     }
     CompositionLocalProvider(LocalPalette provides p) {
         Box(Modifier.fillMaxSize().background(p.base).statusBarsPadding().navigationBarsPadding().imePadding()) {
-            AnimatedContent(
-                targetState = vm.screen,
-                transitionSpec = {
-                    val forward = targetState.ordinal > initialState.ordinal
-                    (slideInHorizontally(tween(320)) { if (forward) it / 3 else -it / 8 } +
-                        androidx.compose.animation.scaleIn(tween(320), initialScale = if (forward) 0.94f else 1.03f) +
-                        fadeIn(tween(210))) togetherWith
-                        (slideOutHorizontally(tween(240)) { if (forward) -it / 8 else it / 3 } + fadeOut(tween(160)))
-                },
-                label = "screen",
-            ) { screen ->
-                when (screen) {
-                    Screen.Servers -> ServersScreen(vm)
-                    Screen.Sessions -> SessionsScreen(vm)
-                    Screen.Chat -> ChatScreen(vm)
-                    Screen.Settings -> SettingsScreen(vm)
+            Column(Modifier.fillMaxSize()) {
+                AnimatedContent(
+                    targetState = vm.screen,
+                    modifier = Modifier.weight(1f),
+                    transitionSpec = {
+                        val forward = targetState.ordinal > initialState.ordinal
+                        (slideInHorizontally(tween(320)) { if (forward) it / 3 else -it / 8 } +
+                            androidx.compose.animation.scaleIn(tween(320), initialScale = if (forward) 0.94f else 1.03f) +
+                            fadeIn(tween(210))) togetherWith
+                            (slideOutHorizontally(tween(240)) { if (forward) -it / 8 else it / 3 } + fadeOut(tween(160)))
+                    },
+                    label = "screen",
+                ) { screen ->
+                    when (screen) {
+                        Screen.Servers -> ServersScreen(vm)
+                        Screen.Sessions -> SessionsScreen(vm)
+                        Screen.Chat -> ChatScreen(vm)
+                        Screen.Settings -> SettingsScreen(vm)
+                    }
+                }
+                if (vm.updateApk != null) {
+                    GhostButton("Установить обновление Relay", p.accent) { vm.installUpdate() }
                 }
             }
             vm.trust?.let { TrustDialog(it, vm) }
@@ -2032,6 +2039,21 @@ fun ChatScreen(vm: RelayViewModel) {
                                         running = busy && item.start + item.messages.size == chat.transcript.messages.size,
                                         backend = grpBackend,
                                     )
+                                }
+                            }
+                        }
+                    }
+                    val pictures = chat.phoneJobs.flatMap { job ->
+                        val files = job.optJSONObject("result")?.optJSONArray("files")
+                        (0 until (files?.length() ?: 0)).map { files!!.optString(it) }.filter { Downloads.mime(it).startsWith("image/") }
+                    }.distinct()
+                    if (pictures.isNotEmpty()) item(key = "pc-test-pictures") {
+                        Label("Снимки тестов на ПК", 13.sp, p.muted)
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            items(pictures, key = { it }) { path ->
+                                Column(Modifier.width(196.dp)) {
+                                    ServerImagePreview(vm, chat, path)
+                                    GhostButton(path.substringAfterLast('/')) { vm.download(path, chat.cwd) }
                                 }
                             }
                         }

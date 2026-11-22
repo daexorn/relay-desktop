@@ -20,7 +20,7 @@ internal fun PhoneTests(vm: RelayViewModel, chat: Chat, close: () -> Unit) {
             Label("Тесты на ПК", 18.sp, p.text, FontWeight.SemiBold)
             Label(if (chat.phoneOnline) "Фоновый Relay на связи" else "Нет связи с фоновым Relay", 13.sp, p.muted)
             if (!paired) {
-                Label("Введи код сопряжения с компьютера.", 14.sp, p.text)
+                Label("На компьютере нажми «Связать телефон» в карточке этого сервера и введи код здесь.", 14.sp, p.text)
                 Field(input, { input = it.trim().lowercase() }, "Код сопряжения", password = true)
                 PrimaryButton("Связать с ПК", input.isNotBlank()) {
                     paired = vm.pairPhone(input)
@@ -28,7 +28,7 @@ internal fun PhoneTests(vm: RelayViewModel, chat: Chat, close: () -> Unit) {
                 }
                 if (error.isNotEmpty()) Label(error, 13.sp, p.red)
             } else {
-                Label("Попроси агента запустить тест в чате. Здесь появятся запрос на запуск и результат.", 13.sp, p.muted)
+                Label("Стандартные команды тестов запускаются автоматически. Здесь видны вывод и снимки.", 13.sp, p.muted)
                 for (job in chat.phoneJobs) key(job.optString("id")) {
                     val payload = runCatching { JSONObject(job.optString("payload")) }.getOrNull()
                     val args = payload?.optJSONObject("input")
@@ -48,6 +48,7 @@ internal fun PhoneTests(vm: RelayViewModel, chat: Chat, close: () -> Unit) {
                             for (i in 0 until (mods?.length() ?: 0)) appendLine(mods?.optJSONObject(i)?.optString("server_path"))
                         }, color = p.text, fontSize = 14.sp)
                         PrimaryButton("Запустить на ПК") { vm.decidePhone(chat, job, true) }
+                        if (payload != null && vm.mayRememberTest(payload)) GhostButton("Разрешить повторы этого теста") { vm.decidePhone(chat, job, true, remember = true) }
                         GhostButton("Отклонить") { vm.decidePhone(chat, job, false) }
                     } else if (stage == "done" && result != null) {
                         Label(if (result.optBoolean("ok")) "Успешно" else "Завершён с ошибкой", 14.sp, p.text)

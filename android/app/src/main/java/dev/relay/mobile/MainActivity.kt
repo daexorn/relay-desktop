@@ -18,6 +18,21 @@ class MainActivity : ComponentActivity() {
         setContent {
             val vm: RelayViewModel = viewModel()
             androidx.compose.runtime.LaunchedEffect(vm) { vm.restoreLastServer() }
+            DisposableEffect(vm) {
+                val manager = getSystemService(android.net.ConnectivityManager::class.java)
+                val callback = object : android.net.ConnectivityManager.NetworkCallback() {
+                    private var previous = manager.activeNetwork
+                    override fun onAvailable(network: android.net.Network) {
+                        if (network != previous) runOnUiThread { vm.routeChanged() }
+                        previous = network
+                    }
+                    override fun onLost(network: android.net.Network) {
+                        if (network == previous) previous = null
+                    }
+                }
+                manager.registerDefaultNetworkCallback(callback)
+                onDispose { manager.unregisterNetworkCallback(callback) }
+            }
             // Status bar icons follow the theme: dark icons on light themes.
             val light = isLight(vm.theme)
             DisposableEffect(light) {

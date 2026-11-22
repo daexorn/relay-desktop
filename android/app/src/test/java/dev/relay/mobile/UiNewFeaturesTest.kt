@@ -20,6 +20,49 @@ import org.robolectric.annotation.Config
 class UiNewFeaturesTest {
     @get:Rule val rule = createAndroidComposeRule<ComponentActivity>()
 
+    @Test fun onlyStableNewerApksAreOffered() {
+        assertEquals(true, Updates.newer("0.7.10", "0.7.9"))
+        assertEquals(false, Updates.newer("0.7.5", "0.7.5"))
+        assertEquals(false, Updates.newer("0.7.4", "0.7.5"))
+        assertEquals(false, Updates.newer("0.7.6-beta", "0.7.5"))
+    }
+
+    @Test fun repeatedTestPermissionIsLimitedToRecognizedTests() {
+        val vm = RelayViewModel(ApplicationProvider.getApplicationContext())
+        val args = JSONObject().put("command", "cargo test")
+        val request = JSONObject().put("sid", "chat").put("tool", "run_local_command").put("input", args)
+        assertEquals(true, vm.mayRememberTest(request))
+        args.put("command", "cargo test && whoami")
+        assertEquals(false, vm.mayRememberTest(request))
+        request.put("tool", "minecraft_test").put("input", JSONObject().put("mods", JSONArray().put(JSONObject().put("server_path", "/tmp/test.jar"))))
+        assertEquals(false, vm.mayRememberTest(request))
+    }
+
+    @Test fun reconnectRestoresVerifiedSessionUntilExplicitRelock() {
+        val vm = RelayViewModel(ApplicationProvider.getApplicationContext())
+        vm.attach(ServerProfile(host = "test", fingerprint = "trusted-pin"))
+        val sent = mutableListOf<JSONObject>()
+        vm.sentForTest = { sent.add(it) }
+        val hello = JSONObject().put("type", "hello").put("home", "/tmp")
+        vm.handle(hello)
+        vm.newChat()
+        val sid = vm.chat()!!.sid
+        val locked = JSONObject().put("type", "sessions").put("sessions", JSONArray().put(
+            JSONObject().put("id", sid).put("title", "Закрыто").put("cwd", "/tmp").put("locked", true)))
+        vm.unlockSession(sid, "fixture")
+        vm.handle(JSONObject().put("type", "session_unlock_result").put("sid", sid).put("ok", true))
+        sent.clear()
+        vm.handle(hello)
+        vm.handle(locked)
+        vm.handle(locked)
+        assertEquals(listOf("fixture"), sent.filter { it.optString("op") == "session_unlock" }.map { it.getString("password") })
+        vm.relockSession(sid)
+        sent.clear()
+        vm.handle(hello)
+        vm.handle(locked)
+        assertEquals(false, sent.any { it.optString("op") == "session_unlock" })
+    }
+
     @Test fun temporaryPasswordWorksWhenReopeningSameServerAndClearsOnHostChange() {
         val vm = RelayViewModel(ApplicationProvider.getApplicationContext())
         val server = ServerProfile(host = "first", rememberPassword = false)

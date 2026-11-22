@@ -57,6 +57,7 @@ fn main() -> eframe::Result {
     if std::env::args().any(|a| a == "--probe") {
         return connection::probe().map_err(|e| eframe::Error::AppCreation(e.into()));
     }
+    if args.len() == 1 { relay_desktop::updates::start(false); }
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Relay")

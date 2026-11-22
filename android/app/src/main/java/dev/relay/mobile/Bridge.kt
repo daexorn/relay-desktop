@@ -60,6 +60,7 @@ class Bridge(
             val jsch = JSch()
             jsch.setHostKeyRepository(Keys(server.fingerprint))
             val s = jsch.getSession(server.user, server.host, server.port)
+            s.setSocketFactory(RouteSockets(context))
             s.setPassword(password)
             s.userInfo = userInfo(password)
             s.setConfig("PreferredAuthentications", "password,keyboard-interactive")

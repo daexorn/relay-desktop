@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import androidx.activity.ComponentActivity
 import android.graphics.Canvas
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -43,6 +44,36 @@ class UiScreenshotTest {
         } finally {
             rule.mainClock.autoAdvance = true
         }
+    }
+
+    @Test fun testScreenshotArrivesInChatAndOpens() {
+        val vm = connected()
+        vm.newChat()
+        val c = vm.chat()!!
+        val path = "/tmp/relay-test/frame.png"
+        val bitmap = Bitmap.createBitmap(256, 144, Bitmap.Config.ARGB_8888)
+        bitmap.eraseColor(android.graphics.Color.DKGRAY)
+        val canvas = Canvas(bitmap)
+        val paint = android.graphics.Paint().apply { color = android.graphics.Color.WHITE; textSize = 24f }
+        canvas.drawText("Relay test", 28f, 84f, paint)
+        val output = java.io.ByteArrayOutputStream()
+        bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)
+        val data = java.util.Base64.getEncoder().encodeToString(output.toByteArray())
+        vm.sentForTest = { request ->
+            if (request.optString("op") == "image_preview") {
+                vm.handle(JSONObject().put("type", "image_preview").put("sid", c.sid).put("path", path).put("data", data))
+            }
+        }
+        vm.handle(JSONObject().put("type", "history").put("sid", c.sid).put("messages", JSONArray().put(
+            JSONObject().put("role", "assistant").put("text", "Тест завершён."))))
+        vm.handle(JSONObject().put("type", "phone_tests").put("sid", c.sid).put("online", true)
+            .put("jobs", JSONArray().put(JSONObject().put("id", "fixture").put("stage", "done")
+                .put("result", JSONObject().put("files", JSONArray().put(path))))))
+        rule.setContent { RelayApp(vm) }
+        rule.waitUntil(10000) { rule.onAllNodesWithContentDescription("Открыть изображение").fetchSemanticsNodes().isNotEmpty() }
+        rule.onNodeWithText("Снимки тестов на ПК").assertExists()
+        rule.onNodeWithContentDescription("Открыть изображение").performClick()
+        rule.onNodeWithContentDescription("Закрыть изображение").assertExists()
     }
 
     private fun connected(theme: String = "graphite"): RelayViewModel {
