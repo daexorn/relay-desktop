@@ -45,6 +45,12 @@ class DownloadTest {
         assertTrue(t.uri.toString(), t.uri.toString().startsWith("content://media/external"))
     }
 
+    @Test fun sandboxScreenshotsUseTheirServerPath() {
+        val link = "sandbox:/mnt/data/test%20screen.png"
+        assertEquals("/mnt/data/test screen.png", Downloads.serverPath(link))
+        assertEquals(listOf("/mnt/data/test screen.png"), mentionedFiles("[Снимок]($link)"))
+    }
+
     @Test fun damagedFileIsRejected() {
         val vm = RelayViewModel(ApplicationProvider.getApplicationContext())
         vm.attach(ServerProfile(name = "Test", host = "example"))

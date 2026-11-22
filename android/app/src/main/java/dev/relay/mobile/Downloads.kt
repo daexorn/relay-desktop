@@ -19,7 +19,7 @@ import java.security.MessageDigest
 import java.util.Base64
 
 /** A file from the server on its way to this phone's Downloads/Relay folder. */
-class Transfer(val id: String, val path: String) {
+class Transfer(val id: String, val path: String, val profile: ServerProfile? = null, val cwd: String = "") {
     var name by mutableStateOf(path.substringAfterLast('/'))
     var size by mutableLongStateOf(0L)
     var received by mutableLongStateOf(0L)
@@ -127,7 +127,11 @@ object Downloads {
         return l.startsWith("/") || l.startsWith("~/") || l.contains('.') || l.contains('/')
     }
 
-    fun serverPath(link: String) = Uri.decode(link.trim().removePrefix("file://"))
+    fun serverPath(link: String): String {
+        val source = link.trim()
+        val path = if (source.startsWith("sandbox:/mnt/data/")) source.removePrefix("sandbox:") else source.removePrefix("file://")
+        return Uri.decode(path)
+    }
 }
 
 /** Server files named in an answer: link targets and absolute paths with an extension, in order, at most four. */
@@ -135,7 +139,7 @@ fun mentionedFiles(text: String): List<String> {
     val found = LinkedHashSet<String>()
     Regex("\\]\\(([^)\\s]+)\\)").findAll(text).forEach { m ->
         val link = m.groupValues[1]
-        if (Downloads.isServerFile(link) && (link.startsWith("/") || link.startsWith("~/") || link.startsWith("file://"))) found.add(Downloads.serverPath(link))
+        if (Downloads.isServerFile(link) && (link.startsWith("/") || link.startsWith("~/") || link.startsWith("file://") || link.startsWith("sandbox:/mnt/data/"))) found.add(Downloads.serverPath(link))
     }
     Regex("(?<![\\w/.:])(/(?:[\\w.+\\-]+/)+[\\w.+\\-]+\\.[A-Za-z0-9]{1,8})(?![\\w/])").findAll(text).forEach { found.add(it.groupValues[1]) }
     return found.filterNot { it.endsWith(".kt") && !it.contains("/build/") || it.contains("/src/") }.take(4)

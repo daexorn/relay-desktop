@@ -28,7 +28,7 @@ class UiScreenshotTest {
     @get:Rule val rule = createAndroidComposeRule<ComponentActivity>()
     private val out = File("build/screens").apply { mkdirs() }
 
-    private fun shot(name: String) {
+    private fun shot(name: String, dialog: Boolean = false) {
         // Drive the clock deterministically for crisp frame capture, then restore autoAdvance for clean teardown.
         rule.mainClock.autoAdvance = false
         try {
@@ -37,7 +37,8 @@ class UiScreenshotTest {
                 rule.mainClock.advanceTimeBy(400)
                 Thread.sleep(120)
             }
-            val view = rule.activity.window.decorView.rootView
+            val view = if (dialog) android.view.inspector.WindowInspector.getGlobalWindowViews().last { it.isShown }
+                else rule.activity.window.decorView.rootView
             val bitmap = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
             view.draw(Canvas(bitmap))
             File(out, "$name.png").outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
@@ -50,30 +51,33 @@ class UiScreenshotTest {
         val vm = connected()
         vm.newChat()
         val c = vm.chat()!!
-        val path = "/tmp/relay-test/frame.png"
-        val bitmap = Bitmap.createBitmap(256, 144, Bitmap.Config.ARGB_8888)
-        bitmap.eraseColor(android.graphics.Color.DKGRAY)
-        val canvas = Canvas(bitmap)
-        val paint = android.graphics.Paint().apply { color = android.graphics.Color.WHITE; textSize = 24f }
-        canvas.drawText("Relay test", 28f, 84f, paint)
-        val output = java.io.ByteArrayOutputStream()
-        bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)
-        val data = java.util.Base64.getEncoder().encodeToString(output.toByteArray())
+        c.title = "Проверка интерфейса"
+        c.locked = true
+        c.unlocked = true
+        val path = "/tmp/relay-test/relay-desktop.webp"
+        val bytes = requireNotNull(javaClass.getResourceAsStream("/relay-desktop-demo.webp")).use { it.readBytes() }
+        val data = java.util.Base64.getEncoder().encodeToString(bytes)
         vm.sentForTest = { request ->
             if (request.optString("op") == "image_preview") {
                 vm.handle(JSONObject().put("type", "image_preview").put("sid", c.sid).put("path", path).put("data", data))
             }
         }
         vm.handle(JSONObject().put("type", "history").put("sid", c.sid).put("messages", JSONArray().put(
-            JSONObject().put("role", "assistant").put("text", "Тест завершён."))))
+            JSONObject().put("role", "assistant").put("text", "Тест прошёл. Вот как выглядит окно Relay на компьютере."))))
         vm.handle(JSONObject().put("type", "phone_tests").put("sid", c.sid).put("online", true)
             .put("jobs", JSONArray().put(JSONObject().put("id", "fixture").put("stage", "done")
                 .put("result", JSONObject().put("files", JSONArray().put(path))))))
         rule.setContent { RelayApp(vm) }
         rule.waitUntil(10000) { rule.onAllNodesWithContentDescription("Открыть изображение").fetchSemanticsNodes().isNotEmpty() }
         rule.onNodeWithText("Снимки тестов на ПК").assertExists()
+        shot("10-test-preview")
         rule.onNodeWithContentDescription("Открыть изображение").performClick()
         rule.onNodeWithContentDescription("Закрыть изображение").assertExists()
+        shot("11-test-fullscreen", dialog = true)
+        rule.onNodeWithContentDescription("Увеличить").performClick()
+        rule.onNodeWithText("150%").assertExists()
+        rule.onNodeWithContentDescription("Закрыть изображение").performClick()
+        rule.onNodeWithContentDescription("Защита паролем").assertExists()
     }
 
     private fun connected(theme: String = "graphite"): RelayViewModel {
@@ -117,8 +121,20 @@ class UiScreenshotTest {
 
     @Test fun sessions() {
         val vm = connected()
+        val now = System.currentTimeMillis() / 1000
+        fun window(id: String, label: String, used: Int) = JSONObject().put("id", id).put("label", label)
+            .put("utilization", used).put("resets_at", now + when (id) { "five_hour" -> 6000; "seven_day" -> 273600; else -> 172800 })
+        fun quota(agent: String, vararg rows: JSONObject) = vm.handle(JSONObject().put("type", "usage").put("backend", agent)
+            .put("available", true).put("windows", JSONArray(rows.toList())))
+        quota("claude", window("five_hour", "5 часов", 38), window("seven_day", "Неделя", 62))
+        quota("codex", window("seven_day", "Неделя", 16))
+        quota("agy", window("agy_gemini_weekly", "Gemini · нед", 73), window("agy_hidden_five_hour", "5ч AGY", 98))
         rule.setContent { RelayApp(vm) }
         shot("03-sessions")
+        rule.onNodeWithText("Лимиты").performClick()
+        rule.onNodeWithText("73%").assertExists()
+        rule.onNodeWithText("5ч AGY").assertDoesNotExist()
+        shot("12-limits", dialog = true)
     }
 
     private fun chat(vm: RelayViewModel) {

@@ -49,7 +49,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -107,6 +106,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextRange
@@ -831,10 +831,11 @@ fun TopBar(
     subtitle: String? = null,
     link: Link? = null,
     onBack: (() -> Unit)? = null,
+    inlineActions: Boolean = false,
     actions: @Composable () -> Unit = {},
 ) {
     val p = LocalPalette.current
-    val compact = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp < 430
+    val compact = !inlineActions && androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp < 430
     val buttons: @Composable () -> Unit = {
         Row(Modifier.horizontalScroll(rememberScrollState()), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(2.dp)) { actions() }
@@ -1355,10 +1356,11 @@ fun SessionsScreen(vm: RelayViewModel) {
     val activeSessions = vm.sessions.filter { s ->
         s.running || s.id in vm.running || vm.chats[s.id]?.let { it.version >= 0 && it.transcript.busy } == true
     }
-    val horizonTone = activeSessions.firstOrNull()?.let { backendColor(p, it.backend.ifBlank { server?.effectiveBackend() ?: "claude" }) } ?: p.accent
+    var showLimits by rememberSaveable(vm.current?.id) { mutableStateOf(false) }
+    var more by remember { mutableStateOf(false) }
+    if (showLimits) LimitsSheet(vm) { showLimits = false }
 
     Box(Modifier.fillMaxSize().background(p.side)) {
-        AtmosphericHorizon(horizonTone)
         Column(Modifier.fillMaxSize()) {
             val status = when (vm.link) {
                 Link.Online -> "на связи"
@@ -1368,20 +1370,21 @@ fun SessionsScreen(vm: RelayViewModel) {
             TopBar(
                 title = server?.name?.ifEmpty { server.host } ?: "Сессии",
                 subtitle = status,
+                inlineActions = true,
                 link = vm.link,
                 onBack = { if (vm.demo) vm.leaveDemo() else vm.screen = Screen.Servers },
             ) {
-                GlyphButton(
-                    glyph = Glyph.Radar,
-                    hint = "Радар агентов",
-                    tint = if (activeSessions.isNotEmpty()) p.green else p.accent,
-                    highlighted = activeSessions.isNotEmpty(),
-                ) { radarSheet = true }
-                SecondaryPillButton("Агенты", Glyph.Terminal, p.accent, enabled = vm.link == Link.Online) { agentsSheet = true }
                 IconButton(Icons.Default.Search, "Поиск") { searching = !searching; if (!searching) query = "" }
-                IconButton(Icons.Default.Refresh, "Обновить") { vm.refresh() }
-                IconButton(Icons.Default.Settings, "Настройки") { vm.screen = Screen.Settings }
+                Box {
+                    IconButton(Icons.Default.MoreVert, "Действия сервера") { more = true }
+                    DropdownMenu(expanded = more, onDismissRequest = { more = false }) {
+                        DropdownMenuItem({ Label("Агенты") }, { more = false; agentsSheet = true }, enabled = vm.link == Link.Online)
+                        DropdownMenuItem({ Label("Обновить") }, { more = false; vm.refresh() })
+                        DropdownMenuItem({ Label("Настройки") }, { more = false; vm.screen = Screen.Settings })
+                    }
+                }
             }
+            ServerOverview(vm, activeSessions.size, { showLimits = true }, { radarSheet = true })
             if (vm.notice.isNotEmpty()) Notice(vm.notice) { vm.notice = "" }
             AnimatedVisibility(searching) {
                 Box(Modifier.padding(horizontal = 12.dp, vertical = 6.dp)) {
@@ -1394,9 +1397,6 @@ fun SessionsScreen(vm: RelayViewModel) {
                         vm.savedPassword(server)?.let { vm.connect(server, it) } ?: run { vm.passwordRequest = server; vm.screen = Screen.Servers }
                     }
                 }
-            }
-            if (activeSessions.isNotEmpty() && vm.link == Link.Online) {
-                ActiveAgentsBanner(activeSessions, onClick = { radarSheet = true })
             }
             val q = query.lowercase()
             val matches = { s: Session -> q.isEmpty() || s.title.lowercase().contains(q) || s.autoTitle.lowercase().contains(q) || s.cwd.lowercase().contains(q) }
@@ -1538,54 +1538,6 @@ fun SessionsScreen(vm: RelayViewModel) {
 }
 
 @Composable
-fun ActiveAgentsBanner(activeSessions: List<Session>, onClick: () -> Unit) {
-    val p = LocalPalette.current
-    val leadBackend = activeSessions.first().backend.ifBlank { "claude" }
-    val leadTone = backendColor(p, leadBackend)
-    val shape = RoundedCornerShape(16.dp)
-    val count = activeSessions.size
-    val word = when {
-        count % 10 == 1 && count % 100 != 11 -> "агент активен"
-        count % 10 in 2..4 && count % 100 !in 12..14 -> "агента активны"
-        else -> "агентов активны"
-    }
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 6.dp)
-            .clip(shape)
-            .background(p.mix(p.elevated, leadTone, if (p.light) 0.05f else 0.08f))
-            .specularBorder(shape, leadTone.copy(alpha = 0.55f), p.borderSubtle)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        OrbitalEmblem(leadTone, active = true, size = 30.dp)
-        Column(Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                Label("$count $word на сервере", 13.sp, p.text, FontWeight.SemiBold, maxLines = 1)
-                NeuralWaveform(leadTone, active = true, width = 18.dp, height = 11.dp)
-            }
-            val names = activeSessions.joinToString(" · ") { it.title.ifBlank { lockedSessionTitle(it.modified) } }
-            Label(names, 11.5.sp, p.muted, maxLines = 1)
-        }
-        Row(
-            Modifier
-                .clip(RoundedCornerShape(9.dp))
-                .background(leadTone.copy(alpha = 0.15f))
-                .border(1.dp, leadTone.copy(alpha = 0.38f), RoundedCornerShape(9.dp))
-                .padding(horizontal = 9.dp, vertical = 5.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            VectorGlyph(Glyph.Radar, leadTone, size = 13.dp)
-            Label("Радар", 11.5.sp, leadTone, FontWeight.SemiBold, maxLines = 1)
-        }
-    }
-}
-
-@Composable
 fun SessionLockDialog(vm: RelayViewModel, sid: String, currentlyLocked: Boolean, currentlyUnlocked: Boolean, close: () -> Unit) {
     val p = LocalPalette.current
     var currentPw by remember { mutableStateOf("") }
@@ -1608,7 +1560,7 @@ fun SessionLockDialog(vm: RelayViewModel, sid: String, currentlyLocked: Boolean,
         Spacer(Modifier.height(12.dp))
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             if (currentlyLocked && currentlyUnlocked) {
-                SecondaryPillButton("Заблокировать сейчас на этом устройстве", Glyph.Lock, p.amber) {
+                SecondaryPillButton("Заблокировать сейчас", Glyph.Lock, p.muted) {
                     vm.relockSession(sid)
                     close()
                 }
@@ -1773,22 +1725,17 @@ fun SessionRow(
             Modifier
                 .fillMaxWidth()
                 .clip(shape)
-                .background(if (selected || busy) p.elevated else p.surface.copy(alpha = 0.80f))
-                .border(1.dp, if (selected) p.line else p.borderSubtle, shape)
+                .background(if (selected) p.elevated else p.surface)
+                .then(if (selected) Modifier.border(1.dp, p.line, shape) else Modifier)
                 .combinedClickable(onClick = { vm.open(s) }, onLongClick = { menu = true })
-                .padding(start = if (selected || busy) 0.dp else 12.dp, top = 10.dp, bottom = 10.dp, end = 4.dp),
+                .padding(start = 11.dp, top = 5.dp, bottom = 5.dp, end = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            if (selected || busy) {
-                Box(
-                    Modifier
-                        .padding(start = 5.dp, end = 9.dp)
-                        .width(3.dp)
-                        .height(30.dp)
-                        .clip(CircleShape)
-                        .background(if (busy) engineTone else p.accent),
-                )
+            Box(Modifier.size(34.dp).clip(RoundedCornerShape(10.dp)).background(p.side)
+                .semantics { contentDescription = backendShortLabel(effectiveBackend) }, contentAlignment = Alignment.Center) {
+                PixelMascot(effectiveBackend, 19.dp)
             }
+            Spacer(Modifier.width(9.dp))
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     if (s.locked) {
@@ -1806,9 +1753,6 @@ fun SessionRow(
                         maxLines = 1,
                         modifier = Modifier.weight(1f, fill = false),
                     )
-                    if (s.backend in setOf("codex", "agy", "api") || busy) {
-                        BackendBadge(effectiveBackend, compact = true)
-                    }
                 }
                 Spacer(Modifier.height(2.dp))
                 when {
@@ -1906,6 +1850,8 @@ fun ChatScreen(vm: RelayViewModel) {
     BackHandler { vm.screen = Screen.Sessions }
 
     var lockDialog by remember { mutableStateOf(false) }
+    var showLimits by rememberSaveable(vm.current?.id) { mutableStateOf(false) }
+    if (showLimits) LimitsSheet(vm) { showLimits = false }
     var agentsSheet by remember { mutableStateOf(false) }
     var radarSheet by remember { mutableStateOf(false) }
 
@@ -1951,35 +1897,33 @@ fun ChatScreen(vm: RelayViewModel) {
         lastItems = items.size
     }
 
-    Box(Modifier.fillMaxSize()) {
-        AtmosphericHorizon(engineTone)
+    Box(Modifier.fillMaxSize().background(p.base)) {
         Column(Modifier.fillMaxSize()) {
             val folder = vm.sessions.firstOrNull { it.id == chat.sid }?.folder?.let { f -> vm.folders.firstOrNull { it.id == f }?.name }
             TopBar(
                 title = chat.title.ifBlank { lockedSessionTitle(0.0) },
                 subtitle = listOfNotNull(folder, folderName(chat.cwd)).joinToString(" · "),
                 link = vm.link,
+                inlineActions = true,
                 onBack = { vm.screen = Screen.Sessions },
             ) {
-                BackendBadge(activeBackend, showDot = true) { agentsSheet = true }
-                if (!lockedGate) GlyphButton(Glyph.Terminal, "Тесты на ПК", highlighted = chat.phoneJobs.any { it.optString("stage") == "approval" }) { phoneSheet = true }
-                GlyphButton(
-                    glyph = Glyph.Radar,
-                    hint = "Радар агентов",
-                    tint = if (busy || vm.running.isNotEmpty()) engineTone else p.muted,
-                    highlighted = busy || vm.running.isNotEmpty(),
-                ) {
-                    radarSheet = true
-                }
-                GlyphButton(
-                    glyph = if (chat.locked && !chat.unlocked) Glyph.Lock else if (chat.locked) Glyph.Unlock else Glyph.Lock,
-                    hint = "Защита паролем",
-                    tint = if (chat.locked) p.amber else p.muted,
-                    highlighted = chat.locked,
-                ) {
-                    lockDialog = true
+                Box(Modifier.size(48.dp).clip(CircleShape).clickable { lockDialog = true }
+                    .semantics { contentDescription = "Защита паролем"; stateDescription = if (lockedGate) "Заблокирована" else if (chat.locked) "Разблокирована" else "Без пароля" },
+                    contentAlignment = Alignment.Center) {
+                    VectorGlyph(if (chat.locked && !lockedGate) Glyph.Unlock else Glyph.Lock,
+                        if (lockedGate) p.amber else p.muted, 16.dp)
                 }
             }
+            Row(Modifier.fillMaxWidth().background(p.side).padding(horizontal = 12.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.weight(1f)) {
+                    BackendBadge(activeBackend, showDot = true) { agentsSheet = true }
+                }
+                SecondaryPillButton("Лимиты", Glyph.Pulse) { showLimits = true }
+                if (!lockedGate) GlyphButton(Glyph.Terminal, "Тесты на ПК", highlighted = chat.phoneJobs.any { it.optString("stage") == "approval" }) { phoneSheet = true }
+                GlyphButton(Glyph.Radar, "Радар агентов", tint = if (busy) engineTone else p.muted) { radarSheet = true }
+            }
+            HorizontalDivider(color = p.borderSubtle)
             if (vm.notice.isNotEmpty()) Notice(vm.notice) { vm.notice = "" }
             if (!lockedGate && !phoneSheet && chat.phoneJobs.any { it.optString("stage") == "approval" }) {
                 GhostButton("Подтвердить тест на ПК", p.accent) { phoneSheet = true }
@@ -2048,15 +1992,7 @@ fun ChatScreen(vm: RelayViewModel) {
                         (0 until (files?.length() ?: 0)).map { files!!.optString(it) }.filter { Downloads.mime(it).startsWith("image/") }
                     }.distinct()
                     if (pictures.isNotEmpty()) item(key = "pc-test-pictures") {
-                        Label("Снимки тестов на ПК", 13.sp, p.muted)
-                        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            items(pictures, key = { it }) { path ->
-                                Column(Modifier.width(196.dp)) {
-                                    ServerImagePreview(vm, chat, path)
-                                    GhostButton(path.substringAfterLast('/')) { vm.download(path, chat.cwd) }
-                                }
-                            }
-                        }
+                        TestGallery(vm, chat, pictures)
                     }
                     item(key = "status") {
                         Column {
@@ -2114,32 +2050,32 @@ fun LockedSessionCard(vm: RelayViewModel, chat: Chat, modifier: Modifier = Modif
     val p = LocalPalette.current
     var password by remember(chat.sid) { mutableStateOf("") }
     val shape = RoundedCornerShape(22.dp)
-    Box(modifier.fillMaxWidth().padding(20.dp), contentAlignment = Alignment.Center) {
+    Box(modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(16.dp), contentAlignment = Alignment.Center) {
         Column(
             Modifier
                 .fillMaxWidth()
                 .widthIn(max = 420.dp)
                 .clip(shape)
                 .background(p.surface)
-                .specularBorder(shape, p.amber.copy(alpha = 0.52f), p.amber.copy(alpha = 0.25f))
-                .padding(24.dp),
+                .border(1.dp, p.line, shape)
+                .padding(18.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Box(
                 Modifier
-                    .size(58.dp)
+                    .size(36.dp)
                     .clip(CircleShape)
                     .background(p.amber.copy(alpha = 0.14f))
                     .border(1.dp, p.amber.copy(alpha = 0.35f), CircleShape),
                 contentAlignment = Alignment.Center,
             ) {
-                VectorGlyph(Glyph.ShieldLock, p.amber, size = 30.dp)
+                VectorGlyph(Glyph.ShieldLock, p.amber, size = 18.dp)
             }
             Spacer(Modifier.height(16.dp))
             Label("Сессия защищена паролем", 19.sp, p.text, FontWeight.SemiBold)
             Spacer(Modifier.height(6.dp))
             Label(
-                "История скрыта на сервере. Введи пароль сессии, чтобы открыть сообщения и продолжить разговор.",
+                "Введи пароль, чтобы открыть переписку.",
                 13.sp,
                 p.muted,
             )
@@ -2158,7 +2094,7 @@ fun LockedSessionCard(vm: RelayViewModel, chat: Chat, modifier: Modifier = Modif
             PrimaryButton(
                 text = if (chat.unlocking) "Проверяем…" else "Разблокировать",
                 enabled = password.isNotEmpty() && !chat.unlocking,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.align(Alignment.End),
             ) {
                 vm.unlockSession(chat.sid, password)
             }
@@ -2334,7 +2270,10 @@ fun AssistantText(
         if (onFile != null && files.isNotEmpty()) {
             Column(Modifier.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 for (path in files) {
-                    preview?.invoke(path)
+                    if (preview != null && Downloads.mime(path).startsWith("image/")) {
+                        preview(path)
+                        continue
+                    }
                     val dlShape = RoundedCornerShape(12.dp)
                     Row(
                         Modifier
@@ -2900,7 +2839,7 @@ fun TransferCard(vm: RelayViewModel, t: Transfer) {
             }
             IconButton(Icons.Default.Close, if (t.done || t.error.isNotEmpty()) "Убрать" else "Отменить") { vm.dismiss(t) }
         }
-        if (t.mime.startsWith("image/")) t.uri?.let { DownloadPreview(it) }
+        if (t.mime.startsWith("image/")) t.uri?.let { DownloadPreview(it, t.name) }
         if (!t.done && t.error.isEmpty() && t.size > 0) {
             Box(Modifier.padding(top = 6.dp).fillMaxWidth().height(3.dp).clip(RoundedCornerShape(2.dp)).background(p.line)) {
                 Box(Modifier.fillMaxWidth(progress).fillMaxHeight().background(p.accent))
@@ -3155,7 +3094,7 @@ fun Composer(vm: RelayViewModel, chat: Chat, onOpenAgents: () -> Unit = {}) {
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         if (f.preview != null) {
-                            Image(f.preview, f.name, Modifier.size(38.dp).clip(RoundedCornerShape(7.dp)), contentScale = ContentScale.Crop)
+                            PickedImagePreview(f)
                         } else {
                             Box(Modifier.size(38.dp).clip(RoundedCornerShape(7.dp)).background(p.elevated), contentAlignment = Alignment.Center) {
                                 VectorGlyph(Glyph.Paperclip, p.accent, size = 16.dp)

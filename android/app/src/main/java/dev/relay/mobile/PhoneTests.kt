@@ -57,9 +57,9 @@ internal fun PhoneTests(vm: RelayViewModel, chat: Chat, close: () -> Unit) {
                         val files = result.optJSONArray("files")
                         for (i in 0 until (files?.length() ?: 0)) {
                             val path = files?.optString(i).orEmpty()
-                            val transfer = vm.transfers.firstOrNull { it.path == path }
-                            ServerImagePreview(vm, chat, path)
-                            GhostButton(path.substringAfterLast('/'), p.accent) {
+                            val transfer = vm.transferFor(path, chat.cwd)
+                            if (Downloads.mime(path).startsWith("image/")) ServerImagePreview(vm, chat, path)
+                            else GhostButton(path.substringAfterLast('/'), p.accent) {
                                 if (transfer?.done == true) vm.openTransfer(transfer) else vm.download(path, chat.cwd)
                             }
                         }

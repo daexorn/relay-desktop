@@ -20,6 +20,30 @@ import org.robolectric.annotation.Config
 class UiNewFeaturesTest {
     @get:Rule val rule = createAndroidComposeRule<ComponentActivity>()
 
+    @Test fun usageRequestsFollowInstalledAgentsAndReconnect() {
+        val vm = RelayViewModel(ApplicationProvider.getApplicationContext())
+        vm.attach(ServerProfile(host = "test"))
+        val requests = mutableListOf<JSONObject>()
+        vm.sentForTest = { requests.add(it) }
+        val backends = JSONObject().put("claude", JSONObject().put("installed", true))
+            .put("agy", JSONObject().put("installed", true)).put("codex", JSONObject().put("installed", false))
+        val hello = JSONObject().put("type", "hello").put("backends", backends)
+        vm.handle(hello)
+        vm.requestUsage()
+        fun agents() = requests.filter { it.optString("op") == "usage" }.map { it.getString("backend") }
+        assertEquals(listOf("claude", "agy"), agents())
+        requests.clear()
+        vm.handle(hello)
+        assertEquals(listOf("claude", "agy"), agents())
+        val rows = JSONArray().put(JSONObject().put("id", "seven_day").put("resets_at", 1900000000))
+            .put(JSONObject().put("id", "five_hour").put("utilization", 0))
+        vm.handle(JSONObject().put("type", "usage").put("backend", "agy").put("windows", rows))
+        assertEquals(1, vm.usage["agy"]!!.windows.size)
+        assertEquals(null, vm.usage["agy"]!!.windows.single().percent)
+        vm.handle(JSONObject().put("type", "usage").put("windows", rows))
+        assertEquals(0.0, vm.usage["claude"]!!.windows.last().percent)
+    }
+
     @Test fun onlyStableNewerApksAreOffered() {
         assertEquals(true, Updates.newer("0.7.10", "0.7.9"))
         assertEquals(false, Updates.newer("0.7.5", "0.7.5"))
@@ -81,6 +105,9 @@ class UiNewFeaturesTest {
         vm.newChat()
         rule.setContent { RelayApp(vm) }
         rule.onAllNodesWithContentDescription("Поле сообщения")[0].assertExists()
+        rule.onNodeWithText("Лимиты").performClick()
+        rule.onNodeWithText("Лимиты агентов").assertExists()
+        rule.onAllNodesWithContentDescription("Закрыть лимиты")[0].performClick()
         rule.onAllNodesWithContentDescription("Тесты на ПК")[0].performClick()
         rule.onNodeWithText("Связать с ПК").assertExists()
     }
@@ -145,7 +172,7 @@ class UiNewFeaturesTest {
         rule.waitForIdle()
 
         // Active Agents Banner is shown on SessionsScreen when >=1 session is running
-        rule.onNodeWithText("2 агента активны на сервере").assertExists()
+        rule.onNodeWithText("2 агента активны").assertExists()
         rule.onNodeWithText("Радар").performClick()
         rule.waitForIdle()
 

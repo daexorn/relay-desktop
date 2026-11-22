@@ -152,6 +152,23 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var backendsKnown by mutableStateOf(false)
         private set
+    internal val usage = mutableStateMapOf<String, AgentQuota>()
+    private val usageRequested = mutableMapOf<String, Long>()
+    internal fun quotaAgents() = CLI_AGENTS.filter { !backendsKnown || backendsStatus[it]?.installed == true }
+
+    internal fun requestUsage(refresh: Boolean = false) {
+        if (link != Link.Online || demo) return
+        val now = android.os.SystemClock.elapsedRealtime()
+        for (agent in quotaAgents()) {
+            val last = usageRequested[agent]
+            val delay = if (refresh) 5000L else 300000L
+            if (last == null || now - last >= delay) {
+                usageRequested[agent] = now
+                send(JSONObject().put("op", "usage").put("backend", agent))
+            }
+        }
+    }
+
     val installingAgents = mutableStateMapOf<String, Boolean>()
     val agentMessages = mutableStateMapOf<String, String>()
     val agentLogs = mutableStateMapOf<String, String>()
@@ -445,6 +462,8 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         sessions = emptyList()
         folders = emptyList()
         sessionsLoaded = false
+        usage.clear()
+        usageRequested.clear()
         backendsStatus = emptyMap()
         backendsKnown = false
         installingAgents.clear()
@@ -600,6 +619,8 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         chats.clear()
         selected = null
         sessions = emptyList()
+        usage.clear()
+        usageRequested.clear()
         backendsStatus = emptyMap()
         backendsKnown = false
         link = Link.Online
@@ -612,6 +633,8 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         link = Link.Off
         current = null
         sessions = emptyList()
+        usage.clear()
+        usageRequested.clear()
         backendsStatus = emptyMap()
         backendsKnown = false
         chats.clear()
@@ -695,7 +718,9 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                 home = value.optString("home", "~")
                 protocol = value.optInt("protocol", 0)
                 claudeVersion = value.optString("version")
+                usageRequested.clear()
                 parseBackends(value.optJSONObject("backends"))
+                requestUsage()
                 val c = current
                 if (!demo && bridge != null && c != null) {
                     store.lastServer = c.id.takeIf { c.rememberPassword }
@@ -735,7 +760,14 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
                     if (standard || store.password(approvalKey) == "yes") decidePhone(c, job, true)
                 }
             }
-            "backends_status" -> parseBackends(value.optJSONObject("backends"))
+            "usage" -> {
+                val agent = if (value.isNull("backend")) "claude" else value.optString("backend")
+                if (agent in CLI_AGENTS) usage[agent] = AgentQuota.parse(agent, value)
+            }
+            "backends_status" -> {
+                parseBackends(value.optJSONObject("backends"))
+                requestUsage()
+            }
             "agent_install" -> {
                 val agent = value.optString("agent")
                 val isRunning = value.optBoolean("running", false)
@@ -1130,7 +1162,10 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         if (bridge == null) return
         val r = object : Runnable {
             override fun run() {
-                if (link == Link.Online) send(JSONObject().put("op", "sessions"))
+                if (link == Link.Online) {
+                    send(JSONObject().put("op", "sessions"))
+                    requestUsage()
+                }
                 main.postDelayed(this, 20_000)
             }
         }
@@ -1139,6 +1174,7 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun refresh() {
+        requestUsage(refresh = true)
         send(JSONObject().put("op", "sessions"))
         send(JSONObject().put("op", "backends_status"))
         chat()?.let { c -> if (!c.transcript.busy && !c.isLockedGate()) send(JSONObject().put("op", "history").put("sid", c.sid)) }
@@ -1541,9 +1577,17 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
         authFlow = null
     }
 
+    internal fun transferFor(path: String, cwd: String): Transfer? {
+        val server = current ?: return null
+        return transfers.firstOrNull { t ->
+            t.path == path && (path.startsWith("/") || t.cwd == cwd) &&
+                server.sameLogin(t.profile) && server.fingerprint == t.profile?.fingerprint
+        }
+    }
+
     /** A file mentioned in chat: fetched over the same connection into Downloads/Relay. */
     fun download(path: String, cwd: String) {
-        if (transfers.any { it.path == path && it.error.isEmpty() && !it.done }) return
+        if (transferFor(path, cwd)?.let { it.error.isEmpty() && !it.done } == true) return
         if (link != Link.Online) {
             notice = "Подключись к серверу, чтобы скачать файл."
             return
@@ -1552,7 +1596,7 @@ class RelayViewModel(app: Application) : AndroidViewModel(app) {
             notice = "Уже скачивается несколько файлов. Дождись их."
             return
         }
-        val t = Transfer(UUID.randomUUID().toString(), path)
+        val t = Transfer(UUID.randomUUID().toString(), path, current, cwd)
         transfers.add(0, t)
         send(JSONObject().put("op", "file_info").put("id", t.id).put("path", path).put("cwd", cwd))
     }
