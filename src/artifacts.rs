@@ -22,7 +22,7 @@ fn candidate(value: &str, link: bool) -> Option<Artifact> {
     {
         return None;
     }
-    let value = value.strip_prefix("file://").unwrap_or(value);
+    let value = value.strip_prefix("file://").or_else(|| value.strip_prefix("sandbox:").filter(|p| p.starts_with('/'))).unwrap_or(value);
     if value.contains(':') || value.starts_with('\\') || value.as_bytes().get(1) == Some(&b':') {
         return None;
     }
@@ -57,7 +57,7 @@ fn candidate(value: &str, link: bool) -> Option<Artifact> {
     let lower = path.to_ascii_lowercase();
     if ![
         ".jar", ".zip", ".7z", ".tar.gz", ".pdf", ".docx", ".pptx", ".xlsx", ".bbmodel", ".png",
-        ".jpg", ".jpeg", ".webp",
+        ".jpg", ".jpeg", ".webp", ".gif",
     ]
     .iter()
     .any(|suffix| lower.ends_with(suffix))
@@ -71,7 +71,7 @@ fn candidate(value: &str, link: bool) -> Option<Artifact> {
 pub fn extract(text: &str) -> Vec<Artifact> {
     let mut found = Vec::new();
     let mut seen = HashSet::new();
-    let mut in_link = false;
+    let mut link_depth = 0usize;
     let mut add = |value: &str, link: bool| {
         if let Some(artifact) = candidate(value, link) {
             if seen.insert(artifact.path.clone()) {
@@ -81,13 +81,13 @@ pub fn extract(text: &str) -> Vec<Artifact> {
     };
     for event in Parser::new(text) {
         match event {
-            Event::Start(Tag::Link { dest_url, .. }) => {
-                in_link = true;
+            Event::Start(Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. }) => {
+                link_depth += 1;
                 add(&dest_url, true);
             }
-            Event::End(TagEnd::Link) => in_link = false,
-            Event::Code(code) if !in_link => add(&code, false),
-            Event::Text(text) if !in_link => {
+            Event::End(TagEnd::Link | TagEnd::Image) => link_depth -= 1,
+            Event::Code(code) if link_depth == 0 => add(&code, false),
+            Event::Text(text) if link_depth == 0 => {
                 for word in text.split_whitespace() {
                     let word = word.trim_matches(['(', ')', '[', ']', ',', ';']);
                     if word.starts_with('/') || word.starts_with("~/") || text.trim() == word {
@@ -100,6 +100,32 @@ pub fn extract(text: &str) -> Vec<Artifact> {
     }
     found.truncate(4);
     found
+}
+
+// Render server-side Markdown images as links here. The preview below the text
+// comes from the SSH bridge, so the Markdown widget never opens a local PC path.
+pub fn image_links(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains("![") { return text.into(); }
+    let mut output = String::new();
+    let mut start = 0;
+    for (event, span) in Parser::new(text).into_offset_iter() {
+        if let Event::Start(Tag::Image { dest_url, .. }) = event {
+            if candidate(&dest_url, true).is_some() && text[span.start..].starts_with("![") {
+                output.push_str(&text[start..span.start]);
+                start = span.start + 1;
+            }
+        }
+    }
+    if start == 0 { return text.into(); }
+    output.push_str(&text[start..]);
+    output.into()
+}
+
+impl Artifact {
+    pub fn is_image(&self) -> bool {
+        let ext = self.name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+        matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp")
+    }
 }
 
 pub fn links(text: &str) -> Vec<(String, Artifact)> {
@@ -204,6 +230,7 @@ impl Downloads {
         text: &str,
         connected: bool,
         p: Palette,
+        mut preview: impl FnMut(&mut egui::Ui, &Artifact),
     ) {
         for artifact in extract(text) {
             let key = (server.to_owned(), cwd.to_owned(), artifact.path.clone());
@@ -215,6 +242,7 @@ impl Downloads {
                 .corner_radius(12.)
                 .inner_margin(12.)
                 .show(ui, |ui| {
+                    if artifact.is_image() { preview(ui, &artifact); }
                     ui.horizontal(|ui| {
                         let (rect, _) =
                             ui.allocate_exact_size(Vec2::splat(24.), egui::Sense::hover());
@@ -279,6 +307,18 @@ impl Downloads {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn server_markdown_images_become_links_and_one_preview() {
+        let text = "![Снимок](sandbox:/mnt/data/my%20photo.JPG) `/mnt/data/my photo.JPG`";
+        let md = image_links(text);
+        assert!(md.starts_with("[Снимок]"));
+        let files = extract(&md);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "/mnt/data/my photo.JPG");
+        assert!(files[0].is_image());
+        assert!(matches!(image_links("![web](https://example.com/a.png)"), std::borrow::Cow::Borrowed(_)));
+        assert_eq!(extract("![foo](a.gif)")[0].name, "a.gif");
+    }
     #[test]
     fn extracts_server_artifacts_and_decodes_markdown_paths() {
         let result = extract(

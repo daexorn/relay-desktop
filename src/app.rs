@@ -4,6 +4,7 @@ mod project_icon;
 mod session_actions;
 mod api_settings;
 mod workspace;
+mod photo;
 mod auth;
 
 use crate::{
@@ -98,6 +99,8 @@ struct Chat {
     blocks: HashMap<usize, usize>,
     user_at: usize,
     sent_images: HashMap<usize, Vec<Attachment>>,
+    previews: photo::Previews,
+    viewer: Option<photo::Viewer>,
     queue: std::collections::VecDeque<QueuedPrompt>,
     queue_paused: bool,
     /// Server `modified` time of the session the last time this chat was in sync with it.
@@ -179,6 +182,8 @@ impl Chat {
             blocks: HashMap::new(),
             user_at: 0,
             sent_images: HashMap::new(),
+            previews: Default::default(),
+            viewer: None,
             queue: Default::default(),
             queue_paused: false,
             synced_modified: 0.,
@@ -1013,6 +1018,7 @@ impl RelayApp {
                             }
                             // An upload cut midway goes back to the front of the queue and is resent.
                             let failed_upload = c.upload_progress.is_some();
+                            c.previews = Default::default();
                             c.restore_failed_upload();
                             if failed_upload && (!c.draft.trim().is_empty() || !c.images.is_empty()) {
                                 c.enqueue_draft();
@@ -1470,6 +1476,8 @@ impl RelayApp {
                         if s.is_locked_gate() {
                             c.messages.clear();
                             c.sent_images.clear();
+                            c.previews = Default::default();
+                            c.viewer = None;
                             c.permissions.clear();
                             c.loaded = false;
                             c.loading = false;
@@ -1514,6 +1522,8 @@ impl RelayApp {
                     c.unlocked = false;
                     c.messages.clear();
                     c.sent_images.clear();
+                    c.previews = Default::default();
+                    c.viewer = None;
                     c.permissions.clear();
                 }
             }
@@ -1572,6 +1582,8 @@ impl RelayApp {
                         c.title = sidebar_title;
                         c.messages.clear();
                         c.sent_images.clear();
+                        c.previews = Default::default();
+                        c.viewer = None;
                         c.permissions.clear();
                         c.loaded = false;
                         c.loading = false;
@@ -1590,12 +1602,20 @@ impl RelayApp {
                     };
                 }
             }
+            "image_preview" => {
+                let sid = value["sid"].as_str().unwrap_or_default();
+                if let Some(c) = self.chats.get_mut(&key(&server, sid)).filter(|c| !c.locked || c.unlocked) {
+                    c.previews.receive(&self.controller.bus.ctx, value["path"].as_str().unwrap_or_default(),
+                        value["data"].as_str().unwrap_or_default());
+                }
+            }
             "history" => {
                 let sid = value["sid"].as_str().unwrap_or("");
                 if let Some(c) = self.chats.get_mut(&key(&server, sid)) {
                     c.loading = false;
+                    if c.locked && !c.unlocked { return; }
                     if !c.busy || !c.loaded {
-                        let mut messages: Vec<Message> = value["messages"]
+                        let messages: Vec<Message> = value["messages"]
                             .as_array()
                             .map(|rows| {
                                 rows.iter()
@@ -1605,12 +1625,13 @@ impl RelayApp {
                             .unwrap_or_default();
                         // Pictures from history become previews in their message bubble.
                         let ctx = self.controller.bus.ctx.clone();
-                        for (index, message) in messages.iter_mut().enumerate() {
+                        c.sent_images.clear();
+                        for (index, message) in messages.iter().enumerate() {
                             if !message.images.is_empty() {
                                 let previews = message
                                     .images
-                                    .drain(..)
-                                    .map(|image| crate::images::from_history(&ctx, &image))
+                                    .iter()
+                                    .map(|image| crate::images::from_history(&ctx, image))
                                     .collect();
                                 c.sent_images.insert(index, previews);
                             }
@@ -4018,15 +4039,11 @@ impl RelayApp {
                                             );
                                         } else {
                                             user_turn_caption(ui, attr, light, p);
-                                            user_message_bubble(
-                                                ui,
-                                                &message.text,
-                                                chat.sent_images
-                                                    .get(&index)
-                                                    .map(Vec::as_slice)
-                                                    .unwrap_or(&[]),
-                                                p,
-                                            );
+                                            let files = chat.sent_images.get(&index).map(Vec::as_slice).unwrap_or(&[]);
+                                            let (_, opened) = user_message_bubble(ui, &message.text, files, p);
+                                            if let Some(i) = opened {
+                                                chat.viewer = photo::Viewer::attachment(ui.ctx(), &files[i], message.images.get(i));
+                                            }
                                         }
                                         ui.add_space(if compact_appearance{8.}else{14.});
                                     }
@@ -4060,7 +4077,8 @@ impl RelayApp {
                                             }
                                         });
                                         ui.add_space(3.);
-                                        let file_links = crate::artifacts::links(&message.text);
+                                        let markdown = crate::artifacts::image_links(&message.text);
+                                        let file_links = crate::artifacts::links(&markdown);
                                         for (destination, _) in &file_links {
                                             self.markdown.add_link_hook(destination.clone());
                                         }
@@ -4072,7 +4090,7 @@ impl RelayApp {
                                             crate::math::show(
                                                 ui,
                                                 &mut self.markdown,
-                                                &message.text,
+                                                &markdown,
                                             );
                                         });
                                         for (destination, artifact) in &file_links {
@@ -4106,6 +4124,13 @@ impl RelayApp {
                                                 &message.text,
                                                 connected,
                                                 p,
+                                                |ui, artifact| {
+                                                    let opened = chat.previews.card(ui, artifact, connected, p, || {
+                                                        self.controller.send(server, json!({"op":"image_preview", "sid":chat.sid,
+                                                            "cwd":chat.cwd, "path":artifact.path}))
+                                                    });
+                                                    if opened.is_some() { chat.viewer = opened; }
+                                                },
                                             );
                                         }
                                         // Copy appears on hover; the row is always reserved so nothing jumps.
@@ -4731,7 +4756,9 @@ impl RelayApp {
                     let mut remove = None;
                     ui.horizontal_wrapped(|ui| {
                         for (index, file) in chat.images.iter().enumerate() {
-                            if attachment_view(ui, file, p, true) {
+                            let (remove_clicked, open_clicked) = attachment_view(ui, file, p, true);
+                            if open_clicked { chat.viewer = photo::Viewer::attachment(ui.ctx(), file, None); }
+                            if remove_clicked {
                                 remove = Some(index);
                             }
                         }
@@ -5309,6 +5336,14 @@ impl RelayApp {
         }
     }
     fn dialogs(&mut self, ctx: &egui::Context) {
+        if let Some(k) = self.current_key() {
+            if let Some(chat) = self.chats.get_mut(&k).filter(|c| !c.locked || c.unlocked) {
+                let p = design::animated_palette(ctx, self.settings.light);
+                if chat.viewer.as_mut().is_some_and(|viewer| viewer.show(ctx, &k, p)) {
+                    chat.viewer = None;
+                }
+            }
+        }
         self.api_dialog(ctx);
         let p = design::animated_palette(ctx, self.settings.light);
         if let Some((server, request)) = self.desktop_requests.first().cloned() {
@@ -6480,7 +6515,8 @@ fn user_message_bubble(
     text: &str,
     files: &[Attachment],
     p: Palette,
-) -> egui::Rect {
+) -> (egui::Rect, Option<usize>) {
+    let mut opened = None;
     let row = ui.available_rect_before_wrap();
     let max = (row.width() * 0.86 - 28.).max(1.);
     let measured = ui
@@ -6511,12 +6547,17 @@ fn user_message_bubble(
                 ui.add_space(5.);
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = Vec2::splat(6.);
-                    for file in files {
+                    for (i, file) in files.iter().enumerate() {
                         match &file.texture {
                             Some(texture) => {
                                 let size = preview_size(file);
-                                ui.add(egui::Image::new(texture).fit_to_exact_size(size).corner_radius(10))
-                                    .on_hover_text(format!("{} · {}", file.name, file_size(file.bytes)));
+                                let scale = (width / size.x).min(1.);
+                                if ui.add(egui::Image::new(texture).fit_to_exact_size(size * scale)
+                                    .corner_radius(10).sense(egui::Sense::click()))
+                                    .on_hover_cursor(egui::CursorIcon::ZoomIn)
+                                    .on_hover_text(format!("{} · {}", file.name, file_size(file.bytes))).clicked() {
+                                    opened = Some(i);
+                                }
                             }
                             None => {
                                 attachment_view(ui, file, p, false);
@@ -6532,7 +6573,7 @@ fn user_message_bubble(
         row.min,
         egui::pos2(row.right(), bubble.bottom()),
     ));
-    bubble
+    (bubble, opened)
 }
 
 /// Pictures show as pictures (up to 240×170), other files as a tile.
@@ -6554,7 +6595,7 @@ fn file_size(bytes: usize) -> String {
         format!("{} КБ", (bytes / 1024).max(1))
     }
 }
-fn attachment_view(ui: &mut egui::Ui, file: &Attachment, p: Palette, removable: bool) -> bool {
+fn attachment_view(ui: &mut egui::Ui, file: &Attachment, p: Palette, removable: bool) -> (bool, bool) {
     // Allocate the whole tile before drawing; siblings never steal its text width.
     let width = 216_f32.min(ui.max_rect().width().max(120.));
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 64.), egui::Sense::hover());
@@ -6621,9 +6662,14 @@ fn attachment_view(ui: &mut egui::Ui, file: &Attachment, p: Palette, removable: 
             painter.rect_filled(close, 6., p.line);
         }
         design::icon(&painter, close.shrink(4.), Icon::Close, p.muted);
-        return r.on_hover_text("Убрать файл").clicked();
+        let remove = r.on_hover_text("Убрать файл").clicked();
+        let open = file.texture.is_some() && ui.interact(
+            egui::Rect::from_min_max(rect.min, egui::pos2(close.left(), rect.bottom())),
+            response.id.with("open-image"), egui::Sense::click()
+        ).on_hover_cursor(egui::CursorIcon::ZoomIn).on_hover_text("Открыть изображение").clicked();
+        return (remove, open);
     }
-    false
+    (false, false)
 }
 
 enum RowAction {
@@ -7347,7 +7393,7 @@ mod tests {
             let _=ctx.run(egui::RawInput{screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,Vec2::new(width,900.))),..Default::default()},|ctx| {
                 egui::CentralPanel::default().show(ctx,|ui| {
                     for text in ["привет","привет","Длинное сообщение с переносом на несколько строк, которое должно оставаться у того же правого края.","ок"] {
-                        let r=user_message_bubble(ui,text,&[],design::palette(false));if text=="привет"{assert!(r.width()<100.,"short bubble was {}px",r.width());}
+                        let (r,_)=user_message_bubble(ui,text,&[],design::palette(false));if text=="привет"{assert!(r.width()<100.,"short bubble was {}px",r.width());}
                         edges.push(r.right());ui.add_space(10.);
                     }
                 });

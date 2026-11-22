@@ -88,14 +88,7 @@ fn prepare(ctx: &egui::Context, name: String, img: DynamicImage) -> Result<Attac
     } else {
         img
     };
-    // Big enough for the preview in a message bubble; tiles scale it down.
-    let thumb = img.thumbnail(440, 320).into_rgba8();
-    let size = [thumb.width() as usize, thumb.height() as usize];
-    let texture = ctx.load_texture(
-        uuid::Uuid::new_v4().to_string(),
-        egui::ColorImage::from_rgba_unmultiplied(size, thumb.as_raw()),
-        egui::TextureOptions::LINEAR,
-    );
+    let texture = texture(ctx, &img, 440);
     let mut bytes = Cursor::new(Vec::new());
     img.write_to(&mut bytes, image::ImageFormat::Png)?;
     let mime = if bytes.get_ref().len() > 4 * 1024 * 1024 {
@@ -118,26 +111,44 @@ fn prepare(ctx: &egui::Context, name: String, img: DynamicImage) -> Result<Attac
     })
 }
 
+fn texture(ctx: &egui::Context, img: &DynamicImage, edge: u32) -> egui::TextureHandle {
+    let thumb = if img.width().max(img.height()) > edge {
+        img.thumbnail(edge, edge).into_rgba8()
+    } else {
+        img.to_rgba8()
+    };
+    ctx.load_texture(
+        uuid::Uuid::new_v4().to_string(),
+        egui::ColorImage::from_rgba_unmultiplied(
+            [thumb.width() as usize, thumb.height() as usize], thumb.as_raw()
+        ),
+        egui::TextureOptions::LINEAR,
+    )
+}
+
+/// The bridge bounds encoded history. Validate dimensions before allocating pixel buffers too.
+pub fn preview_texture(ctx: &egui::Context, data: &str, edge: u32) -> Option<egui::TextureHandle> {
+    if data.is_empty() || data.len() > 12 * 1024 * 1024 { return None; }
+    let bytes = STANDARD.decode(data).ok()?;
+    let reader = || ImageReader::new(Cursor::new(&bytes)).with_guessed_format().ok();
+    let (w, h) = reader()?.into_dimensions().ok()?;
+    if u64::from(w) * u64::from(h) > 24_000_000 || w.max(h) > 12000 { return None; }
+    let mut reader = reader()?;
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(128 * 1024 * 1024);
+    reader.limits(limits);
+    Some(texture(ctx, &reader.decode().ok()?, edge))
+}
+
 /// A picture from a saved conversation: preview only, it is never sent again.
 pub fn from_history(ctx: &egui::Context, image: &Value) -> Attachment {
-    let data = image["data"].as_str().unwrap_or("");
-    let decoded = STANDARD.decode(data).ok().and_then(|bytes| {
-        let img = image::load_from_memory(&bytes).ok()?;
-        Some((bytes.len(), img.thumbnail(440, 320).into_rgba8()))
-    });
-    let (bytes, texture) = match decoded {
-        Some((bytes, thumb)) => {
-            let size = [thumb.width() as usize, thumb.height() as usize];
-            let texture = ctx.load_texture(
-                uuid::Uuid::new_v4().to_string(),
-                egui::ColorImage::from_rgba_unmultiplied(size, thumb.as_raw()),
-                egui::TextureOptions::LINEAR,
-            );
-            (bytes, Some(texture))
-        }
-        None => (0, None),
-    };
-    Attachment { name: "Изображение".into(), texture, bytes, source: Value::Null }
+    let data = image["data"].as_str().unwrap_or_default();
+    Attachment {
+        name: image["name"].as_str().unwrap_or("Изображение").into(),
+        texture: preview_texture(ctx, data, 440),
+        bytes: data.trim_end_matches('=').len() * 3 / 4,
+        source: Value::Null,
+    }
 }
 
 #[cfg(test)]

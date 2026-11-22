@@ -1,6 +1,6 @@
 [package]
 name = "relay-desktop"
-version = "0.20.4"
+version = "0.20.5"
 edition = "2021"
 description = "A small native desktop and terminal client for Claude Code, Codex, AGY and API agents on your servers"
 license = "MIT"
